@@ -6,6 +6,7 @@ import android.hardware.usb.*
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Arrays
+import kotlin.concurrent.thread
 
 class PtpUsbConnection(
     private val connection: UsbDeviceConnection,
@@ -43,53 +44,74 @@ class PtpUsbConnection(
         val packet = createCommandPacket(PtpConstants.OP_OPEN_SESSION, 1)
         if (!sendPacket(packet)) return false
         val response = receiveResponseWithRetry()
-        return response?.responseCode == PtpConstants.RESP_OK || response?.responseCode == PtpConstants.RESP_SESSION_ALREADY_OPEN
+        val success = response?.responseCode == PtpConstants.RESP_OK || response?.responseCode == PtpConstants.RESP_SESSION_ALREADY_OPEN
+        
+        if (success) {
+            // One-time init: Ensure recording to card (0xD10C = 1)
+            thread {
+                synchronized(usbLock) {
+                    setDevicePropValue(0xD10C, 1, size = 1)
+                }
+            }
+        }
+        return success
     }
 
     fun capture(): Boolean = synchronized(usbLock) {
         drain()
         
-        // 0. Ensure camera is idle
-        if (!waitForReady(3000)) {
-            logger("Capture aborted: Camera Busy")
-            return false
+        // 1. Quick check if ready
+        logger("Checking if camera is ready...")
+        val readyPacket = createCommandPacket(PtpConstants.OP_NIKON_DEVICE_READY)
+        sendPacket(readyPacket)
+        var readyResp = receiveResponse()
+        
+        if (readyResp?.responseCode != PtpConstants.RESP_OK) {
+            logger("Camera reporting Busy (0x${Integer.toHexString(readyResp?.responseCode ?: 0)}), retrying...")
+            Thread.sleep(300)
+            sendPacket(readyPacket)
+            readyResp = receiveResponse()
+            if (readyResp?.responseCode != PtpConstants.RESP_OK) {
+                logger("Capture Refused: Camera Busy persistent")
+                return false
+            }
         }
         
-        // 1. Nikon Initiate Capture (0x90C0)
-        android.util.Log.d("PTP_TX", "COMMAND: Nikon Initiate Capture (0x90C0)")
-        var packet = createCommandPacket(PtpConstants.OP_NIKON_INITIATE_CAPTURE, 0xFFFFFFFF.toInt())
-        if (sendPacket(packet)) {
-            val response = receiveResponseWithRetry(10)
-            if (response?.responseCode == PtpConstants.RESP_OK) {
-                logger("Capture Triggered (0x90C0)")
-                
-                // CRITICAL: D300 needs time to process the image and generate events
-                Thread.sleep(1500) 
-                
-                // 2. Mandatory: Wait for camera to return to IDLE state after capture
-                // This clears the "PC" lock/Recording state
-                if (waitForReady(5000)) {
-                    logger("Camera back to Ready state")
+        // Check if we are in Bulb mode
+        val shVal = getDevicePropValue(PtpConstants.PROP_EXPOSURE_TIME)
+        val isBulb = shVal == 0xFFFFFFFF.toInt()
+        logger("Shutter state: 0x${Integer.toHexString(shVal).uppercase()}, isBulb=$isBulb")
+
+        // 2. Try Standard PTP (0x100E) first for BULB mode, or as fallback for others
+        if (isBulb) {
+            logger("Triggering Bulb Capture (Standard 0x100E)...")
+            val packet = createCommandPacket(PtpConstants.OP_INITIATE_CAPTURE, 0, 0)
+            if (sendPacket(packet)) {
+                val response = receiveResponseWithRetry(5)
+                if (response?.responseCode == PtpConstants.RESP_OK) {
+                    logger("Capture Triggered Successfully (0x100E)")
+                    Thread.sleep(300)
+                    clearEventsThoroughly()
+                    return true
                 }
-                
-                return true
+                logger("Bulb 0x100E failed: 0x${Integer.toHexString(response?.responseCode ?: 0)}")
             }
-            android.util.Log.d("PTP_RX", "Capture 0x90C0 failed: 0x${Integer.toHexString(response?.responseCode ?: 0)}")
         }
 
-        // 2. Fallback... (Same logic as above but simplified for space)
-        android.util.Log.d("PTP_TX", "COMMAND: Standard PTP Initiate Capture (0x100E)")
-        packet = createCommandPacket(PtpConstants.OP_INITIATE_CAPTURE, 0, 0)
+        // 3. Nikon Initiate Capture (0x90C0)
+        logger("Triggering Nikon Capture (0x90C0)...")
+        var packet = createCommandPacket(PtpConstants.OP_NIKON_INITIATE_CAPTURE, 0)
         if (sendPacket(packet)) {
-            val response = receiveResponseWithRetry(5)
+            val response = receiveResponseWithRetry(10) 
             if (response?.responseCode == PtpConstants.RESP_OK) {
-                logger("Capture Triggered (0x100E)")
-                Thread.sleep(1500)
-                waitForReady(5000)
+                logger("Capture Triggered Successfully (0x90C0)")
+                Thread.sleep(300)
+                clearEventsThoroughly() 
                 return true
             }
+            logger("Capture 0x90C0 failed: 0x${Integer.toHexString(response?.responseCode ?: 0)}")
         }
-        
+
         return false
     }
 
@@ -503,10 +525,11 @@ class PtpUsbConnection(
         // Clear buffer to avoid reading old data
         Arrays.fill(buffer.array(), 0.toByte())
 
-        val result = connection.bulkTransfer(ep, buffer.array(), 512, 2000)
+        // Increased timeout to 10s for slow D300 mechanical/write operations
+        val result = connection.bulkTransfer(ep, buffer.array(), 512, 10000)
         if (result < 12) {
-            if (result > 0) android.util.Log.w("PTP_RX", "Short packet: $result bytes")
-            return null
+             if (result > 0) android.util.Log.w("PTP_RX", "Short packet: $result bytes")
+             return null
         }
         val type = buffer.getShort(4).toInt()
         val code = buffer.getShort(6).toInt()
@@ -536,25 +559,17 @@ class PtpUsbConnection(
         return response?.responseCode == PtpConstants.RESP_OK
     }
 
-    private fun waitForReady(timeoutMs: Int): Boolean {
-        val start = System.currentTimeMillis()
-        while (System.currentTimeMillis() - start < timeoutMs) {
-            if (deviceReady()) return true
-            Thread.sleep(400)
-        }
-        return false
-    }
 
     private fun clearEventsThoroughly() {
-        // Repeatedly poll events until nothing is left
-        for (i in 0 until 8) {
+        // Efficient event clearing without forced sleeps between iterations
+        for (i in 0 until 10) {
             val packet = createCommandPacket(PtpConstants.OP_NIKON_GET_EVENT)
             if (sendPacket(packet)) {
-                val data = receiveData(4096)
+                val data = receiveData(2048) // Short timeout inside receiveData
                 receiveResponse()
+                // If no data returned, queue is likely empty
                 if (data == null || data.limit() <= 12) break 
             } else break
-            Thread.sleep(50)
         }
     }
 

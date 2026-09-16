@@ -805,10 +805,15 @@ class MainActivity : AppCompatActivity() {
                 log("Bulb Tool: Entering Bulb mode...")
                 // 1. Force Manual Mode
                 ptpConnection?.setDevicePropValue(PtpConstants.PROP_EXPOSURE_PROGRAM_MODE, 1, size = 2)
-                Thread.sleep(500)
+                Thread.sleep(300)
                 // 2. Set Shutter to Bulb
                 ptpConnection?.setShutterBulb()
-                Thread.sleep(500)
+                Thread.sleep(300)
+                // 3. Force Manual Focus (0x500A = 1) to ensure shutter triggers reliably
+                log("Bulb Tool: Forcing Manual Focus...")
+                ptpConnection?.setDevicePropValue(PtpConstants.PROP_FOCUS_MODE, 1, size = 2)
+                Thread.sleep(300)
+                
                 updateProperties()
             } catch (e: Exception) {
                 log("Bulb Setup Error: ${e.message}")
@@ -909,25 +914,41 @@ class MainActivity : AppCompatActivity() {
                 // START
                 lifecycleScope.launch(Dispatchers.IO) {
                     try {
-                        isPollingPaused = true // STOP POLLING
+                        isPollingPaused = true 
                         
-                        // 0. Auto-end Live View if running
+                        runOnUiThread {
+                            actionBtn.text = "WAITING..."
+                            actionBtn.isEnabled = false
+                            log("Bulb: Preparing Shutter...")
+                        }
+
+                        // Check focus mode - Log critical warning
+                        val focusMode = ptpConnection?.getDevicePropValue(PtpConstants.PROP_FOCUS_MODE) ?: -1
+                        if (focusMode != 1 && focusMode != -1) {
+                             runOnUiThread { log("WARNING: Camera not in MF mode. Shutter might FAIL.") }
+                        }
+
+                        // 0. Auto-end Live View
                         if (isLiveViewRunning) {
                             runOnUiThread { log("Bulb: Ending Live View...") }
                             isLiveViewRunning = false
                             ptpConnection?.endLiveView()
                             runOnUiThread { liveViewButton.text = "LV" }
-                            delay(2500)
+                            delay(1500)
                         }
 
-                        log("Bulb: Firing...")
+                        log("Bulb: Triggering capture...")
                         ptpConnection?.deviceReady()
-                        delay(500)
+                        delay(300)
                         
                         // Trigger Shutter
-                        if (!(ptpConnection?.capture() ?: false)) {
+                        val success = ptpConnection?.capture() ?: false
+                        if (!success) {
                             runOnUiThread { 
-                                android.widget.Toast.makeText(this@MainActivity, "Shutter Rejected!", android.widget.Toast.LENGTH_SHORT).show()
+                                log("ERROR: Shutter rejected. Check camera LCD/Busy.")
+                                android.widget.Toast.makeText(this@MainActivity, "Shutter Rejected! Check Camera Busy.", android.widget.Toast.LENGTH_LONG).show()
+                                actionBtn.text = "START EXPOSURE"
+                                actionBtn.isEnabled = true
                             }
                             isPollingPaused = false
                             return@launch
@@ -935,6 +956,7 @@ class MainActivity : AppCompatActivity() {
 
                         isExposing = true
                         runOnUiThread {
+                            actionBtn.isEnabled = true
                             actionBtn.text = "STOP"
                             actionBtn.setBackgroundColor(android.graphics.Color.RED)
                             circularProgress.visibility = android.view.View.VISIBLE

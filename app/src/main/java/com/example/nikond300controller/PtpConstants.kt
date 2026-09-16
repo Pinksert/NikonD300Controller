@@ -43,11 +43,12 @@ object PtpConstants {
     const val PROP_NIKON_LIVE_VIEW = 0x5013
 
     // NIKON specific codes
-    const val OP_NIKON_INITIATE_CAPTURE = 0x90C8
+    const val OP_NIKON_INITIATE_CAPTURE = 0x90C0
     const val OP_NIKON_START_LIVE_VIEW = 0x9201
     const val OP_NIKON_END_LIVE_VIEW = 0x9202
     const val OP_NIKON_GET_LIVE_VIEW_IMAGE = 0x9203
-    const val OP_NIKON_DEVICE_READY = 0x90C7
+    const val OP_NIKON_GET_EVENT = 0x90C7
+    const val OP_NIKON_DEVICE_READY = 0x90C8
     const val OP_NIKON_AF_AND_CAPTURE = 0x9207
     const val OP_NIKON_TERMINATE_CAPTURE = 0x9208
 }

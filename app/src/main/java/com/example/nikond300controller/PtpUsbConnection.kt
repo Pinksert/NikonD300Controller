@@ -5,6 +5,7 @@ import android.graphics.BitmapFactory
 import android.hardware.usb.*
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.Arrays
 
 class PtpUsbConnection(
     private val connection: UsbDeviceConnection,
@@ -47,28 +48,46 @@ class PtpUsbConnection(
 
     fun capture(): Boolean = synchronized(usbLock) {
         drain()
-        // 0. Nikon AF and Capture (0x9207) - This is the standard "press shutter button" command for Nikon
-        android.util.Log.d("PTP_TX", "COMMAND: Nikon AF and Capture (0x9207)")
-        var packet = createCommandPacket(PtpConstants.OP_NIKON_AF_AND_CAPTURE, 0xFFFFFFFF.toInt())
+        
+        // 0. Ensure camera is idle
+        if (!waitForReady(3000)) {
+            logger("Capture aborted: Camera Busy")
+            return false
+        }
+        
+        // 1. Nikon Initiate Capture (0x90C0)
+        android.util.Log.d("PTP_TX", "COMMAND: Nikon Initiate Capture (0x90C0)")
+        var packet = createCommandPacket(PtpConstants.OP_NIKON_INITIATE_CAPTURE, 0xFFFFFFFF.toInt())
         if (sendPacket(packet)) {
-            val response = receiveResponseWithRetry(3)
+            val response = receiveResponseWithRetry(10)
             if (response?.responseCode == PtpConstants.RESP_OK) {
-                logger("Capture Triggered (0x9207)")
+                logger("Capture Triggered (0x90C0)")
+                
+                // CRITICAL: D300 needs time to process the image and generate events
+                Thread.sleep(1500) 
+                
+                // 2. Mandatory: Wait for camera to return to IDLE state after capture
+                // This clears the "PC" lock/Recording state
+                if (waitForReady(5000)) {
+                    logger("Camera back to Ready state")
+                }
+                
                 return true
             }
-            android.util.Log.d("PTP_RX", "Capture 0x9207 failed: 0x${Integer.toHexString(response?.responseCode ?: 0)}")
+            android.util.Log.d("PTP_RX", "Capture 0x90C0 failed: 0x${Integer.toHexString(response?.responseCode ?: 0)}")
         }
 
-        // 1. Fallback to standard PTP Initiate Capture (0x100E)
+        // 2. Fallback... (Same logic as above but simplified for space)
         android.util.Log.d("PTP_TX", "COMMAND: Standard PTP Initiate Capture (0x100E)")
         packet = createCommandPacket(PtpConstants.OP_INITIATE_CAPTURE, 0, 0)
         if (sendPacket(packet)) {
-            val response = receiveResponseWithRetry(3)
+            val response = receiveResponseWithRetry(5)
             if (response?.responseCode == PtpConstants.RESP_OK) {
                 logger("Capture Triggered (0x100E)")
+                Thread.sleep(1500)
+                waitForReady(5000)
                 return true
             }
-            android.util.Log.d("PTP_RX", "Capture 0x100E failed: 0x${Integer.toHexString(response?.responseCode ?: 0)}")
         }
         
         return false
@@ -85,13 +104,15 @@ class PtpUsbConnection(
         drain()
         if (logDesc.isNotEmpty()) android.util.Log.d("PTP_TX_CMD", logDesc)
         
+        val finalSize = if (propCode == PtpConstants.PROP_NIKON_LIVE_VIEW) 1 else size
+        
         val packet = createCommandPacket(PtpConstants.OP_SET_DEVICE_PROP_VALUE, propCode)
         if (!sendPacket(packet)) {
             logger("Failed to send Command 0x1016 for Prop 0x${Integer.toHexString(propCode)}")
             return false
         }
         
-        val valBytes = when (size) {
+        val valBytes = when (finalSize) {
             1 -> byteArrayOf(value.toByte())
             2 -> {
                 val b = ByteBuffer.allocate(2).order(ByteOrder.LITTLE_ENDIAN)
@@ -162,10 +183,8 @@ class PtpUsbConnection(
         
         Thread.sleep(200)
 
-        // Send Nikon Device Ready
-        val readyPacket = createCommandPacket(PtpConstants.OP_NIKON_DEVICE_READY)
-        sendPacket(readyPacket)
-        receiveResponseWithRetry()
+        // Send Nikon Device Ready (Check 0x90C8)
+        deviceReady()
         Thread.sleep(100)
 
         // Start Live View command
@@ -187,7 +206,8 @@ class PtpUsbConnection(
         sendPacket(packet)
         receiveResponseWithRetry()
         
-        setDevicePropValue(PtpConstants.PROP_NIKON_LIVE_VIEW, 0, size = 2)
+        // CRITICAL: D300 property 0x5013 MUST be size=1 (UINT8)
+        setDevicePropValue(PtpConstants.PROP_NIKON_LIVE_VIEW, 0, size = 1)
         return true
     }
 
@@ -361,7 +381,8 @@ class PtpUsbConnection(
             skipArray(buffer, 2)
             val manufacturer = readString(buffer)
             val model = readString(buffer)
-            return "$manufacturer $model"
+            val simpleManufacturer = manufacturer.replace(" Corporation", "")
+            return "$simpleManufacturer $model"
         } catch (e: Exception) { return null }
     }
 
@@ -411,7 +432,12 @@ class PtpUsbConnection(
         val bytes = buffer.array()
         val len = buffer.limit()
         android.util.Log.d("PTP_TX", "Packet: ${bytesToHex(bytes, len)}")
-        return connection.bulkTransfer(ep, bytes, len, 2000) >= 0
+        val result = connection.bulkTransfer(ep, bytes, len, 2000)
+        if (result < 0) {
+             android.util.Log.e("PTP_USB", "Write failed: result=$result. Device may have disconnected.")
+             return false
+        }
+        return true
     }
 
     private fun receiveData(maxSize: Int = 4096): ByteBuffer? {
@@ -474,8 +500,14 @@ class PtpUsbConnection(
         
         val ep = inEndpoint ?: return null
         val buffer = ByteBuffer.allocate(512).order(ByteOrder.LITTLE_ENDIAN)
+        // Clear buffer to avoid reading old data
+        Arrays.fill(buffer.array(), 0.toByte())
+
         val result = connection.bulkTransfer(ep, buffer.array(), 512, 2000)
-        if (result < 12) return null
+        if (result < 12) {
+            if (result > 0) android.util.Log.w("PTP_RX", "Short packet: $result bytes")
+            return null
+        }
         val type = buffer.getShort(4).toInt()
         val code = buffer.getShort(6).toInt()
         android.util.Log.d("PTP_RX", "Response Code: 0x${Integer.toHexString(code).uppercase()}")
@@ -496,8 +528,34 @@ class PtpUsbConnection(
     fun deviceReady(): Boolean = synchronized(usbLock) {
         val packet = createCommandPacket(PtpConstants.OP_NIKON_DEVICE_READY)
         if (!sendPacket(packet)) return false
-        val response = receiveResponseWithRetry()
+        val response = receiveResponse()
+        
+        // Clear events every time we check ready to keep camera responsive
+        clearEventsThoroughly()
+        
         return response?.responseCode == PtpConstants.RESP_OK
+    }
+
+    private fun waitForReady(timeoutMs: Int): Boolean {
+        val start = System.currentTimeMillis()
+        while (System.currentTimeMillis() - start < timeoutMs) {
+            if (deviceReady()) return true
+            Thread.sleep(400)
+        }
+        return false
+    }
+
+    private fun clearEventsThoroughly() {
+        // Repeatedly poll events until nothing is left
+        for (i in 0 until 8) {
+            val packet = createCommandPacket(PtpConstants.OP_NIKON_GET_EVENT)
+            if (sendPacket(packet)) {
+                val data = receiveData(4096)
+                receiveResponse()
+                if (data == null || data.limit() <= 12) break 
+            } else break
+            Thread.sleep(50)
+        }
     }
 
     fun close() {

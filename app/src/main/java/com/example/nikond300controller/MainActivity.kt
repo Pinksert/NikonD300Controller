@@ -96,6 +96,9 @@ class MainActivity : AppCompatActivity() {
     private var ptpConnection: PtpUsbConnection? = null
     private var isLiveViewRunning = false
     private var isConnected = false
+    private var isPollingPaused = false
+    private var bulbOriginalMode: Int = 1
+    private var bulbOriginalShutter: Int = 0
 
     private var bulbJob: Job? = null
     private var bulbSheet: BottomSheetDialog? = null
@@ -165,26 +168,36 @@ class MainActivity : AppCompatActivity() {
         captureButton.setOnClickListener {
             thread {
                 try {
-                    // 1. Auto-end Live View if running (Critical for Nikon DSLRs)
+                    isPollingPaused = true // STOP ALL POLLING
+                    
+                    // 1. Auto-end Live View if running (Extra safe for D300)
                     if (isLiveViewRunning) {
-                        log("Closing LV for capture...")
-                        stopLiveView()
-                        Thread.sleep(800)
+                        runOnUiThread { log("Bulb/Capture: Stopping LV...") }
+                        isLiveViewRunning = false
+                        ptpConnection?.endLiveView()
+                        runOnUiThread { liveViewButton.text = "LV" }
+                        Thread.sleep(2500) // D300 mirror flip is VERY slow
                     }
 
                     log("Firing shutter...")
                     val success = ptpConnection?.capture() ?: false
+                    
                     runOnUiThread { 
-                        log("Capture: ${if (success) "Success" else "Failed"}")
+                        log("Capture: ${if (success) "Success" else "Failed (Check Busy/Focus)"}")
                         if (!success) {
-                            android.widget.Toast.makeText(this@MainActivity, "Capture Failed (Check Logcat)", android.widget.Toast.LENGTH_SHORT).show()
+                            android.widget.Toast.makeText(this@MainActivity, "Capture Failed", android.widget.Toast.LENGTH_SHORT).show()
                         }
                     }
+                    
                     if (success) {
-                        Thread.sleep(1500)
-                        updateProperties()
+                        Thread.sleep(3000) // Wait for card write
                     }
-                } catch (e: Exception) { runOnUiThread { log("Capture Error: ${e.message}") } }
+                } catch (e: Exception) { 
+                    runOnUiThread { log("Capture Error: ${e.message}") } 
+                } finally {
+                    isPollingPaused = false // RESUME POLLING
+                    thread { updateProperties() }
+                }
             }
         }
 
@@ -408,8 +421,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateProperties() {
+        if (!isConnected || isPollingPaused) return // Skip if paused
         thread {
             try {
+                if (isPollingPaused) return@thread
                 // Shortened delays for faster UI response
                 Thread.sleep(100)
                 val iso = ptpConnection?.getDevicePropValue(PtpConstants.PROP_EXPOSURE_INDEX) ?: -999999
@@ -423,6 +438,8 @@ class MainActivity : AppCompatActivity() {
                 val focalLengthRaw = ptpConnection?.getDevicePropValue(PtpConstants.PROP_FOCAL_LENGTH) ?: -999999
                 Thread.sleep(50)
                 val biasRaw = ptpConnection?.getDevicePropValue(PtpConstants.PROP_EXPOSURE_BIAS_COMPENSATION) ?: -999999
+                Thread.sleep(50)
+                val focusModeRaw = ptpConnection?.getDevicePropValue(PtpConstants.PROP_FOCUS_MODE) ?: -999999
                 Thread.sleep(50)
                 val supportedAps = ptpConnection?.getDevicePropSupportedValues(PtpConstants.PROP_F_NUMBER)
                 
@@ -508,14 +525,24 @@ class MainActivity : AppCompatActivity() {
                         val ev = b / 1000.0
                         if (ev > 0) "+%.1f".format(ev) else "%.1f".format(ev)
                     } else "--"
+
+                    val focusStr = when (focusModeRaw) {
+                        1 -> "MF"
+                        2, 0x8001, 0x8010 -> "AF-S"
+                        3, 0x8002, 0x8011 -> "AF-C"
+                        4, 0x8003, 0x8012 -> "AF-A"
+                        0x8004 -> "AF-F"
+                        -999999 -> "--"
+                        else -> "0x${Integer.toHexString(focusModeRaw).uppercase()}"
+                    }
                     
                     // Update button texts with actual values (Shortened to fit small screens)
                     isoButton.text = if (iso != -999999 && iso > 0) "$iso" else "ISO"
                     apertureButton.text = apStr
                     shutterButton.text = shStr
                     
-                    // Update main info text with Mode, Focal Length and Bias
-                    propText.text = "Mode: $modeStr | Focal: $focalStr | Bias: $biasStr"
+                    // Update main info text with Mode, Focus, Focal Length and Bias
+                    propText.text = "Mode: $modeStr | Focus: $focusStr | Focal: $focalStr | Bias: $biasStr"
                     
                     // Update dynamic aperture list if camera provided descriptor
                     if (supportedAps != null && supportedAps.isNotEmpty()) {
@@ -709,6 +736,7 @@ class MainActivity : AppCompatActivity() {
             var lastAp = -1
             var lastSh = -1
             var lastMode = -1
+            var lastFocus = -1
 
             var consecutiveFailures = 0
 
@@ -732,13 +760,15 @@ class MainActivity : AppCompatActivity() {
                         val ap = ptpConnection?.getDevicePropValue(PtpConstants.PROP_F_NUMBER) ?: -999999
                         val sh = ptpConnection?.getDevicePropValue(PtpConstants.PROP_EXPOSURE_TIME) ?: -999999
                         val mode = ptpConnection?.getDevicePropValue(PtpConstants.PROP_EXPOSURE_PROGRAM_MODE) ?: -999999
+                        val focus = ptpConnection?.getDevicePropValue(PtpConstants.PROP_FOCUS_MODE) ?: -999999
 
-                        if (focal != lastFocal || iso != lastIso || ap != lastAp || sh != lastSh || mode != lastMode) {
+                        if (focal != lastFocal || iso != lastIso || ap != lastAp || sh != lastSh || mode != lastMode || focus != lastFocus) {
                             lastFocal = focal
                             if (iso != -999999) lastIso = iso
                             if (ap != -999999) lastAp = ap
                             if (sh != -999999) lastSh = sh
                             if (mode != -999999) lastMode = mode
+                            if (focus != -999999) lastFocus = focus
                             updateProperties()
                         }
                     }
@@ -764,6 +794,29 @@ class MainActivity : AppCompatActivity() {
         val sheet = BottomSheetDialog(this)
         bulbSheet = sheet
         
+        // AUTO-ENTER BULB MODE
+        thread {
+            try {
+                isPollingPaused = true
+                log("Bulb Tool: Saving current settings...")
+                bulbOriginalMode = ptpConnection?.getDevicePropValue(PtpConstants.PROP_EXPOSURE_PROGRAM_MODE) ?: 1
+                bulbOriginalShutter = ptpConnection?.getDevicePropValue(PtpConstants.PROP_EXPOSURE_TIME) ?: 0
+                
+                log("Bulb Tool: Entering Bulb mode...")
+                // 1. Force Manual Mode
+                ptpConnection?.setDevicePropValue(PtpConstants.PROP_EXPOSURE_PROGRAM_MODE, 1, size = 2)
+                Thread.sleep(500)
+                // 2. Set Shutter to Bulb
+                ptpConnection?.setShutterBulb()
+                Thread.sleep(500)
+                updateProperties()
+            } catch (e: Exception) {
+                log("Bulb Setup Error: ${e.message}")
+            } finally {
+                isPollingPaused = false
+            }
+        }
+
         val container = android.widget.LinearLayout(this).apply {
             orientation = android.widget.LinearLayout.VERTICAL
             setPadding(60, 60, 40, 80)
@@ -855,72 +908,63 @@ class MainActivity : AppCompatActivity() {
             if (!isExposing) {
                 // START
                 lifecycleScope.launch(Dispatchers.IO) {
-                    // 0. Auto-end Live View if running (Required for Capture on D300)
-                    if (isLiveViewRunning) {
-                        runOnUiThread { log("Ending Live View for Bulb...") }
-                        stopLiveView()
-                        delay(800)
-                    }
-
-                    log("Bulb: Activating...")
-                    // Ensure M mode
-                    ptpConnection?.setDevicePropValue(PtpConstants.PROP_EXPOSURE_PROGRAM_MODE, 1, size = 2)
-                    delay(200)
-                    
-                    val bulbSuccess = ptpConnection?.setShutterBulb() ?: false
-                    if (!bulbSuccess) {
-                        runOnUiThread { 
-                            android.widget.Toast.makeText(this@MainActivity, "Failed to activate Bulb mode", android.widget.Toast.LENGTH_SHORT).show()
-                            log("Bulb activation failed (Parameter Error)")
+                    try {
+                        isPollingPaused = true // STOP POLLING
+                        
+                        // 0. Auto-end Live View if running
+                        if (isLiveViewRunning) {
+                            runOnUiThread { log("Bulb: Ending Live View...") }
+                            isLiveViewRunning = false
+                            ptpConnection?.endLiveView()
+                            runOnUiThread { liveViewButton.text = "LV" }
+                            delay(2500)
                         }
-                        return@launch
-                    }
-                    
-                    ptpConnection?.deviceReady()
-                    delay(300)
-                    
-                    if (!(ptpConnection?.capture() ?: false)) {
-                        runOnUiThread { 
-                            android.widget.Toast.makeText(this@MainActivity, "Capture Command Rejected (Is Focus Locked?)", android.widget.Toast.LENGTH_LONG).show()
-                            log("Shutter trigger failed. Note: D300 may reject capture if AF cannot lock or in certain LV states.")
-                        }
-                        return@launch
-                    }
 
-                    isExposing = true
-                    runOnUiThread {
-                        actionBtn.text = "STOP"
-                        actionBtn.setBackgroundColor(android.graphics.Color.RED)
-                        circularProgress.visibility = android.view.View.VISIBLE
-                        decBtn.isEnabled = false
-                        incBtn.isEnabled = false
-                        presetsScroll.visibility = android.view.View.GONE
-                    }
-
-                    val totalMs = selectedSeconds * 1000L
-                    val startTime = System.currentTimeMillis()
-                    
-                    bulbJob = lifecycleScope.launch(Dispatchers.Main) {
-                        try {
-                            while (isActive) {
-                                val elapsed = System.currentTimeMillis() - startTime
-                                val remaining = totalMs - elapsed
-                                
-                                if (remaining <= 0) {
-                                    countdownText.text = "00s"
-                                    circularProgress.progress = 1000
-                                    break
-                                }
-                                
-                                val remSec = (remaining / 1000).toInt()
-                                countdownText.text = String.format(java.util.Locale.US, "%02ds", remSec)
-                                circularProgress.progress = (1000 * (totalMs - remaining) / totalMs).toInt()
-                                
-                                delay(100)
+                        log("Bulb: Firing...")
+                        ptpConnection?.deviceReady()
+                        delay(500)
+                        
+                        // Trigger Shutter
+                        if (!(ptpConnection?.capture() ?: false)) {
+                            runOnUiThread { 
+                                android.widget.Toast.makeText(this@MainActivity, "Shutter Rejected!", android.widget.Toast.LENGTH_SHORT).show()
                             }
-                        } finally {
-                            stopBulbExposure()
+                            isPollingPaused = false
+                            return@launch
                         }
+
+                        isExposing = true
+                        runOnUiThread {
+                            actionBtn.text = "STOP"
+                            actionBtn.setBackgroundColor(android.graphics.Color.RED)
+                            circularProgress.visibility = android.view.View.VISIBLE
+                            decBtn.isEnabled = false
+                            incBtn.isEnabled = false
+                            presetsScroll.visibility = android.view.View.GONE
+                        }
+
+                        val totalMs = selectedSeconds * 1000L
+                        val startTime = System.currentTimeMillis()
+                        
+                        bulbJob = lifecycleScope.launch(Dispatchers.Main) {
+                            try {
+                                while (isActive) {
+                                    val elapsed = System.currentTimeMillis() - startTime
+                                    val remaining = totalMs - elapsed
+                                    if (remaining <= 0) break
+                                    
+                                    val remSec = (remaining / 1000).toInt()
+                                    countdownText.text = String.format(java.util.Locale.US, "%02ds", remSec)
+                                    circularProgress.progress = (1000 * (totalMs - remaining) / totalMs).toInt()
+                                    delay(100)
+                                }
+                            } finally {
+                                stopBulbExposure()
+                            }
+                        }
+                    } catch (e: Exception) {
+                        runOnUiThread { log("Bulb Error: ${e.message}") }
+                        isPollingPaused = false
                     }
                 }
             } else {
@@ -933,18 +977,41 @@ class MainActivity : AppCompatActivity() {
         sheet.setOnDismissListener { 
             if (isExposing) bulbJob?.cancel()
             bulbSheet = null
+            
+            // RESTORE ORIGINAL SETTINGS
+            thread {
+                try {
+                    isPollingPaused = true
+                    log("Bulb Tool: Restoring original settings...")
+                    ptpConnection?.setDevicePropValue(PtpConstants.PROP_EXPOSURE_PROGRAM_MODE, bulbOriginalMode, size = 2)
+                    Thread.sleep(500)
+                    ptpConnection?.setDevicePropValue(PtpConstants.PROP_EXPOSURE_TIME, bulbOriginalShutter, size = 4)
+                    Thread.sleep(500)
+                    updateProperties()
+                } catch (e: Exception) {
+                    log("Restore Error: ${e.message}")
+                } finally {
+                    isPollingPaused = false
+                }
+            }
         }
         sheet.show()
     }
 
     private fun stopBulbExposure() {
         lifecycleScope.launch(Dispatchers.IO) {
-            log("Ending Bulb Exposure...")
-            ptpConnection?.terminateCapture()
-            delay(500)
-            updateProperties()
-            runOnUiThread {
-                bulbSheet?.dismiss()
+            try {
+                log("Ending Bulb Exposure...")
+                ptpConnection?.terminateCapture()
+                delay(1000)
+                updateProperties()
+                runOnUiThread {
+                    bulbSheet?.dismiss()
+                }
+            } catch (e: Exception) {
+                // logged or handled
+            } finally {
+                isPollingPaused = false // RESUME POLLING
             }
         }
     }
@@ -987,14 +1054,13 @@ class MainActivity : AppCompatActivity() {
                     startBtn.text = "STOP"
                     thread {
                         try {
+                            isPollingPaused = true // STOP POLLING
                             log("Starting Aperture Bracketing...")
-                            // Ensure we are in M or A mode
-                            val currentMode = ptpConnection?.getDevicePropValue(PtpConstants.PROP_EXPOSURE_PROGRAM_MODE) ?: 1
-                            if (currentMode != 1 && currentMode != 3) {
-                                runOnUiThread { log("Switching to Aperture Priority (A)...") }
-                                ptpConnection?.setDevicePropValue(PtpConstants.PROP_EXPOSURE_PROGRAM_MODE, 3, size = 2)
-                                Thread.sleep(500)
-                            }
+                            
+                            // Force Mode A
+                            runOnUiThread { log("Bracketing: Switching to Mode A...") }
+                            ptpConnection?.setDevicePropValue(PtpConstants.PROP_EXPOSURE_PROGRAM_MODE, 3, size = 2)
+                            Thread.sleep(1500) 
 
                             dynamicApertures.forEachIndexed { index, pair ->
                                 if (!isRunning) return@forEachIndexed
@@ -1006,10 +1072,10 @@ class MainActivity : AppCompatActivity() {
                                 // Set Aperture
                                 val success = ptpConnection?.setDevicePropValue(PtpConstants.PROP_F_NUMBER, pair.first, size = 2) ?: false
                                 if (success) {
-                                    Thread.sleep(300)
+                                    Thread.sleep(800)
                                     ptpConnection?.capture()
                                     // Wait for write and mirror
-                                    Thread.sleep(1500) 
+                                    Thread.sleep(3500) 
                                 } else {
                                     runOnUiThread { log("Failed to set ${pair.second}, skipping...") }
                                 }
@@ -1027,6 +1093,9 @@ class MainActivity : AppCompatActivity() {
                                 startBtn.text = "Start Bracketing"
                                 isRunning = false
                             }
+                        } finally {
+                            isPollingPaused = false // RESUME
+                            thread { updateProperties() }
                         }
                     }
                 } else {
@@ -1091,6 +1160,7 @@ class MainActivity : AppCompatActivity() {
                     
                     thread {
                         try {
+                            isPollingPaused = true // STOP POLLING
                             log("Starting Exposure Bracketing...")
                             // 1. Get current shutter index
                             val currentShVal = ptpConnection?.getDevicePropValue(PtpConstants.PROP_EXPOSURE_TIME) ?: -999999
@@ -1101,15 +1171,11 @@ class MainActivity : AppCompatActivity() {
                                 return@thread
                             }
 
-                            // Calculate sequence: e.g. center, -step, +step
-                            // For 3 shots: -step, center, +step
                             val sequence = mutableListOf<Int>()
                             val half = count / 2
                             for (i in -half..half) {
                                 val idx = startIndex + (i * step)
-                                if (idx in shutters.indices) {
-                                    sequence.add(idx)
-                                }
+                                if (idx in shutters.indices) sequence.add(idx)
                             }
 
                             sequence.forEachIndexed { i, shIdx ->
@@ -1120,9 +1186,11 @@ class MainActivity : AppCompatActivity() {
                                 // Set Shutter
                                 val success = ptpConnection?.setDevicePropValue(PtpConstants.PROP_EXPOSURE_TIME, pair.first, size = 4) ?: false
                                 if (success) {
-                                    Thread.sleep(300)
+                                    Thread.sleep(800)
                                     ptpConnection?.capture()
-                                    Thread.sleep(1500)
+                                    Thread.sleep(4000) // D300 write time
+                                } else {
+                                    runOnUiThread { log("Failed to set ${pair.second}, skipping...") }
                                 }
                             }
 
@@ -1140,6 +1208,9 @@ class MainActivity : AppCompatActivity() {
                                 startBtn.text = "Start Exp Bracket"
                                 isRunning = false
                             }
+                        } finally {
+                            isPollingPaused = false // RESUME
+                            thread { updateProperties() }
                         }
                     }
                 } else {

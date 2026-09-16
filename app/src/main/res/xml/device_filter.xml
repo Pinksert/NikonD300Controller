@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 尼康 Vendor ID (0x04B0 -> 十进制 1200) -->
+    <usb-device vendor-id="1200" />
+</resources>

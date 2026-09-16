@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">D300 Controller</string>
+    <string name="btn_connect">Connect Camera</string>
+    <string name="status_disconnected">Status: Disconnected</string>
+    <string name="status_connected">Status: Connected to %s</string>
+    <string name="info_label">Camera Info:</string>
+</resources>

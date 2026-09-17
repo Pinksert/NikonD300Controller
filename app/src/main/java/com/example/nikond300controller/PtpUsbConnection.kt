@@ -6,7 +6,6 @@ import android.hardware.usb.*
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Arrays
-import kotlin.concurrent.thread
 
 class PtpUsbConnection(
     private val connection: UsbDeviceConnection,
@@ -44,96 +43,68 @@ class PtpUsbConnection(
         val packet = createCommandPacket(PtpConstants.OP_OPEN_SESSION, 1)
         if (!sendPacket(packet)) return false
         val response = receiveResponseWithRetry()
-        val success = response?.responseCode == PtpConstants.RESP_OK || response?.responseCode == PtpConstants.RESP_SESSION_ALREADY_OPEN
-        
-        if (success) {
-            // One-time init: Ensure recording to card (0xD10C = 1)
-            thread {
-                synchronized(usbLock) {
-                    setDevicePropValue(0xD10C, 1, size = 1)
-                }
-            }
-        }
-        return success
+        return response?.responseCode == PtpConstants.RESP_OK || response?.responseCode == PtpConstants.RESP_SESSION_ALREADY_OPEN
     }
 
-    fun capture(): Boolean = synchronized(usbLock) {
+    fun capture(): Int = synchronized(usbLock) {
         drain()
-        
-        // 1. Quick check if ready
-        logger("Checking if camera is ready...")
-        val readyPacket = createCommandPacket(PtpConstants.OP_NIKON_DEVICE_READY)
-        sendPacket(readyPacket)
-        var readyResp = receiveResponse()
-        
-        if (readyResp?.responseCode != PtpConstants.RESP_OK) {
-            logger("Camera reporting Busy (0x${Integer.toHexString(readyResp?.responseCode ?: 0)}), retrying...")
-            Thread.sleep(300)
-            sendPacket(readyPacket)
-            readyResp = receiveResponse()
-            if (readyResp?.responseCode != PtpConstants.RESP_OK) {
-                logger("Capture Refused: Camera Busy persistent")
-                return false
-            }
-        }
-        
-        // Check if we are in Bulb mode
-        val shVal = getDevicePropValue(PtpConstants.PROP_EXPOSURE_TIME)
-        val isBulb = shVal == 0xFFFFFFFF.toInt()
-        logger("Shutter state: 0x${Integer.toHexString(shVal).uppercase()}, isBulb=$isBulb")
-
-        // 2. Try Standard PTP (0x100E) first for BULB mode, or as fallback for others
-        if (isBulb) {
-            logger("Triggering Bulb Capture (Standard 0x100E)...")
-            val packet = createCommandPacket(PtpConstants.OP_INITIATE_CAPTURE, 0, 0)
-            if (sendPacket(packet)) {
-                val response = receiveResponseWithRetry(5)
-                if (response?.responseCode == PtpConstants.RESP_OK) {
-                    logger("Capture Triggered Successfully (0x100E)")
-                    Thread.sleep(300)
-                    clearEventsThoroughly()
-                    return true
-                }
-                logger("Bulb 0x100E failed: 0x${Integer.toHexString(response?.responseCode ?: 0)}")
-            }
-        }
-
-        // 3. Nikon Initiate Capture (0x90C0)
-        logger("Triggering Nikon Capture (0x90C0)...")
-        var packet = createCommandPacket(PtpConstants.OP_NIKON_INITIATE_CAPTURE, 0)
-        if (sendPacket(packet)) {
-            val response = receiveResponseWithRetry(10) 
-            if (response?.responseCode == PtpConstants.RESP_OK) {
-                logger("Capture Triggered Successfully (0x90C0)")
-                Thread.sleep(300)
-                clearEventsThoroughly() 
-                return true
-            }
-            logger("Capture 0x90C0 failed: 0x${Integer.toHexString(response?.responseCode ?: 0)}")
-        }
-
-        return false
+        return executeSingleCaptureAttempt(PtpConstants.OP_NIKON_INITIATE_CAPTURE, 0)
     }
 
-    fun terminateCapture(): Boolean = synchronized(usbLock) {
-        val packet = createCommandPacket(PtpConstants.OP_NIKON_TERMINATE_CAPTURE, 0)
-        if (!sendPacket(packet)) return false
-        val response = receiveResponseWithRetry()
-        return response?.responseCode == PtpConstants.RESP_OK
+    fun clearPipe() {
+        inEndpoint?.let { connection.clearHalt(it) }
+        outEndpoint?.let { connection.clearHalt(it) }
+    }
+
+    private fun UsbDeviceConnection.clearHalt(endpoint: UsbEndpoint): Boolean {
+        return controlTransfer(
+            UsbConstants.USB_DIR_OUT or UsbConstants.USB_TYPE_STANDARD or 0x02, // 0x02 is USB_RECIP_ENDPOINT
+            0x01, // CLEAR_FEATURE
+            0x00, // ENDPOINT_HALT
+            endpoint.address,
+            null,
+            0,
+            1000
+        ) >= 0
+    }
+
+    private fun executeSingleCaptureAttempt(opCode: Int, vararg params: Int): Int {
+        val opName = "0x${Integer.toHexString(opCode).uppercase()}"
+        logger("Triggering Capture ($opName)...")
+        
+        val packet = createCommandPacket(opCode, *params)
+        if (!sendPacket(packet)) return -1
+        
+        val response = receiveResponseWithRetry(5)
+        
+        if (response == null || response.responseCode == 0xA002 || response.responseCode == 0xA008) {
+            val codeHex = if (response != null) "0x${Integer.toHexString(response.responseCode).uppercase()}" else "TIMEOUT"
+            logger("Capture Rejected: $codeHex. Rescuing pipe...")
+            clearPipe()
+            return response?.responseCode ?: -1
+        }
+
+        val code = response.responseCode
+        if (code == PtpConstants.RESP_OK) {
+            logger("Capture Triggered Successfully ($opName)")
+            Thread.sleep(300)
+            clearEventsThoroughly()
+            return code
+        } else {
+            val codeHex = "0x${Integer.toHexString(code).uppercase()}"
+            if (code == PtpConstants.RESP_NIKON_HARDWARE_ERROR) {
+                logger("Capture $opName failed: Focus Not Locked ($codeHex)")
+            } else {
+                logger("Capture $opName failed: $codeHex")
+            }
+            clearPipe()
+            logger("Pipe Rescue: ClearHalt executed on input/output endpoints.")
+            return code
+        }
     }
 
     fun setDevicePropValue(propCode: Int, value: Int, size: Int = 2, logDesc: String = ""): Boolean = synchronized(usbLock) {
-        drain()
-        if (logDesc.isNotEmpty()) android.util.Log.d("PTP_TX_CMD", logDesc)
-        
         val finalSize = if (propCode == PtpConstants.PROP_NIKON_LIVE_VIEW) 1 else size
-        
-        val packet = createCommandPacket(PtpConstants.OP_SET_DEVICE_PROP_VALUE, propCode)
-        if (!sendPacket(packet)) {
-            logger("Failed to send Command 0x1016 for Prop 0x${Integer.toHexString(propCode)}")
-            return false
-        }
-        
         val valBytes = when (finalSize) {
             1 -> byteArrayOf(value.toByte())
             2 -> {
@@ -148,23 +119,54 @@ class PtpUsbConnection(
             }
             else -> byteArrayOf(value.toByte())
         }
-        
-        val data = createDataPacket(PtpConstants.OP_SET_DEVICE_PROP_VALUE, valBytes)
-        if (!sendPacket(data)) {
-            logger("Failed to send Data for Prop 0x${Integer.toHexString(propCode)}")
+
+        val valStr = "0x${Integer.toHexString(value).uppercase()}"
+        val bytesHex = bytesToHex(valBytes, valBytes.size)
+        android.util.Log.d("PTP_TX_PROP", "Set Prop 0x${Integer.toHexString(propCode).uppercase()} to value $valStr (Hex: $bytesHex)")
+
+        for (i in 0 until 3) {
+            drain()
+            if (logDesc.isNotEmpty()) android.util.Log.d("PTP_TX_CMD", logDesc)
+
+            val packet = createCommandPacket(PtpConstants.OP_SET_DEVICE_PROP_VALUE, propCode)
+            if (!sendPacket(packet)) {
+                logger("Failed to send Command 0x1016 for Prop 0x${Integer.toHexString(propCode).uppercase()}")
+                return false
+            }
+
+            val data = createDataPacket(PtpConstants.OP_SET_DEVICE_PROP_VALUE, valBytes)
+            if (!sendPacket(data)) {
+                logger("Failed to send Data for Prop 0x${Integer.toHexString(propCode).uppercase()}")
+                return false
+            }
+
+            val response = receiveResponse(3000)
+
+            if (response?.responseCode == PtpConstants.RESP_OK) {
+                logger("Prop 0x${Integer.toHexString(propCode).uppercase()} set to $valStr: Success")
+                return true
+            }
+
+            if (response == null || response.responseCode == 0xA008 || response.responseCode == PtpConstants.RESP_DEVICE_BUSY) {
+                val resHex = if (response != null) "0x${Integer.toHexString(response.responseCode).uppercase()}" else "TIMEOUT"
+                logger("Prop 0x${Integer.toHexString(propCode).uppercase()} $resHex. Triggering Recovery Sequence...")
+                
+                deviceReady()
+                drain()
+                Thread.sleep(1000)
+                
+                // Dummy Read to clear bus
+                getDevicePropValue(propCode)
+                Thread.sleep(500)
+                
+                continue
+            }
+
+            val resHex = "0x${Integer.toHexString(response.responseCode).uppercase()}"
+            logger("Prop 0x${Integer.toHexString(propCode).uppercase()} set to $valStr: Failed ($resHex)")
             return false
         }
-        
-        val response = receiveResponseWithRetry()
-        if (response == null) {
-            logger("Timeout waiting for Response (Prop 0x${Integer.toHexString(propCode)})")
-            return false
-        }
-        
-        val success = response.responseCode == PtpConstants.RESP_OK
-        val resHex = "0x${Integer.toHexString(response.responseCode).uppercase()}"
-        logger("Prop 0x${Integer.toHexString(propCode)} set to $value: ${if(success) "Success" else "Failed ($resHex)"}")
-        return success
+        return false
     }
 
     fun getDevicePropValue(propCode: Int): Int = synchronized(usbLock) {
@@ -182,7 +184,7 @@ class PtpUsbConnection(
             return when (data.remaining()) {
                 1 -> data.get().toInt() and 0xFF
                 2 -> data.short.toLong().toInt() and 0xFFFF
-                4 -> data.int // Will return -1 for 0xFFFFFFFF (Bulb)
+                4 -> data.int // Will return -1 for 0xFFFFFFFF
                 else -> -999999
             }
         } catch (e: Exception) {
@@ -358,35 +360,6 @@ class PtpUsbConnection(
         return parseDeviceInfo(data)
     }
 
-    fun setShutterBulb(): Boolean = synchronized(usbLock) {
-        val bulbVal = 0xFFFFFFFF.toInt()
-        
-        // Priority 1: Nikon-specific property 0xD100
-        // D300 / D700 era cameras often strictly require this for software bulb
-        if (setDevicePropValue(PtpConstants.PROP_NIKON_SHUTTER_SPEED, bulbVal, size = 4, logDesc = "Try Nikon Shutter Prop 0xD100")) {
-            return true
-        }
-
-        // Priority 2: Standard Prop 0x500D
-        if (setDevicePropValue(PtpConstants.PROP_EXPOSURE_TIME, bulbVal, size = 4, logDesc = "Try Bulb Standard 0x500D")) {
-            return true
-        }
-
-        // Priority 3: Scan Enum List
-        val supported = getDevicePropSupportedValues(PtpConstants.PROP_EXPOSURE_TIME)
-        if (supported != null && supported.isNotEmpty()) {
-            val lastValue = supported.last()
-            if (lastValue != bulbVal) {
-                logger("Found custom bulb value in enum: 0x${Integer.toHexString(lastValue).uppercase()}")
-                if (setDevicePropValue(PtpConstants.PROP_EXPOSURE_TIME, lastValue, size = 4, logDesc = "Try Bulb from Enum")) {
-                    return true
-                }
-            }
-        }
-
-        return false
-    }
-
     private fun parseDeviceInfo(buffer: ByteBuffer): String? {
         try {
             buffer.position(12)
@@ -497,23 +470,13 @@ class PtpUsbConnection(
         return result
     }
 
-    private fun receiveResponseWithRetry(retries: Int = 3): PtpResponse? {
-        for (i in 0 until retries) {
-            val response = receiveResponse()
-            if (response != null) {
-                if (response.responseCode == PtpConstants.RESP_DEVICE_BUSY) {
-                    logger("Device Busy, retrying... (${i + 1}/$retries)")
-                    Thread.sleep(300)
-                    continue
-                }
-                return response
-            }
-            Thread.sleep(200)
-        }
-        return null
+    private fun receiveResponseWithRetry(retries: Int = 3, retryDelayMs: Long = 800, timeoutMs: Int = 2000): PtpResponse? {
+        // Simplified: return response immediately even if Busy/Timeout
+        // so higher level transaction retry can take over if needed.
+        return receiveResponse(timeoutMs)
     }
 
-    private fun receiveResponse(): PtpResponse? {
+    private fun receiveResponse(timeoutMs: Int = 2000): PtpResponse? {
         if (lastResponse != null) {
             val res = lastResponse
             lastResponse = null
@@ -522,19 +485,44 @@ class PtpUsbConnection(
         
         val ep = inEndpoint ?: return null
         val buffer = ByteBuffer.allocate(512).order(ByteOrder.LITTLE_ENDIAN)
-        // Clear buffer to avoid reading old data
-        Arrays.fill(buffer.array(), 0.toByte())
+        
+        val start = System.currentTimeMillis()
+        for (i in 0 until 5) {
+            Arrays.fill(buffer.array(), 0.toByte())
+            buffer.clear()
 
-        // Increased timeout to 10s for slow D300 mechanical/write operations
-        val result = connection.bulkTransfer(ep, buffer.array(), 512, 10000)
-        if (result < 12) {
-             if (result > 0) android.util.Log.w("PTP_RX", "Short packet: $result bytes")
-             return null
+            val result = connection.bulkTransfer(ep, buffer.array(), 512, timeoutMs)
+            val elapsed = System.currentTimeMillis() - start
+            
+            if (result < 12) {
+                 if (result > 0) android.util.Log.w("PTP_RX", "Short packet: $result bytes after ${elapsed}ms")
+                 else if (result < 0) android.util.Log.w("PTP_RX", "Bulk transfer error: $result after ${elapsed}ms")
+                 return null
+            }
+
+            // Robustly parse the 12-byte header
+            val length = buffer.getInt(0)
+            val type = buffer.getShort(4).toInt() and 0xFFFF
+            val code = buffer.getShort(6).toInt() and 0xFFFF
+            val transactionId = buffer.getInt(8)
+
+            if (length < 12 || length > 1024 * 1024) {
+                android.util.Log.e("PTP_RX", "Invalid PTP packet length: $length")
+                return null
+            }
+
+            if (type == PtpConstants.PACKET_TYPE_RESPONSE) {
+                android.util.Log.d("PTP_RX", "Response 0x${Integer.toHexString(code).uppercase()} in ${elapsed}ms")
+                return PtpResponse(type, code, transactionId)
+            } else if (type == PtpConstants.PACKET_TYPE_EVENT) {
+                android.util.Log.d("PTP_RX", "Event 0x${Integer.toHexString(code).uppercase()} received at ${elapsed}ms")
+            } else {
+                android.util.Log.w("PTP_RX", "Type 0x${Integer.toHexString(type).uppercase()} packet at ${elapsed}ms")
+                return PtpResponse(type, code, transactionId)
+            }
         }
-        val type = buffer.getShort(4).toInt()
-        val code = buffer.getShort(6).toInt()
-        android.util.Log.d("PTP_RX", "Response Code: 0x${Integer.toHexString(code).uppercase()}")
-        return PtpResponse(type, code, buffer.getInt(8))
+        android.util.Log.w("PTP_RX", "Response loop exhausted without receiving a valid Response packet.")
+        return null
     }
 
     fun drain() {
@@ -559,8 +547,15 @@ class PtpUsbConnection(
         return response?.responseCode == PtpConstants.RESP_OK
     }
 
+    fun afDrive(): Boolean = synchronized(usbLock) {
+        val packet = createCommandPacket(PtpConstants.OP_NIKON_AF_DRIVE)
+        if (!sendPacket(packet)) return false
+        val response = receiveResponse(5000)
+        return response?.responseCode == PtpConstants.RESP_OK
+    }
 
-    private fun clearEventsThoroughly() {
+
+    fun clearEventsThoroughly() {
         // Efficient event clearing without forced sleeps between iterations
         for (i in 0 until 10) {
             val packet = createCommandPacket(PtpConstants.OP_NIKON_GET_EVENT)

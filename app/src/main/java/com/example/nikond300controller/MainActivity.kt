@@ -20,13 +20,25 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.bottomsheet.BottomSheetDialog
+import com.google.android.material.button.MaterialButton
+import android.content.res.ColorStateList
+import android.graphics.Color
+import android.graphics.Typeface
+import android.view.Gravity
+import android.view.View
+import android.view.inputmethod.EditorInfo
+import android.widget.LinearLayout
+import android.widget.ProgressBar
+import android.util.Log
 import kotlinx.coroutines.*
 import kotlin.concurrent.thread
+import kotlin.jvm.Volatile
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var usbManager: UsbManager
     private lateinit var statusText: TextView
+    private lateinit var batteryText: TextView
     private lateinit var infoText: TextView
     private lateinit var propText: TextView
     private lateinit var connectButton: Button
@@ -36,7 +48,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var isoButton: Button
     private lateinit var apertureButton: Button
     private lateinit var shutterButton: Button
-    private lateinit var bulbToolButton: Button
+    private lateinit var focusButton: Button
+    private lateinit var wbButton: Button
+    private lateinit var isoAutoButton: Button
     private lateinit var apBracketingButton: Button
     private lateinit var expBracketingButton: Button
     
@@ -51,6 +65,11 @@ class MainActivity : AppCompatActivity() {
     private var currentIsoIndex = 0
     private var currentApIndex = 0
     private var currentShIndex = 0
+
+    @Volatile
+    private var activeShutterProp = PtpConstants.PROP_EXPOSURE_TIME
+    @Volatile
+    private var shutterPropSize = 4 // Default for 0x500D
 
     private val isos = arrayOf(
         100, 125, 160, 200, 250, 320, 400, 500, 640, 800, 1000, 1250, 1600, 2000, 2500, 3200, 4000, 5000, 6400
@@ -70,38 +89,54 @@ class MainActivity : AppCompatActivity() {
 
     private var dynamicApertures: Array<Pair<Int, String>> = apertures
     private var isPollingActive = false
+    
+    @Volatile
+    private var cameraSupportedShutters: IntArray? = null
+    @Volatile
+    private var shutterMap: Map<Int, String> = emptyMap()
 
-    private val shutters = arrayOf(
-        1 to "1/8000", 125.toByte().toInt() to "1/6400", 156.toByte().toInt() to "1/5000",
-        2 to "1/4000", 3 to "1/3200", 4 to "1/2500",
-        5 to "1/2000", 6 to "1/1600", 8 to "1/1250",
-        10 to "1/1000", 12 to "1/800", 15 to "1/640",
-        20 to "1/500", 25 to "1/400", 31 to "1/320",
-        40 to "1/250", 50 to "1/200", 62 to "1/160",
-        80 to "1/125", 100 to "1/100", 125 to "1/80",
-        166 to "1/60", 200 to "1/50", 250 to "1/40",
-        333 to "1/30", 400 to "1/25", 500 to "1/20",
-        666 to "1/15", 769 to "1/13", 1000 to "1/10",
-        1250 to "1/8", 1666 to "1/6", 2000 to "1/5",
-        2500 to "1/4", 3333 to "1/3", 4000 to "1/2.5",
-        5000 to "1/2", 6250 to "1/1.6", 7692 to "1/1.3",
-        10000 to "1s", 13000 to "1.3s", 16000 to "1.6s",
-        20000 to "2s", 25000 to "2.5s", 30000 to "3s",
-        40000 to "4s", 50000 to "5s", 60000 to "6s",
-        80000 to "8s", 100000 to "10s", 130000 to "13s",
-        150000 to "15s", 200000 to "20s", 250000 to "25s",
-        300000 to "30s", 0xFFFFFFFF.toInt() to "Bulb"
-    )
+    private fun getShutterString(valCode: Int): String {
+        if (valCode == -1) return "Bulb"
+        if (valCode == -2) return "Flash"
+
+        return if (activeShutterProp == PtpConstants.PROP_NIKON_SHUTTER_SPEED) {
+            // Nikon bit-packed format (0xD100)
+            val numerator = (valCode shr 16) and 0xFFFF
+            val denominator = valCode and 0xFFFF
+            when {
+                denominator == 1 -> "${numerator}\""
+                numerator == 1 -> "1/$denominator"
+                numerator > denominator -> String.format("%.1f\"", numerator.toDouble() / denominator)
+                else -> "$numerator/$denominator"
+            }
+        } else {
+            // Standard PTP Exposure Time (0x500D) - Units of 1/10000s
+            val seconds = valCode / 10000
+            val rest = valCode % 10000
+            if (seconds > 0) {
+                if (rest > 0) {
+                    val frac = Math.round(1.0 / (rest * 0.0001))
+                    "${seconds}\" 1/$frac"
+                } else {
+                    "${seconds}\""
+                }
+            } else if (rest > 0) {
+                "1/${Math.round(1.0 / (rest * 0.0001))}"
+            } else {
+                "0\""
+            }
+        }
+    }
+
+    private var shutters = emptyArray<Pair<Int, String>>()
+
 
     private var ptpConnection: PtpUsbConnection? = null
     private var isLiveViewRunning = false
+    @Volatile
     private var isConnected = false
+    @Volatile
     private var isPollingPaused = false
-    private var bulbOriginalMode: Int = 1
-    private var bulbOriginalShutter: Int = 0
-
-    private var bulbJob: Job? = null
-    private var bulbSheet: BottomSheetDialog? = null
 
     private val ACTION_USB_PERMISSION = "com.example.nikond300controller.USB_PERMISSION"
 
@@ -141,8 +176,10 @@ class MainActivity : AppCompatActivity() {
 
         usbManager = getSystemService(USB_SERVICE) as UsbManager
         statusText = findViewById(R.id.statusText)
+        batteryText = findViewById(R.id.batteryText)
         infoText = findViewById(R.id.infoText)
         propText = findViewById(R.id.propText)
+        propText.text = "Focus: -- | Focal: -- | Bias: --"
         connectButton = findViewById(R.id.connectButton)
         captureButton = findViewById(R.id.captureButton)
         modeButton = findViewById(R.id.modeButton)
@@ -150,7 +187,9 @@ class MainActivity : AppCompatActivity() {
         isoButton = findViewById(R.id.isoButton)
         apertureButton = findViewById(R.id.apertureButton)
         shutterButton = findViewById(R.id.shutterButton)
-        bulbToolButton = findViewById(R.id.bulbButton)
+        focusButton = findViewById(R.id.focusButton)
+        wbButton = findViewById(R.id.wbButton)
+        isoAutoButton = findViewById(R.id.isoAutoButton)
         apBracketingButton = findViewById(R.id.apBracketingButton)
         expBracketingButton = findViewById(R.id.expBracketingButton)
         
@@ -172,20 +211,64 @@ class MainActivity : AppCompatActivity() {
                     
                     // 1. Auto-end Live View if running (Extra safe for D300)
                     if (isLiveViewRunning) {
-                        runOnUiThread { log("Bulb/Capture: Stopping LV...") }
+                        runOnUiThread { log("Capture: Stopping LV...") }
                         isLiveViewRunning = false
                         ptpConnection?.endLiveView()
                         runOnUiThread { liveViewButton.text = "LV" }
                         Thread.sleep(2500) // D300 mirror flip is VERY slow
                     }
 
+                    // Check Focus Mode for AF-S or AF-C (and AF-A)
+                    val focusMode = ptpConnection?.getDevicePropValue(PtpConstants.PROP_FOCUS_MODE) ?: -1
+                    val afModes = listOf(2, 3, 4, 0x8001, 0x8002, 0x8003, 0x8010, 0x8011, 0x8012)
+                    if (focusMode in afModes) {
+                        runOnUiThread { log("Auto-focusing...") }
+                        val afSuccess = ptpConnection?.afDrive() ?: false
+                        if (!afSuccess) {
+                            runOnUiThread {
+                                log("AF Failed: Cannot trigger shutter without focus lock.")
+                                android.widget.Toast.makeText(this@MainActivity, "AF Failed: Cannot trigger shutter without focus lock.", android.widget.Toast.LENGTH_SHORT).show()
+                            }
+                            return@thread // Abort the capture sequence immediately
+                        }
+                        
+                        runOnUiThread { log("AF finished. Waiting for camera to settle...") }
+                        var settled = false
+                        for (i in 1..5) {
+                            if (ptpConnection?.deviceReady() == true) {
+                                settled = true
+                                break
+                            }
+                            runOnUiThread { log("Camera busy, waiting...") }
+                            Thread.sleep(400)
+                        }
+                        Thread.sleep(200)
+                    }
+
                     log("Firing shutter...")
-                    val success = ptpConnection?.capture() ?: false
+                    var responseCode = ptpConnection?.capture() ?: -1
+
+                    // Improve capture execution for "Busy" codes (0xA008 or 0x2002)
+                    if (responseCode == 0xA008 || responseCode == PtpConstants.RESP_DEVICE_BUSY) {
+                        runOnUiThread { log("Capture reported Busy. Automated retry in 1s...") }
+                        Thread.sleep(1000)
+                        ptpConnection?.clearPipe()
+                        responseCode = ptpConnection?.capture() ?: -1
+                    }
+
+                    val success = responseCode == PtpConstants.RESP_OK
                     
                     runOnUiThread { 
-                        log("Capture: ${if (success) "Success" else "Failed (Check Busy/Focus)"}")
-                        if (!success) {
-                            android.widget.Toast.makeText(this@MainActivity, "Capture Failed", android.widget.Toast.LENGTH_SHORT).show()
+                        if (success) {
+                            log("Capture: Success")
+                        } else {
+                            if (responseCode == PtpConstants.RESP_NIKON_HARDWARE_ERROR) {
+                                log("Capture Failed: Focus not locked (Camera Blocked).")
+                                android.widget.Toast.makeText(this@MainActivity, "Capture Failed: Focus not locked (Camera Blocked).", android.widget.Toast.LENGTH_LONG).show()
+                            } else {
+                                log("Capture: Failed (Check Busy/Focus)")
+                                android.widget.Toast.makeText(this@MainActivity, "Capture Rejected: Camera Busy or Out of Focus.", android.widget.Toast.LENGTH_SHORT).show()
+                            }
                         }
                     }
                     
@@ -342,8 +425,77 @@ class MainActivity : AppCompatActivity() {
             if (isLiveViewRunning) stopLiveView() else startLiveView()
         }
 
-        bulbToolButton.setOnClickListener {
-            showBulbBottomSheet()
+        wbButton.setOnClickListener { view ->
+            val popup = android.widget.PopupMenu(this, view)
+            val wbModes = arrayOf(
+                2 to "Auto",
+                4 to "Daylight",
+                5 to "Incandescent",
+                6 to "Fluorescent",
+                7 to "Flash",
+                32784 to "Cloudy",
+                32785 to "Shade"
+            )
+            wbModes.forEachIndexed { index, pair ->
+                popup.menu.add(0, index, index, pair.second)
+            }
+            popup.setOnMenuItemClickListener { item ->
+                val itemId = item.itemId
+                if (itemId >= 0 && itemId < wbModes.size) {
+                    setWhiteBalance(wbModes[itemId].first, wbModes[itemId].second)
+                }
+                true
+            }
+            popup.show()
+        }
+
+        isoAutoButton.setOnClickListener {
+            thread {
+                try {
+                    isPollingPaused = true
+                    log("Toggling ISO Auto...")
+                    val currentAuto = ptpConnection?.getDevicePropValue(PtpConstants.PROP_NIKON_ISO_AUTO) ?: 0
+                    val nextVal = if (currentAuto == 1) 0 else 1
+                    val success = ptpConnection?.setDevicePropValue(PtpConstants.PROP_NIKON_ISO_AUTO, nextVal, size = 1) ?: false
+                    
+                        runOnUiThread {
+                            log("ISO Auto: ${if (nextVal == 1) "ON" else "OFF"}")
+                        }
+                } catch (e: Exception) {
+                    runOnUiThread { log("ISO Auto Error: ${e.message}") }
+                } finally {
+                    isPollingPaused = false
+                    updateProperties()
+                }
+            }
+        }
+
+        focusButton.setOnClickListener {
+            thread {
+                try {
+                    isPollingPaused = true
+                    // Wait for any pending polling traffic to clear
+                    Thread.sleep(300)
+                    
+                    log("AF: Dispatching drive command...")
+                    val startTime = System.nanoTime()
+                    
+                    val success = ptpConnection?.afDrive() ?: false
+                    
+                    val endTime = System.nanoTime()
+                    val overheadMs = (endTime - startTime) / 1_000_000.0
+                    
+                    runOnUiThread {
+                        val resultText = if (success) "Focus Locked" else "AF Failed/Timeout"
+                        log("AF Status: $resultText")
+                        log("Time Overhead: ${String.format("%.2f", overheadMs)}ms")
+                    }
+                } catch (e: Exception) {
+                    runOnUiThread { log("AF Execution Error: ${e.message}") }
+                } finally {
+                    isPollingPaused = false
+                }
+            }
         }
 
         apBracketingButton.setOnClickListener {
@@ -369,8 +521,10 @@ class MainActivity : AppCompatActivity() {
             isoButton.isEnabled = isConnected
             apertureButton.isEnabled = isConnected
             shutterButton.isEnabled = isConnected
+            focusButton.isEnabled = isConnected
+            wbButton.isEnabled = isConnected
+            isoAutoButton.isEnabled = isConnected
             liveViewButton.isEnabled = isConnected
-            bulbToolButton.isEnabled = isConnected
             apBracketingButton.isEnabled = isConnected
             expBracketingButton.isEnabled = isConnected
             
@@ -431,7 +585,7 @@ class MainActivity : AppCompatActivity() {
                 Thread.sleep(50)
                 val aperture = ptpConnection?.getDevicePropValue(PtpConstants.PROP_F_NUMBER) ?: -999999
                 Thread.sleep(50)
-                val shutter = ptpConnection?.getDevicePropValue(PtpConstants.PROP_EXPOSURE_TIME) ?: -999999
+                val shutter = ptpConnection?.getDevicePropValue(activeShutterProp) ?: -999999
                 Thread.sleep(50)
                 val mode = ptpConnection?.getDevicePropValue(PtpConstants.PROP_EXPOSURE_PROGRAM_MODE) ?: -999999
                 Thread.sleep(50)
@@ -441,9 +595,48 @@ class MainActivity : AppCompatActivity() {
                 Thread.sleep(50)
                 val focusModeRaw = ptpConnection?.getDevicePropValue(PtpConstants.PROP_FOCUS_MODE) ?: -999999
                 Thread.sleep(50)
+                val stdBattery = ptpConnection?.getDevicePropValue(PtpConstants.PROP_BATTERY_LEVEL) ?: -999999
+                Thread.sleep(50)
+                val nikonBattery = ptpConnection?.getDevicePropValue(PtpConstants.PROP_NIKON_BATTERY_LEVEL) ?: -999999
+                Thread.sleep(50)
+                val wb = ptpConnection?.getDevicePropValue(PtpConstants.PROP_WHITE_BALANCE) ?: -999999
+                Thread.sleep(50)
+                val isoAuto = ptpConnection?.getDevicePropValue(PtpConstants.PROP_NIKON_ISO_AUTO) ?: -999999
+                Thread.sleep(50)
+
+                val batteryLevel = if (stdBattery >= nikonBattery) stdBattery else nikonBattery
+                
                 val supportedAps = ptpConnection?.getDevicePropSupportedValues(PtpConstants.PROP_F_NUMBER)
                 
                 runOnUiThread {
+                    if (batteryLevel != -999999) {
+                        batteryText.text = "$batteryLevel%"
+                        // Color coding battery level
+                        batteryText.setTextColor(when {
+                            batteryLevel > 50 -> android.graphics.Color.parseColor("#2E7D32") // Green
+                            batteryLevel > 20 -> android.graphics.Color.parseColor("#F57C00") // Orange
+                            else -> android.graphics.Color.RED
+                        })
+                    } else {
+                        batteryText.text = "--%"
+                    }
+
+                    wbButton.text = when(wb) {
+                        2 -> "Auto"
+                        4 -> "Daylight"
+                        5 -> "Incand"
+                        6 -> "Fluor"
+                        7 -> "Flash"
+                        0x8010 -> "Cloudy"
+                        0x8011 -> "Shade"
+                        else -> "WB"
+                    }
+
+                    isoAutoButton.text = "ISO Auto"
+                    if (isoAuto != -999999) {
+                        isoAutoButton.setBackgroundColor(if (isoAuto == 1) android.graphics.Color.parseColor("#4CAF50") else android.graphics.Color.parseColor("#757575"))
+                    }
+
                     val modeStr = when (mode) {
                         1 -> "M"
                         2 -> "P"
@@ -453,69 +646,7 @@ class MainActivity : AppCompatActivity() {
                     }
                     val apStr = if (aperture != -999999) "f/${aperture/100.0}" else "--"
                     val shStr = if (shutter != -999999) {
-                        when (shutter) {
-                            1 -> "1/8000"
-                            125.toByte().toInt() -> "1/6400"
-                            156.toByte().toInt() -> "1/5000"
-                            2 -> "1/4000"
-                            3 -> "1/3200"
-                            4 -> "1/2500"
-                            5 -> "1/2000"
-                            6 -> "1/1600"
-                            8 -> "1/1250"
-                            10 -> "1/1000"
-                            12 -> "1/800"
-                            15 -> "1/640"
-                            20 -> "1/500"
-                            25 -> "1/400"
-                            31 -> "1/320"
-                            40 -> "1/250"
-                            50 -> "1/200"
-                            62 -> "1/160"
-                            80 -> "1/125"
-                            100 -> "1/100"
-                            125 -> "1/80"
-                            166 -> "1/60"
-                            200 -> "1/50"
-                            250 -> "1/40"
-                            333 -> "1/30"
-                            400 -> "1/25"
-                            500 -> "1/20"
-                            666 -> "1/15"
-                            769 -> "1/13"
-                            1000 -> "1/10"
-                            1250 -> "1/8"
-                            1666 -> "1/6"
-                            2000 -> "1/5"
-                            2500 -> "1/4"
-                            3333 -> "1/3"
-                            4000 -> "1/2.5"
-                            5000 -> "1/2"
-                            6250 -> "1/1.6"
-                            7692 -> "1/1.3"
-                            10000 -> "1s"
-                            13000 -> "1.3s"
-                            16000 -> "1.6s"
-                            20000 -> "2s"
-                            25000 -> "2.5s"
-                            30000 -> "3s"
-                            40000 -> "4s"
-                            50000 -> "5s"
-                            60000 -> "6s"
-                            80000 -> "8s"
-                            100000 -> "10s"
-                            130000 -> "13s"
-                            150000 -> "15s"
-                            200000 -> "20s"
-                            250000 -> "25s"
-                            300000 -> "30s"
-                            0xFFFFFFFF.toInt() -> "Bulb"
-                            else -> {
-                                if (shutter in 1..9999) "1/${Math.round(10000.0 / shutter)}"
-                                else if (shutter >= 10000) "${shutter / 10000}s"
-                                else "Bulb" // Fallback for 0xFFFFFFFF
-                            }
-                        }
+                        shutterMap[shutter] ?: getShutterString(shutter)
                     } else "--"
                     
                     val focalStr = if (focalLengthRaw != -999999 && focalLengthRaw > 0) "${focalLengthRaw / 100}mm" else "--"
@@ -540,9 +671,10 @@ class MainActivity : AppCompatActivity() {
                     isoButton.text = if (iso != -999999 && iso > 0) "$iso" else "ISO"
                     apertureButton.text = apStr
                     shutterButton.text = shStr
+                    modeButton.text = "Mode: $modeStr"
                     
-                    // Update main info text with Mode, Focus, Focal Length and Bias
-                    propText.text = "Mode: $modeStr | Focus: $focusStr | Focal: $focalStr | Bias: $biasStr"
+                    // Update main info text with Focus, Focal Length and Bias
+                    propText.text = "Focus: $focusStr | Focal: $focalStr | Bias: $biasStr"
                     
                     // Update dynamic aperture list if camera provided descriptor
                     if (supportedAps != null && supportedAps.isNotEmpty()) {
@@ -621,6 +753,29 @@ class MainActivity : AppCompatActivity() {
             try {
                 if (ptpConnection?.openSession() == true) {
                     isConnected = true
+                    
+                    // Shutter Property Discovery
+                    val supportedShuttersD100 = ptpConnection?.getDevicePropSupportedValues(PtpConstants.PROP_NIKON_SHUTTER_SPEED)
+                    if (supportedShuttersD100 != null && supportedShuttersD100.isNotEmpty()) {
+                        activeShutterProp = PtpConstants.PROP_NIKON_SHUTTER_SPEED
+                        shutterPropSize = 4
+                        cameraSupportedShutters = supportedShuttersD100
+                        runOnUiThread { log("Shutter: Using Nikon Prop (0xD100)") }
+                    } else {
+                        activeShutterProp = PtpConstants.PROP_EXPOSURE_TIME
+                        shutterPropSize = 4
+                        cameraSupportedShutters = ptpConnection?.getDevicePropSupportedValues(PtpConstants.PROP_EXPOSURE_TIME)
+                        runOnUiThread { log("Shutter: Using Standard Prop (0x500D)") }
+                    }
+
+                    if (cameraSupportedShutters != null) {
+                        val hexString = cameraSupportedShutters?.joinToString(", ") { "0x${Integer.toHexString(it).uppercase()}" }
+                        Log.d("D300_PROP", "Supported Shutters: $hexString")
+                        
+                        shutterMap = cameraSupportedShutters!!.associateWith { getShutterString(it) }
+                        shutters = cameraSupportedShutters!!.map { it to getShutterString(it) }.toTypedArray()
+                    }
+
                     updateButtonStates()
                     runOnUiThread { log("Ready.") }
                     val deviceInfo = ptpConnection?.getDeviceInfo()
@@ -644,8 +799,6 @@ class MainActivity : AppCompatActivity() {
     private fun disconnect() {
         isLiveViewRunning = false
         isPollingActive = false
-        bulbJob?.cancel()
-        runOnUiThread { bulbSheet?.dismiss() }
         thread {
             ptpConnection?.close()
             ptpConnection = null
@@ -653,6 +806,7 @@ class MainActivity : AppCompatActivity() {
             updateButtonStates()
             runOnUiThread {
                 statusText.text = "Status: Disconnected"
+                batteryText.text = "--%"
                 log("Disconnected")
             }
         }
@@ -689,38 +843,36 @@ class MainActivity : AppCompatActivity() {
     private fun setShutter(value: Int, name: String) {
         thread {
             try {
-                if (value == 0xFFFFFFFF.toInt()) {
-                    log("Switching to Manual Mode for Bulb...")
-                    val modeSuccess = ptpConnection?.setDevicePropValue(PtpConstants.PROP_EXPOSURE_PROGRAM_MODE, 1, size = 2, logDesc = "Setting ExposureMode to M (0x0001)") ?: false
-                    if (!modeSuccess) {
-                        runOnUiThread { log("Failed to switch to M mode. Aborting Bulb.") }
-                        return@thread
-                    }
-                    Thread.sleep(300)
-                    
-                    log("Setting Shutter to Bulb...")
-                    val bulbSuccess = ptpConnection?.setShutterBulb() ?: false
-                    if (bulbSuccess) {
-                        Thread.sleep(100)
-                        ptpConnection?.deviceReady()
-                        runOnUiThread { log("Set Shutter to Bulb: Success") }
-                    } else {
-                        runOnUiThread { log("Set Shutter to Bulb: Failed (Is the dial on M?)") }
-                    }
-                } else {
-                    log("Setting Shutter to $name...")
-                    val success = ptpConnection?.setDevicePropValue(PtpConstants.PROP_EXPOSURE_TIME, value, size = 4, logDesc = "Setting ShutterSpeed to $name (Val: $value)") ?: false
-                    
-                    // For Nikon, sending DeviceReady after a critical property change helps UI sync
-                    if (success) {
-                        Thread.sleep(100)
-                        ptpConnection?.deviceReady()
-                    }
-
-                    runOnUiThread { log("Set Shutter: ${if (success) "Success" else "Failed"}") }
+                log("Setting Shutter to $name...")
+                
+                val success = ptpConnection?.setDevicePropValue(activeShutterProp, value, size = shutterPropSize, logDesc = "Setting ShutterSpeed to $name (Val: $value)") ?: false
+                
+                // For Nikon, sending DeviceReady after a critical property change helps UI sync
+                if (success) {
+                    Thread.sleep(100)
+                    ptpConnection?.deviceReady()
                 }
+
+                runOnUiThread { log("Set Shutter: ${if (success) "Success" else "Failed"}") }
             } catch (e: Exception) {
                 runOnUiThread { log("Set Shutter Error: ${e.message}") }
+            }
+            Thread.sleep(400)
+            updateProperties()
+        }
+    }
+
+    private fun setWhiteBalance(value: Int, name: String) {
+        thread {
+            try {
+                log("Setting WB to $name...")
+                val success = ptpConnection?.setDevicePropValue(PtpConstants.PROP_WHITE_BALANCE, value, size = 2) ?: false
+                if (success) {
+                    ptpConnection?.deviceReady()
+                }
+                runOnUiThread { log("Set WB: ${if (success) "Success" else "Failed"}") }
+            } catch (e: Exception) {
+                runOnUiThread { log("Set WB Error: ${e.message}") }
             }
             Thread.sleep(400)
             updateProperties()
@@ -737,10 +889,16 @@ class MainActivity : AppCompatActivity() {
             var lastSh = -1
             var lastMode = -1
             var lastFocus = -1
+            var lastBatteryStd = -1
+            var lastBatteryNikon = -1
 
             var consecutiveFailures = 0
 
             while (isPollingActive && isConnected) {
+                if (isPollingPaused) {
+                    Thread.sleep(1000)
+                    continue
+                }
                 try {
                     // Poll focal length as a basic heartbeat
                     val focal = ptpConnection?.getDevicePropValue(PtpConstants.PROP_FOCAL_LENGTH) ?: -999999
@@ -761,8 +919,18 @@ class MainActivity : AppCompatActivity() {
                         val sh = ptpConnection?.getDevicePropValue(PtpConstants.PROP_EXPOSURE_TIME) ?: -999999
                         val mode = ptpConnection?.getDevicePropValue(PtpConstants.PROP_EXPOSURE_PROGRAM_MODE) ?: -999999
                         val focus = ptpConnection?.getDevicePropValue(PtpConstants.PROP_FOCUS_MODE) ?: -999999
+                        val batteryStd = ptpConnection?.getDevicePropValue(PtpConstants.PROP_BATTERY_LEVEL) ?: -999999
+                        val batteryNikon = ptpConnection?.getDevicePropValue(PtpConstants.PROP_NIKON_BATTERY_LEVEL) ?: -999999
 
-                        if (focal != lastFocal || iso != lastIso || ap != lastAp || sh != lastSh || mode != lastMode || focus != lastFocus) {
+                        if (focal != lastFocal || iso != lastIso || ap != lastAp || sh != lastSh || mode != lastMode || focus != lastFocus || 
+                            batteryStd != lastBatteryStd || batteryNikon != lastBatteryNikon) {
+                            
+                            if (batteryStd != lastBatteryStd || batteryNikon != lastBatteryNikon) {
+                                runOnUiThread { log("Battery Levels - Standard (0x5001): $batteryStd, Nikon (0xD1B3): $batteryNikon") }
+                                lastBatteryStd = batteryStd
+                                lastBatteryNikon = batteryNikon
+                            }
+
                             lastFocal = focal
                             if (iso != -999999) lastIso = iso
                             if (ap != -999999) lastAp = ap
@@ -790,340 +958,154 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun showBulbBottomSheet() {
-        val sheet = BottomSheetDialog(this)
-        bulbSheet = sheet
-        
-        // AUTO-ENTER BULB MODE
-        thread {
-            try {
-                isPollingPaused = true
-                log("Bulb Tool: Saving current settings...")
-                bulbOriginalMode = ptpConnection?.getDevicePropValue(PtpConstants.PROP_EXPOSURE_PROGRAM_MODE) ?: 1
-                bulbOriginalShutter = ptpConnection?.getDevicePropValue(PtpConstants.PROP_EXPOSURE_TIME) ?: 0
-                
-                log("Bulb Tool: Entering Bulb mode...")
-                // 1. Force Manual Mode
-                ptpConnection?.setDevicePropValue(PtpConstants.PROP_EXPOSURE_PROGRAM_MODE, 1, size = 2)
-                Thread.sleep(300)
-                // 2. Set Shutter to Bulb
-                ptpConnection?.setShutterBulb()
-                Thread.sleep(300)
-                // 3. Force Manual Focus (0x500A = 1) to ensure shutter triggers reliably
-                log("Bulb Tool: Forcing Manual Focus...")
-                ptpConnection?.setDevicePropValue(PtpConstants.PROP_FOCUS_MODE, 1, size = 2)
-                Thread.sleep(300)
-                
-                updateProperties()
-            } catch (e: Exception) {
-                log("Bulb Setup Error: ${e.message}")
-            } finally {
-                isPollingPaused = false
-            }
-        }
-
-        val container = android.widget.LinearLayout(this).apply {
-            orientation = android.widget.LinearLayout.VERTICAL
-            setPadding(60, 60, 40, 80)
-            background = android.graphics.drawable.ColorDrawable(android.graphics.Color.WHITE)
-        }
-
-        // 1. Progress & Countdown
-        val progressBox = android.widget.FrameLayout(this).apply {
-            layoutParams = android.widget.LinearLayout.LayoutParams(-1, 400)
-        }
-        
-        // Using standard ProgressBar for simplicity in code-only UI, or FrameLayout overlay
-        val circularProgress = android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleLarge).apply {
-            isIndeterminate = false
-            max = 1000
-            progress = 0
-            visibility = android.view.View.GONE
-        }
-        
-        val countdownText = android.widget.TextView(this).apply {
-            text = "Ready"
-            textSize = 48f
-            typeface = android.graphics.Typeface.MONOSPACE
-            gravity = android.view.Gravity.CENTER
-        }
-        
-        progressBox.addView(circularProgress, android.widget.FrameLayout.LayoutParams(300, 300, android.view.Gravity.CENTER))
-        progressBox.addView(countdownText, android.widget.FrameLayout.LayoutParams(-1, -1, android.view.Gravity.CENTER))
-        container.addView(progressBox)
-
-        // 2. Stepper (- 10s +)
-        var selectedSeconds = 10
-        val stepperLayout = android.widget.LinearLayout(this).apply {
-            orientation = android.widget.LinearLayout.HORIZONTAL
-            gravity = android.view.Gravity.CENTER
-            setPadding(0, 40, 0, 40)
-        }
-        
-        val decBtn = android.widget.Button(this).apply { text = "-" }
-        val secondsText = android.widget.TextView(this).apply { 
-            text = "${selectedSeconds}s"
-            textSize = 24f
-            setPadding(40, 0, 40, 0)
-        }
-        val incBtn = android.widget.Button(this).apply { text = "+" }
-        
-        stepperLayout.addView(decBtn)
-        stepperLayout.addView(secondsText)
-        stepperLayout.addView(incBtn)
-        container.addView(stepperLayout)
-
-        fun updateSecondsDisplay() {
-            secondsText.text = if (selectedSeconds >= 60) "${selectedSeconds/60}m ${selectedSeconds%60}s" else "${selectedSeconds}s"
-        }
-
-        decBtn.setOnClickListener { if (selectedSeconds > 1) { selectedSeconds--; updateSecondsDisplay() } }
-        incBtn.setOnClickListener { selectedSeconds++; updateSecondsDisplay() }
-
-        // 3. Presets
-        val presetsScroll = android.widget.HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-        }
-        val presetsLayout = android.widget.LinearLayout(this).apply { orientation = android.widget.LinearLayout.HORIZONTAL }
-        val presetValues = listOf(1, 5, 10, 30, 60, 300, 600)
-        val presetLabels = listOf("1s", "5s", "10s", "30s", "1m", "5m", "10m")
-        
-        presetValues.forEachIndexed { i, v ->
-            val b = android.widget.Button(this).apply {
-                text = presetLabels[i]
-                setOnClickListener { selectedSeconds = v; updateSecondsDisplay() }
-            }
-            presetsLayout.addView(b)
-        }
-        presetsScroll.addView(presetsLayout)
-        container.addView(presetsScroll)
-
-        // 4. Action Button
-        val actionBtn = android.widget.Button(this).apply {
-            text = "START EXPOSURE"
-            setBackgroundColor(android.graphics.Color.parseColor("#4CAF50"))
-            setTextColor(android.graphics.Color.WHITE)
-            layoutParams = android.widget.LinearLayout.LayoutParams(-1, 150).apply { topMargin = 60 }
-        }
-        container.addView(actionBtn)
-
-        var isExposing = false
-        
-        actionBtn.setOnClickListener {
-            if (!isExposing) {
-                // START
-                lifecycleScope.launch(Dispatchers.IO) {
-                    try {
-                        isPollingPaused = true 
-                        
-                        runOnUiThread {
-                            actionBtn.text = "WAITING..."
-                            actionBtn.isEnabled = false
-                            log("Bulb: Preparing Shutter...")
-                        }
-
-                        // Check focus mode - Log critical warning
-                        val focusMode = ptpConnection?.getDevicePropValue(PtpConstants.PROP_FOCUS_MODE) ?: -1
-                        if (focusMode != 1 && focusMode != -1) {
-                             runOnUiThread { log("WARNING: Camera not in MF mode. Shutter might FAIL.") }
-                        }
-
-                        // 0. Auto-end Live View
-                        if (isLiveViewRunning) {
-                            runOnUiThread { log("Bulb: Ending Live View...") }
-                            isLiveViewRunning = false
-                            ptpConnection?.endLiveView()
-                            runOnUiThread { liveViewButton.text = "LV" }
-                            delay(1500)
-                        }
-
-                        log("Bulb: Triggering capture...")
-                        ptpConnection?.deviceReady()
-                        delay(300)
-                        
-                        // Trigger Shutter
-                        val success = ptpConnection?.capture() ?: false
-                        if (!success) {
-                            runOnUiThread { 
-                                log("ERROR: Shutter rejected. Check camera LCD/Busy.")
-                                android.widget.Toast.makeText(this@MainActivity, "Shutter Rejected! Check Camera Busy.", android.widget.Toast.LENGTH_LONG).show()
-                                actionBtn.text = "START EXPOSURE"
-                                actionBtn.isEnabled = true
-                            }
-                            isPollingPaused = false
-                            return@launch
-                        }
-
-                        isExposing = true
-                        runOnUiThread {
-                            actionBtn.isEnabled = true
-                            actionBtn.text = "STOP"
-                            actionBtn.setBackgroundColor(android.graphics.Color.RED)
-                            circularProgress.visibility = android.view.View.VISIBLE
-                            decBtn.isEnabled = false
-                            incBtn.isEnabled = false
-                            presetsScroll.visibility = android.view.View.GONE
-                        }
-
-                        val totalMs = selectedSeconds * 1000L
-                        val startTime = System.currentTimeMillis()
-                        
-                        bulbJob = lifecycleScope.launch(Dispatchers.Main) {
-                            try {
-                                while (isActive) {
-                                    val elapsed = System.currentTimeMillis() - startTime
-                                    val remaining = totalMs - elapsed
-                                    if (remaining <= 0) break
-                                    
-                                    val remSec = (remaining / 1000).toInt()
-                                    countdownText.text = String.format(java.util.Locale.US, "%02ds", remSec)
-                                    circularProgress.progress = (1000 * (totalMs - remaining) / totalMs).toInt()
-                                    delay(100)
-                                }
-                            } finally {
-                                stopBulbExposure()
-                            }
-                        }
-                    } catch (e: Exception) {
-                        runOnUiThread { log("Bulb Error: ${e.message}") }
-                        isPollingPaused = false
-                    }
-                }
-            } else {
-                // STOP
-                bulbJob?.cancel()
-            }
-        }
-
-        sheet.setContentView(container)
-        sheet.setOnDismissListener { 
-            if (isExposing) bulbJob?.cancel()
-            bulbSheet = null
-            
-            // RESTORE ORIGINAL SETTINGS
-            thread {
-                try {
-                    isPollingPaused = true
-                    log("Bulb Tool: Restoring original settings...")
-                    ptpConnection?.setDevicePropValue(PtpConstants.PROP_EXPOSURE_PROGRAM_MODE, bulbOriginalMode, size = 2)
-                    Thread.sleep(500)
-                    ptpConnection?.setDevicePropValue(PtpConstants.PROP_EXPOSURE_TIME, bulbOriginalShutter, size = 4)
-                    Thread.sleep(500)
-                    updateProperties()
-                } catch (e: Exception) {
-                    log("Restore Error: ${e.message}")
-                } finally {
-                    isPollingPaused = false
-                }
-            }
-        }
-        sheet.show()
-    }
-
-    private fun stopBulbExposure() {
-        lifecycleScope.launch(Dispatchers.IO) {
-            try {
-                log("Ending Bulb Exposure...")
-                ptpConnection?.terminateCapture()
-                delay(1000)
-                updateProperties()
-                runOnUiThread {
-                    bulbSheet?.dismiss()
-                }
-            } catch (e: Exception) {
-                // logged or handled
-            } finally {
-                isPollingPaused = false // RESUME POLLING
-            }
-        }
-    }
-
     private fun showBracketingDialog() {
-        val dialog = android.app.Dialog(this)
-        val container = android.widget.LinearLayout(this).apply {
-            orientation = android.widget.LinearLayout.VERTICAL
-            setPadding(40, 40, 40, 40)
+        val dialog = BottomSheetDialog(this)
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(60, 40, 60, 60)
             
-            addView(android.widget.TextView(context).apply {
+            addView(TextView(context).apply {
                 text = "Aperture Bracketing"
-                textSize = 20f
-                gravity = android.view.Gravity.CENTER
+                textSize = 22f
+                setTypeface(null, Typeface.BOLD)
+                gravity = Gravity.CENTER
+                setPadding(0, 0, 0, 30)
             })
 
-            val infoText = android.widget.TextView(context).apply {
-                text = "Total steps: ${dynamicApertures.size}\nRange: ${dynamicApertures.firstOrNull()?.second ?: "--"} to ${dynamicApertures.lastOrNull()?.second ?: "--"}"
+            val rangeLayout = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER
+                
+                addView(TextView(context).apply {
+                    text = dynamicApertures.firstOrNull()?.second ?: "--"
+                    textSize = 18f
+                    setTextColor(Color.GRAY)
+                })
+                addView(TextView(context).apply {
+                    text = " → "
+                    textSize = 18f
+                    setPadding(20, 0, 20, 0)
+                })
+                addView(TextView(context).apply {
+                    text = dynamicApertures.lastOrNull()?.second ?: "--"
+                    textSize = 18f
+                    setTextColor(Color.GRAY)
+                })
+            }
+            addView(rangeLayout)
+
+            addView(TextView(context).apply {
+                text = "Total steps: ${dynamicApertures.size}"
+                gravity = Gravity.CENTER
+                setPadding(0, 10, 0, 20)
+            })
+
+            val progressBar = ProgressBar(context, null, android.R.attr.progressBarStyleHorizontal).apply {
+                max = dynamicApertures.size
+                progress = 0
+                visibility = View.GONE
                 setPadding(0, 20, 0, 20)
             }
-            addView(infoText)
+            addView(progressBar)
 
-            val statusText = android.widget.TextView(context).apply {
-                text = "Idle"
+            val statusText = TextView(context).apply {
+                text = "Ready to start"
                 textSize = 16f
-                setTextColor(android.graphics.Color.BLUE)
-                gravity = android.view.Gravity.CENTER
-                setPadding(0, 20, 0, 20)
+                gravity = Gravity.CENTER
+                setPadding(0, 20, 0, 30)
             }
             addView(statusText)
 
-            val startBtn = android.widget.Button(context).apply { text = "Start Bracketing" }
+            val startBtn = MaterialButton(context).apply {
+                text = "START BRACKETING"
+                backgroundTintList = ColorStateList.valueOf(Color.parseColor("#4CAF50"))
+                setTextColor(Color.WHITE)
+            }
             addView(startBtn)
 
             var isRunning = false
+            var bracketThread: Thread? = null
+
+            fun stopBracketing() {
+                isRunning = false
+                bracketThread?.interrupt()
+                runOnUiThread {
+                    startBtn.text = "START BRACKETING"
+                    startBtn.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#4CAF50"))
+                    statusText.text = "Stopped"
+                    progressBar.visibility = View.GONE
+                    dialog.setCancelable(true)
+                }
+            }
             
             startBtn.setOnClickListener {
                 if (!isRunning) {
                     isRunning = true
+                    dialog.setCancelable(false)
                     startBtn.text = "STOP"
-                    thread {
+                    startBtn.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#F44336"))
+                    progressBar.visibility = View.VISIBLE
+                    progressBar.progress = 0
+                    
+                    bracketThread = thread {
                         try {
-                            isPollingPaused = true // STOP POLLING
+                            isPollingPaused = true
                             log("Starting Aperture Bracketing...")
                             
-                            // Force Mode A
-                            runOnUiThread { log("Bracketing: Switching to Mode A...") }
                             ptpConnection?.setDevicePropValue(PtpConstants.PROP_EXPOSURE_PROGRAM_MODE, 3, size = 2)
-                            Thread.sleep(1500) 
+                            Thread.sleep(1000) 
 
                             dynamicApertures.forEachIndexed { index, pair ->
                                 if (!isRunning) return@forEachIndexed
                                 
+                                val stepInfo = "Step ${index + 1} of ${dynamicApertures.size}: ${pair.second}"
                                 runOnUiThread { 
-                                    statusText.text = "Capturing ${index + 1}/${dynamicApertures.size}: ${pair.second}"
+                                    statusText.text = stepInfo
+                                    progressBar.progress = index + 1
                                 }
                                 
-                                // Set Aperture
                                 val success = ptpConnection?.setDevicePropValue(PtpConstants.PROP_F_NUMBER, pair.first, size = 2) ?: false
                                 if (success) {
-                                    Thread.sleep(800)
+                                    Thread.sleep(600)
                                     ptpConnection?.capture()
-                                    // Wait for write and mirror
-                                    Thread.sleep(3500) 
+                                    Thread.sleep(3000) 
                                 } else {
-                                    runOnUiThread { log("Failed to set ${pair.second}, skipping...") }
+                                    runOnUiThread { log("Failed to set ${pair.second}") }
                                 }
                             }
                             runOnUiThread { 
                                 log("Bracketing Complete")
                                 statusText.text = "Complete"
-                                startBtn.text = "Start Bracketing"
+                                startBtn.text = "START BRACKETING"
+                                startBtn.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#4CAF50"))
                                 isRunning = false
+                                progressBar.visibility = View.GONE
+                                dialog.setCancelable(true)
                             }
                         } catch (e: Exception) {
-                            runOnUiThread { 
-                                log("Bracket Error: ${e.message}")
-                                statusText.text = "Error"
-                                startBtn.text = "Start Bracketing"
-                                isRunning = false
+                            if (isRunning) {
+                                runOnUiThread { 
+                                    statusText.text = "Error: ${e.message}"
+                                    startBtn.text = "START BRACKETING"
+                                    startBtn.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#4CAF50"))
+                                    isRunning = false
+                                    dialog.setCancelable(true)
+                                }
                             }
                         } finally {
-                            isPollingPaused = false // RESUME
+                            isPollingPaused = false
                             thread { updateProperties() }
                         }
                     }
                 } else {
+                    stopBracketing()
+                }
+            }
+
+            dialog.setOnDismissListener {
+                if (isRunning) {
                     isRunning = false
-                    startBtn.text = "Start Bracketing"
-                    statusText.text = "Stopped"
+                    bracketThread?.interrupt()
                 }
             }
         }
@@ -1132,64 +1114,92 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showExpBracketingDialog() {
-        val dialog = android.app.Dialog(this)
-        val container = android.widget.LinearLayout(this).apply {
-            orientation = android.widget.LinearLayout.VERTICAL
-            setPadding(40, 40, 40, 40)
+        val dialog = BottomSheetDialog(this)
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(60, 40, 60, 60)
             
-            addView(android.widget.TextView(context).apply {
+            addView(TextView(context).apply {
                 text = "Exposure Bracketing (Shutter)"
-                textSize = 20f
-                gravity = android.view.Gravity.CENTER
+                textSize = 22f
+                setTypeface(null, Typeface.BOLD)
+                gravity = Gravity.CENTER
+                setPadding(0, 0, 0, 30)
             })
 
-            addView(android.widget.TextView(context).apply { text = "EV Step (Indices, 1=1/3EV):" })
+            addView(TextView(context).apply { text = "EV Step (Indices, 1=1/3EV):" })
             val stepInput = android.widget.EditText(context).apply {
                 hint = "Step (1=1/3, 3=1EV)"
-                inputType = android.view.inputmethod.EditorInfo.TYPE_CLASS_NUMBER
+                inputType = EditorInfo.TYPE_CLASS_NUMBER
                 setText("3")
             }
             addView(stepInput)
 
-            addView(android.widget.TextView(context).apply { text = "Number of Shots (3, 5, 7):" })
+            addView(TextView(context).apply { text = "Number of Shots (3, 5, 7):" })
             val countInput = android.widget.EditText(context).apply {
                 hint = "Count"
-                inputType = android.view.inputmethod.EditorInfo.TYPE_CLASS_NUMBER
+                inputType = EditorInfo.TYPE_CLASS_NUMBER
                 setText("3")
             }
             addView(countInput)
 
-            val statusText = android.widget.TextView(context).apply {
+            val progressBar = ProgressBar(context, null, android.R.attr.progressBarStyleHorizontal).apply {
+                visibility = View.GONE
+                setPadding(0, 20, 0, 20)
+            }
+            addView(progressBar)
+
+            val statusText = TextView(context).apply {
                 text = "Idle"
                 textSize = 16f
-                setTextColor(android.graphics.Color.BLUE)
-                gravity = android.view.Gravity.CENTER
+                gravity = Gravity.CENTER
                 setPadding(0, 20, 0, 20)
             }
             addView(statusText)
 
-            val startBtn = android.widget.Button(context).apply { text = "Start Exp Bracket" }
+            val startBtn = MaterialButton(context).apply {
+                text = "START EXP BRACKET"
+                backgroundTintList = ColorStateList.valueOf(Color.parseColor("#4CAF50"))
+                setTextColor(Color.WHITE)
+            }
             addView(startBtn)
 
             var isRunning = false
+            var bracketThread: Thread? = null
+
+            fun stopBracketing() {
+                isRunning = false
+                bracketThread?.interrupt()
+                runOnUiThread {
+                    startBtn.text = "START EXP BRACKET"
+                    startBtn.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#4CAF50"))
+                    statusText.text = "Stopped"
+                    progressBar.visibility = View.GONE
+                    dialog.setCancelable(true)
+                }
+            }
             
             startBtn.setOnClickListener {
                 if (!isRunning) {
                     val step = stepInput.text.toString().toIntOrNull() ?: 3
                     val count = countInput.text.toString().toIntOrNull() ?: 3
                     isRunning = true
+                    dialog.setCancelable(false)
                     startBtn.text = "STOP"
+                    startBtn.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#F44336"))
                     
-                    thread {
+                    bracketThread = thread {
                         try {
-                            isPollingPaused = true // STOP POLLING
+                            isPollingPaused = true
                             log("Starting Exposure Bracketing...")
-                            // 1. Get current shutter index
-                            val currentShVal = ptpConnection?.getDevicePropValue(PtpConstants.PROP_EXPOSURE_TIME) ?: -999999
+                            val currentShVal = ptpConnection?.getDevicePropValue(activeShutterProp) ?: -999999
                             val startIndex = shutters.indexOfFirst { it.first == currentShVal }
                             
                             if (startIndex == -1) {
-                                runOnUiThread { log("Error: Current shutter speed not in standard list."); isRunning = false; startBtn.text = "Start Exp Bracket" }
+                                runOnUiThread { 
+                                    log("Error: Current shutter speed not in standard list.")
+                                    stopBracketing()
+                                }
                                 return@thread
                             }
 
@@ -1200,45 +1210,64 @@ class MainActivity : AppCompatActivity() {
                                 if (idx in shutters.indices) sequence.add(idx)
                             }
 
+                            runOnUiThread {
+                                progressBar.max = sequence.size
+                                progressBar.progress = 0
+                                progressBar.visibility = View.VISIBLE
+                            }
+
                             sequence.forEachIndexed { i, shIdx ->
                                 if (!isRunning) return@forEachIndexed
                                 val pair = shutters[shIdx]
-                                runOnUiThread { statusText.text = "Capturing ${i + 1}/${sequence.size}: ${pair.second}" }
+                                runOnUiThread { 
+                                    statusText.text = "Capturing ${i + 1}/${sequence.size}: ${pair.second}"
+                                    progressBar.progress = i + 1
+                                }
                                 
-                                // Set Shutter
-                                val success = ptpConnection?.setDevicePropValue(PtpConstants.PROP_EXPOSURE_TIME, pair.first, size = 4) ?: false
+                                val success = ptpConnection?.setDevicePropValue(activeShutterProp, pair.first, size = shutterPropSize) ?: false
                                 if (success) {
                                     Thread.sleep(800)
                                     ptpConnection?.capture()
-                                    Thread.sleep(4000) // D300 write time
+                                    Thread.sleep(4000) 
                                 } else {
-                                    runOnUiThread { log("Failed to set ${pair.second}, skipping...") }
+                                    runOnUiThread { log("Failed to set ${pair.second}") }
                                 }
                             }
 
                             runOnUiThread { 
                                 log("Exp Bracketing Complete")
                                 statusText.text = "Complete"
-                                startBtn.text = "Start Exp Bracket"
+                                startBtn.text = "START EXP BRACKET"
+                                startBtn.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#4CAF50"))
                                 isRunning = false
+                                progressBar.visibility = View.GONE
+                                dialog.setCancelable(true)
                                 updateProperties()
                             }
                         } catch (e: Exception) {
-                            runOnUiThread { 
-                                log("Exp Bracket Error: ${e.message}")
-                                statusText.text = "Error"
-                                startBtn.text = "Start Exp Bracket"
-                                isRunning = false
+                            if (isRunning) {
+                                runOnUiThread { 
+                                    statusText.text = "Error: ${e.message}"
+                                    startBtn.text = "START EXP BRACKET"
+                                    startBtn.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#4CAF50"))
+                                    isRunning = false
+                                    dialog.setCancelable(true)
+                                }
                             }
                         } finally {
-                            isPollingPaused = false // RESUME
+                            isPollingPaused = false
                             thread { updateProperties() }
                         }
                     }
                 } else {
+                    stopBracketing()
+                }
+            }
+
+            dialog.setOnDismissListener {
+                if (isRunning) {
                     isRunning = false
-                    startBtn.text = "Start Exp Bracket"
-                    statusText.text = "Stopped"
+                    bracketThread?.interrupt()
                 }
             }
         }

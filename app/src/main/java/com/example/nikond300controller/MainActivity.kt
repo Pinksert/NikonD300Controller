@@ -425,28 +425,8 @@ class MainActivity : AppCompatActivity() {
             if (isLiveViewRunning) stopLiveView() else startLiveView()
         }
 
-        wbButton.setOnClickListener { view ->
-            val popup = android.widget.PopupMenu(this, view)
-            val wbModes = arrayOf(
-                2 to "Auto",
-                4 to "Daylight",
-                5 to "Incandescent",
-                6 to "Fluorescent",
-                7 to "Flash",
-                32784 to "Cloudy",
-                32785 to "Shade"
-            )
-            wbModes.forEachIndexed { index, pair ->
-                popup.menu.add(0, index, index, pair.second)
-            }
-            popup.setOnMenuItemClickListener { item ->
-                val itemId = item.itemId
-                if (itemId >= 0 && itemId < wbModes.size) {
-                    setWhiteBalance(wbModes[itemId].first, wbModes[itemId].second)
-                }
-                true
-            }
-            popup.show()
+        wbButton.setOnClickListener {
+            showWhiteBalanceDialog()
         }
 
         isoAutoButton.setOnClickListener {
@@ -958,6 +938,50 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun showWhiteBalanceDialog() {
+        val dialog = BottomSheetDialog(this)
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(60, 40, 60, 60)
+            
+            addView(TextView(context).apply {
+                text = "White Balance"
+                textSize = 22f
+                setTypeface(null, Typeface.BOLD)
+                gravity = Gravity.CENTER
+                setPadding(0, 0, 0, 30)
+            })
+
+            val wbModes = arrayOf(
+                2 to "Auto",
+                4 to "Daylight",
+                5 to "Incandescent",
+                6 to "Fluorescent",
+                7 to "Flash",
+                32784 to "Cloudy",
+                32785 to "Shade"
+            )
+
+            wbModes.forEach { pair ->
+                addView(MaterialButton(context, null, com.google.android.material.R.attr.materialButtonStyle).apply {
+                    text = pair.second
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply {
+                        setMargins(0, 0, 0, 10)
+                    }
+                    setOnClickListener {
+                        setWhiteBalance(pair.first, pair.second)
+                        dialog.dismiss()
+                    }
+                })
+            }
+        }
+        dialog.setContentView(container)
+        dialog.show()
+    }
+
     private fun showBracketingDialog() {
         val dialog = BottomSheetDialog(this)
         val container = LinearLayout(this).apply {
@@ -994,11 +1018,71 @@ class MainActivity : AppCompatActivity() {
             }
             addView(rangeLayout)
 
-            addView(TextView(context).apply {
+            val manualRangeCheck = android.widget.CheckBox(context).apply {
+                text = "Manual Range"
+                isChecked = false
+            }
+            addView(manualRangeCheck)
+
+            var manualStartIndex = 0
+            var manualEndIndex = dynamicApertures.size - 1
+
+            val manualRangeLayout = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER
+                visibility = View.GONE
+                setPadding(0, 10, 0, 10)
+
+                val startButton = MaterialButton(context, null, com.google.android.material.R.attr.materialButtonStyle).apply {
+                    text = "Start: ${dynamicApertures.getOrNull(manualStartIndex)?.second ?: "--"}"
+                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                    setOnClickListener { btn ->
+                        val popup = android.widget.PopupMenu(context, btn)
+                        dynamicApertures.forEachIndexed { index, pair ->
+                            popup.menu.add(0, index, index, pair.second)
+                        }
+                        popup.setOnMenuItemClickListener { item ->
+                            manualStartIndex = item.itemId
+                            text = "Start: ${dynamicApertures[manualStartIndex].second}"
+                            true
+                        }
+                        popup.show()
+                    }
+                }
+                addView(startButton)
+
+                addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(20, 1) })
+
+                val endButton = MaterialButton(context, null, com.google.android.material.R.attr.materialButtonStyle).apply {
+                    text = "End: ${dynamicApertures.getOrNull(manualEndIndex)?.second ?: "--"}"
+                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                    setOnClickListener { btn ->
+                        val popup = android.widget.PopupMenu(context, btn)
+                        dynamicApertures.forEachIndexed { index, pair ->
+                            popup.menu.add(0, index, index, pair.second)
+                        }
+                        popup.setOnMenuItemClickListener { item ->
+                            manualEndIndex = item.itemId
+                            text = "End: ${dynamicApertures[manualEndIndex].second}"
+                            true
+                        }
+                        popup.show()
+                    }
+                }
+                addView(endButton)
+            }
+            addView(manualRangeLayout)
+
+            manualRangeCheck.setOnCheckedChangeListener { _, isChecked ->
+                manualRangeLayout.visibility = if (isChecked) View.VISIBLE else View.GONE
+            }
+
+            val stepsText = TextView(context).apply {
                 text = "Total steps: ${dynamicApertures.size}"
                 gravity = Gravity.CENTER
                 setPadding(0, 10, 0, 20)
-            })
+            }
+            addView(stepsText)
 
             val progressBar = ProgressBar(context, null, android.R.attr.progressBarStyleHorizontal).apply {
                 max = dynamicApertures.size
@@ -1055,10 +1139,23 @@ class MainActivity : AppCompatActivity() {
                             ptpConnection?.setDevicePropValue(PtpConstants.PROP_EXPOSURE_PROGRAM_MODE, 3, size = 2)
                             Thread.sleep(1000) 
 
-                            dynamicApertures.forEachIndexed { index, pair ->
+                            val targetList = if (manualRangeCheck.isChecked) {
+                                val s = Math.min(manualStartIndex, manualEndIndex)
+                                val e = Math.max(manualStartIndex, manualEndIndex)
+                                dynamicApertures.slice(s..e)
+                            } else {
+                                dynamicApertures.toList()
+                            }
+
+                            runOnUiThread {
+                                progressBar.max = targetList.size
+                                stepsText.text = "Total steps: ${targetList.size}"
+                            }
+
+                            targetList.forEachIndexed { index, pair ->
                                 if (!isRunning) return@forEachIndexed
                                 
-                                val stepInfo = "Step ${index + 1} of ${dynamicApertures.size}: ${pair.second}"
+                                val stepInfo = "Step ${index + 1} of ${targetList.size}: ${pair.second}"
                                 runOnUiThread { 
                                     statusText.text = stepInfo
                                     progressBar.progress = index + 1

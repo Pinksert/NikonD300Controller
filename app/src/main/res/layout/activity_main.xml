@@ -53,6 +53,9 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
+                android:layout_marginHorizontal="4dp"
+                android:textSize="11sp"
+                android:textAllCaps="false"
                 android:text="Capture" />
 
             <Button
@@ -60,6 +63,9 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
+                android:layout_marginHorizontal="4dp"
+                android:textSize="11sp"
+                android:textAllCaps="false"
                 android:text="Focus" />
 
             <Button
@@ -67,6 +73,9 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
+                android:layout_marginHorizontal="4dp"
+                android:textSize="11sp"
+                android:textAllCaps="false"
                 android:text="LV" />
         </LinearLayout>
 
@@ -81,6 +90,9 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
+                android:layout_marginHorizontal="4dp"
+                android:textSize="11sp"
+                android:textAllCaps="false"
                 android:text="Mode" />
 
             <Button
@@ -88,6 +100,9 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
+                android:layout_marginHorizontal="4dp"
+                android:textSize="11sp"
+                android:textAllCaps="false"
                 android:text="WB" />
 
             <Button
@@ -95,6 +110,9 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
+                android:layout_marginHorizontal="4dp"
+                android:textSize="11sp"
+                android:textAllCaps="false"
                 android:text="ISO Auto" />
         </LinearLayout>
 
@@ -109,7 +127,9 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:textSize="12sp"
+                android:layout_marginHorizontal="4dp"
+                android:textSize="11sp"
+                android:textAllCaps="false"
                 android:text="Ap Bracket" />
 
             <Button
@@ -117,7 +137,9 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:textSize="12sp"
+                android:layout_marginHorizontal="4dp"
+                android:textSize="11sp"
+                android:textAllCaps="false"
                 android:text="Exp Bracket" />
         </LinearLayout>
 
@@ -141,26 +163,37 @@
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:orientation="vertical"
-                android:gravity="center">
+                android:gravity="center"
+                android:layout_marginHorizontal="4dp">
                 <Button
                     android:id="@+id/isoUpButton"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:padding="2dp"
+                    android:layout_width="64dp"
+                    android:layout_height="32dp"
+                    android:layout_gravity="center_horizontal"
+                    android:minHeight="0dp"
+                    android:minWidth="0dp"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:padding="0dp"
                     android:text="▲" />
                 <Button
                     android:id="@+id/isoButton"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:padding="2dp"
-                    android:textSize="13sp"
+                    android:textSize="11sp"
                     android:textAllCaps="false"
                     android:text="ISO" />
                 <Button
                     android:id="@+id/isoDownButton"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:padding="2dp"
+                    android:layout_width="64dp"
+                    android:layout_height="32dp"
+                    android:layout_gravity="center_horizontal"
+                    android:minHeight="0dp"
+                    android:minWidth="0dp"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:padding="0dp"
                     android:text="▼" />
             </LinearLayout>
 
@@ -170,26 +203,37 @@
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:orientation="vertical"
-                android:gravity="center">
+                android:gravity="center"
+                android:layout_marginHorizontal="4dp">
                 <Button
                     android:id="@+id/apertureUpButton"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:padding="2dp"
+                    android:layout_width="64dp"
+                    android:layout_height="32dp"
+                    android:layout_gravity="center_horizontal"
+                    android:minHeight="0dp"
+                    android:minWidth="0dp"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:padding="0dp"
                     android:text="▲" />
                 <Button
                     android:id="@+id/apertureButton"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:padding="2dp"
-                    android:textSize="13sp"
+                    android:textSize="11sp"
                     android:textAllCaps="false"
                     android:text="Aperture" />
                 <Button
                     android:id="@+id/apertureDownButton"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:padding="2dp"
+                    android:layout_width="64dp"
+                    android:layout_height="32dp"
+                    android:layout_gravity="center_horizontal"
+                    android:minHeight="0dp"
+                    android:minWidth="0dp"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:padding="0dp"
                     android:text="▼" />
             </LinearLayout>
 
@@ -199,26 +243,37 @@
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:orientation="vertical"
-                android:gravity="center">
+                android:gravity="center"
+                android:layout_marginHorizontal="4dp">
                 <Button
                     android:id="@+id/shutterUpButton"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:padding="2dp"
+                    android:layout_width="64dp"
+                    android:layout_height="32dp"
+                    android:layout_gravity="center_horizontal"
+                    android:minHeight="0dp"
+                    android:minWidth="0dp"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:padding="0dp"
                     android:text="▲" />
                 <Button
                     android:id="@+id/shutterButton"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:padding="2dp"
-                    android:textSize="13sp"
+                    android:textSize="11sp"
                     android:textAllCaps="false"
                     android:text="Shutter" />
                 <Button
                     android:id="@+id/shutterDownButton"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:padding="2dp"
+                    android:layout_width="64dp"
+                    android:layout_height="32dp"
+                    android:layout_gravity="center_horizontal"
+                    android:minHeight="0dp"
+                    android:minWidth="0dp"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:padding="0dp"
                     android:text="▼" />
             </LinearLayout>
         </LinearLayout>

@@ -37,7 +37,11 @@ object PtpConstants {
     const val PROP_BATTERY_LEVEL = 0x5001
     const val PROP_WHITE_BALANCE = 0x5005
     const val PROP_NIKON_ISO_AUTO = 0xD054
+    const val PROP_NIKON_ISO_AUTO_MAX_ISO = 0xD183
+    const val PROP_NIKON_ISO_AUTO_MIN_SHUTTER = 0xD164
     const val PROP_NIKON_BATTERY_LEVEL = 0xD1B3
+    const val PROP_NIKON_WB_COLOR_TEMP = 0xD01E
+    const val PROP_NIKON_WB_PRESET_NO = 0xD01F
     const val PROP_F_NUMBER = 0x5007
     const val PROP_FOCAL_LENGTH = 0x5008
     const val PROP_EXPOSURE_TIME = 0x500D

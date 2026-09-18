@@ -30,6 +30,7 @@ import android.view.inputmethod.EditorInfo
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.util.Log
+import android.widget.Toast
 import kotlinx.coroutines.*
 import kotlin.concurrent.thread
 import kotlin.jvm.Volatile
@@ -75,8 +76,6 @@ class MainActivity : AppCompatActivity() {
         100, 125, 160, 200, 250, 320, 400, 500, 640, 800, 1000, 1250, 1600, 2000, 2500, 3200, 4000, 5000, 6400
     )
     
-    // Fallback full list of standard apertures. We will filter this array dynamically based on camera's actual capability descriptors if possible,
-    // or safely check boundaries during direction-pad selection.
     private val apertures = arrayOf(
         140 to "f/1.4", 180 to "f/1.8", 200 to "f/2.0", 220 to "f/2.2", 250 to "f/2.5",
         280 to "f/2.8", 320 to "f/3.2", 350 to "f/3.5", 400 to "f/4.0",
@@ -129,7 +128,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private var shutters = emptyArray<Pair<Int, String>>()
-
 
     private var ptpConnection: PtpUsbConnection? = null
     private var isLiveViewRunning = false
@@ -207,18 +205,16 @@ class MainActivity : AppCompatActivity() {
         captureButton.setOnClickListener {
             thread {
                 try {
-                    isPollingPaused = true // STOP ALL POLLING
+                    isPollingPaused = true 
                     
-                    // 1. Auto-end Live View if running (Extra safe for D300)
                     if (isLiveViewRunning) {
                         runOnUiThread { log("Capture: Stopping LV...") }
                         isLiveViewRunning = false
                         ptpConnection?.endLiveView()
                         runOnUiThread { liveViewButton.text = "LV" }
-                        Thread.sleep(2500) // D300 mirror flip is VERY slow
+                        Thread.sleep(2500) 
                     }
 
-                    // Check Focus Mode for AF-S or AF-C (and AF-A)
                     val focusMode = ptpConnection?.getDevicePropValue(PtpConstants.PROP_FOCUS_MODE) ?: -1
                     val afModes = listOf(2, 3, 4, 0x8001, 0x8002, 0x8003, 0x8010, 0x8011, 0x8012)
                     if (focusMode in afModes) {
@@ -227,9 +223,9 @@ class MainActivity : AppCompatActivity() {
                         if (!afSuccess) {
                             runOnUiThread {
                                 log("AF Failed: Cannot trigger shutter without focus lock.")
-                                android.widget.Toast.makeText(this@MainActivity, "AF Failed: Cannot trigger shutter without focus lock.", android.widget.Toast.LENGTH_SHORT).show()
+                                Toast.makeText(this@MainActivity, "AF Failed: Cannot trigger shutter without focus lock.", Toast.LENGTH_SHORT).show()
                             }
-                            return@thread // Abort the capture sequence immediately
+                            return@thread 
                         }
                         
                         runOnUiThread { log("AF finished. Waiting for camera to settle...") }
@@ -248,7 +244,6 @@ class MainActivity : AppCompatActivity() {
                     log("Firing shutter...")
                     var responseCode = ptpConnection?.capture() ?: -1
 
-                    // Improve capture execution for "Busy" codes (0xA008 or 0x2002)
                     if (responseCode == 0xA008 || responseCode == PtpConstants.RESP_DEVICE_BUSY) {
                         runOnUiThread { log("Capture reported Busy. Automated retry in 1s...") }
                         Thread.sleep(1000)
@@ -264,21 +259,21 @@ class MainActivity : AppCompatActivity() {
                         } else {
                             if (responseCode == PtpConstants.RESP_NIKON_HARDWARE_ERROR) {
                                 log("Capture Failed: Focus not locked (Camera Blocked).")
-                                android.widget.Toast.makeText(this@MainActivity, "Capture Failed: Focus not locked (Camera Blocked).", android.widget.Toast.LENGTH_LONG).show()
+                                Toast.makeText(this@MainActivity, "Capture Failed: Focus not locked (Camera Blocked).", Toast.LENGTH_LONG).show()
                             } else {
                                 log("Capture: Failed (Check Busy/Focus)")
-                                android.widget.Toast.makeText(this@MainActivity, "Capture Rejected: Camera Busy or Out of Focus.", android.widget.Toast.LENGTH_SHORT).show()
+                                Toast.makeText(this@MainActivity, "Capture Rejected: Camera Busy or Out of Focus.", Toast.LENGTH_SHORT).show()
                             }
                         }
                     }
                     
                     if (success) {
-                        Thread.sleep(3000) // Wait for card write
+                        Thread.sleep(3000) 
                     }
                 } catch (e: Exception) { 
                     runOnUiThread { log("Capture Error: ${e.message}") } 
                 } finally {
-                    isPollingPaused = false // RESUME POLLING
+                    isPollingPaused = false 
                     thread { updateProperties() }
                 }
             }
@@ -294,7 +289,6 @@ class MainActivity : AppCompatActivity() {
                 val selectedMode = item.itemId
                 val modeTitle = if (item.title != null) item.title.toString() else "Unknown"
                 thread {
-                    // Stop Live View if running before mode change
                     val wasLiveViewRunning = isLiveViewRunning
                     if (wasLiveViewRunning) {
                         stopLiveView()
@@ -308,7 +302,7 @@ class MainActivity : AppCompatActivity() {
                             if (success) {
                                 log("Mode changed successfully")
                             } else {
-                                log("Failed to change mode (Nikon D300 exposure mode is controlled by physical dial and cannot be changed via software)")
+                                log("Failed to change mode (Nikon D300 exposure mode is controlled by dial)")
                             }
                         }
                     } catch (e: Exception) {
@@ -318,7 +312,6 @@ class MainActivity : AppCompatActivity() {
                     Thread.sleep(500)
                     updateProperties()
 
-                    // Restart Live View if it was running
                     if (wasLiveViewRunning) {
                         Thread.sleep(500)
                         startLiveView()
@@ -376,7 +369,6 @@ class MainActivity : AppCompatActivity() {
         }
         
         apertureUpButton.setOnClickListener {
-            // Up button should decrease numerical aperture value (Larger lens aperture, e.g., f/4 -> f/2.8)
             if (currentApIndex > 0) {
                 currentApIndex--
                 setAperture(dynamicApertures[currentApIndex].first, dynamicApertures[currentApIndex].second)
@@ -384,7 +376,6 @@ class MainActivity : AppCompatActivity() {
         }
         
         apertureDownButton.setOnClickListener {
-            // Down button should increase numerical aperture value (Smaller lens aperture, e.g., f/4 -> f/5.6)
             if (currentApIndex < dynamicApertures.size - 1) {
                 currentApIndex++
                 setAperture(dynamicApertures[currentApIndex].first, dynamicApertures[currentApIndex].second)
@@ -408,14 +399,14 @@ class MainActivity : AppCompatActivity() {
         }
         
         shutterUpButton.setOnClickListener {
-            if (currentShIndex > 0) { // Up for faster shutter
+            if (currentShIndex > 0) { 
                 currentShIndex--
                 setShutter(shutters[currentShIndex].first, shutters[currentShIndex].second)
             }
         }
         
         shutterDownButton.setOnClickListener {
-            if (currentShIndex < shutters.size - 1) { // Down for slower shutter
+            if (currentShIndex < shutters.size - 1) { 
                 currentShIndex++
                 setShutter(shutters[currentShIndex].first, shutters[currentShIndex].second)
             }
@@ -450,11 +441,15 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        isoAutoButton.setOnLongClickListener {
+            showIsoAutoSettingsDialog()
+            true
+        }
+
         focusButton.setOnClickListener {
             thread {
                 try {
                     isPollingPaused = true
-                    // Wait for any pending polling traffic to clear
                     Thread.sleep(300)
                     
                     log("AF: Dispatching drive command...")
@@ -527,7 +522,6 @@ class MainActivity : AppCompatActivity() {
                         log("Live View active")
                     }
                     while (isLiveViewRunning) {
-                        // In background but not updating UI as display is removed
                         ptpConnection?.getLiveViewFrame()
                         Thread.sleep(100)
                     }
@@ -555,11 +549,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateProperties() {
-        if (!isConnected || isPollingPaused) return // Skip if paused
+        if (!isConnected || isPollingPaused) return 
         thread {
             try {
                 if (isPollingPaused) return@thread
-                // Shortened delays for faster UI response
                 Thread.sleep(100)
                 val iso = ptpConnection?.getDevicePropValue(PtpConstants.PROP_EXPOSURE_INDEX) ?: -999999
                 Thread.sleep(50)
@@ -579,8 +572,6 @@ class MainActivity : AppCompatActivity() {
                 Thread.sleep(50)
                 val nikonBattery = ptpConnection?.getDevicePropValue(PtpConstants.PROP_NIKON_BATTERY_LEVEL) ?: -999999
                 Thread.sleep(50)
-                val wb = ptpConnection?.getDevicePropValue(PtpConstants.PROP_WHITE_BALANCE) ?: -999999
-                Thread.sleep(50)
                 val isoAuto = ptpConnection?.getDevicePropValue(PtpConstants.PROP_NIKON_ISO_AUTO) ?: -999999
                 Thread.sleep(50)
 
@@ -591,30 +582,20 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread {
                     if (batteryLevel != -999999) {
                         batteryText.text = "$batteryLevel%"
-                        // Color coding battery level
                         batteryText.setTextColor(when {
-                            batteryLevel > 50 -> android.graphics.Color.parseColor("#2E7D32") // Green
-                            batteryLevel > 20 -> android.graphics.Color.parseColor("#F57C00") // Orange
-                            else -> android.graphics.Color.RED
+                            batteryLevel > 50 -> Color.parseColor("#2E7D32") 
+                            batteryLevel > 20 -> Color.parseColor("#F57C00") 
+                            else -> Color.RED
                         })
                     } else {
                         batteryText.text = "--%"
                     }
 
-                    wbButton.text = when(wb) {
-                        2 -> "Auto"
-                        4 -> "Daylight"
-                        5 -> "Incand"
-                        6 -> "Fluor"
-                        7 -> "Flash"
-                        0x8010 -> "Cloudy"
-                        0x8011 -> "Shade"
-                        else -> "WB"
-                    }
+                    wbButton.text = "WB"
 
                     isoAutoButton.text = "ISO Auto"
                     if (isoAuto != -999999) {
-                        isoAutoButton.setBackgroundColor(if (isoAuto == 1) android.graphics.Color.parseColor("#4CAF50") else android.graphics.Color.parseColor("#757575"))
+                        isoAutoButton.setBackgroundColor(if (isoAuto == 1) Color.parseColor("#4CAF50") else Color.parseColor("#757575"))
                     }
 
                     val modeStr = when (mode) {
@@ -632,7 +613,7 @@ class MainActivity : AppCompatActivity() {
                     val focalStr = if (focalLengthRaw != -999999 && focalLengthRaw > 0) "${focalLengthRaw / 100}mm" else "--"
                     
                     val biasStr = if (biasRaw != -999999) {
-                        val b = biasRaw.toShort() // PTP Bias is often 16-bit signed
+                        val b = biasRaw.toShort() 
                         val ev = b / 1000.0
                         if (ev > 0) "+%.1f".format(ev) else "%.1f".format(ev)
                     } else "--"
@@ -647,16 +628,13 @@ class MainActivity : AppCompatActivity() {
                         else -> "0x${Integer.toHexString(focusModeRaw).uppercase()}"
                     }
                     
-                    // Update button texts with actual values (Shortened to fit small screens)
                     isoButton.text = if (iso != -999999 && iso > 0) "$iso" else "ISO"
                     apertureButton.text = apStr
                     shutterButton.text = shStr
                     modeButton.text = "Mode: $modeStr"
                     
-                    // Update main info text with Focus, Focal Length and Bias
                     propText.text = "Focus: $focusStr | Focal: $focalStr | Bias: $biasStr"
                     
-                    // Update dynamic aperture list if camera provided descriptor
                     if (supportedAps != null && supportedAps.isNotEmpty()) {
                         dynamicApertures = supportedAps.map { valCode ->
                             valCode to "f/${valCode / 100.0}"
@@ -734,7 +712,6 @@ class MainActivity : AppCompatActivity() {
                 if (ptpConnection?.openSession() == true) {
                     isConnected = true
                     
-                    // Shutter Property Discovery
                     val supportedShuttersD100 = ptpConnection?.getDevicePropSupportedValues(PtpConstants.PROP_NIKON_SHUTTER_SPEED)
                     if (supportedShuttersD100 != null && supportedShuttersD100.isNotEmpty()) {
                         activeShutterProp = PtpConstants.PROP_NIKON_SHUTTER_SPEED
@@ -827,7 +804,6 @@ class MainActivity : AppCompatActivity() {
                 
                 val success = ptpConnection?.setDevicePropValue(activeShutterProp, value, size = shutterPropSize, logDesc = "Setting ShutterSpeed to $name (Val: $value)") ?: false
                 
-                // For Nikon, sending DeviceReady after a critical property change helps UI sync
                 if (success) {
                     Thread.sleep(100)
                     ptpConnection?.deviceReady()
@@ -871,8 +847,7 @@ class MainActivity : AppCompatActivity() {
             var lastFocus = -1
             var lastBatteryStd = -1
             var lastBatteryNikon = -1
-
-            var consecutiveFailures = 0
+            var lastIsoAuto = -1
 
             while (isPollingActive && isConnected) {
                 if (isPollingPaused) {
@@ -880,48 +855,31 @@ class MainActivity : AppCompatActivity() {
                     continue
                 }
                 try {
-                    // Poll focal length as a basic heartbeat
                     val focal = ptpConnection?.getDevicePropValue(PtpConstants.PROP_FOCAL_LENGTH) ?: -999999
-                    
-                    if (focal == -999999) {
-                        consecutiveFailures++
-                        // Allow up to 3 failures (e.g. camera is busy writing to card after capture)
-                        if (consecutiveFailures >= 3) {
-                            runOnUiThread { log("Camera unresponsive, disconnecting...") }
-                            disconnect()
-                            break
-                        }
-                    } else {
-                        consecutiveFailures = 0
-                        
+                    if (focal != -999999) {
                         val iso = ptpConnection?.getDevicePropValue(PtpConstants.PROP_EXPOSURE_INDEX) ?: -999999
                         val ap = ptpConnection?.getDevicePropValue(PtpConstants.PROP_F_NUMBER) ?: -999999
-                        val sh = ptpConnection?.getDevicePropValue(PtpConstants.PROP_EXPOSURE_TIME) ?: -999999
+                        val sh = ptpConnection?.getDevicePropValue(activeShutterProp) ?: -999999
                         val mode = ptpConnection?.getDevicePropValue(PtpConstants.PROP_EXPOSURE_PROGRAM_MODE) ?: -999999
                         val focus = ptpConnection?.getDevicePropValue(PtpConstants.PROP_FOCUS_MODE) ?: -999999
                         val batteryStd = ptpConnection?.getDevicePropValue(PtpConstants.PROP_BATTERY_LEVEL) ?: -999999
                         val batteryNikon = ptpConnection?.getDevicePropValue(PtpConstants.PROP_NIKON_BATTERY_LEVEL) ?: -999999
+                        val isoAuto = ptpConnection?.getDevicePropValue(PtpConstants.PROP_NIKON_ISO_AUTO) ?: -999999
 
                         if (focal != lastFocal || iso != lastIso || ap != lastAp || sh != lastSh || mode != lastMode || focus != lastFocus || 
-                            batteryStd != lastBatteryStd || batteryNikon != lastBatteryNikon) {
+                            batteryStd != lastBatteryStd || batteryNikon != lastBatteryNikon || isoAuto != lastIsoAuto) {
                             
-                            if (batteryStd != lastBatteryStd || batteryNikon != lastBatteryNikon) {
-                                runOnUiThread { log("Battery Levels - Standard (0x5001): $batteryStd, Nikon (0xD1B3): $batteryNikon") }
-                                lastBatteryStd = batteryStd
-                                lastBatteryNikon = batteryNikon
-                            }
-
                             lastFocal = focal
                             if (iso != -999999) lastIso = iso
                             if (ap != -999999) lastAp = ap
                             if (sh != -999999) lastSh = sh
                             if (mode != -999999) lastMode = mode
                             if (focus != -999999) lastFocus = focus
+                            if (isoAuto != -999999) lastIsoAuto = isoAuto
                             updateProperties()
                         }
                     }
                 } catch (e: Exception) {
-                    // Critical USB exception
                     runOnUiThread { log("USB Error: ${e.message}") }
                     disconnect()
                     break
@@ -936,6 +894,95 @@ class MainActivity : AppCompatActivity() {
         runOnUiThread {
             infoText.append("\n$message")
         }
+    }
+
+    private fun showIsoAutoSettingsDialog() {
+        val dialog = BottomSheetDialog(this)
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(60, 40, 60, 60)
+
+            addView(TextView(context).apply {
+                text = "ISO Auto Settings (D300)"
+                textSize = 22f
+                setTypeface(null, Typeface.BOLD)
+                gravity = Gravity.CENTER
+                setPadding(0, 0, 0, 30)
+            })
+
+            val maxIsoOptions = mapOf(
+                0 to "ISO 400",
+                1 to "ISO 800",
+                2 to "ISO 1600",
+                3 to "ISO 3200",
+                4 to "Hi 1 (6400)"
+            )
+
+            val minShutterOptions = mapOf(
+                0 to "1/4000", 1 to "1/3200", 2 to "1/2500", 3 to "1/2000",
+                4 to "1/1600", 5 to "1/1250", 6 to "1/1000", 7 to "1/800",
+                8 to "1/640", 9 to "1/500", 10 to "1/400", 11 to "1/320",
+                12 to "1/250", 13 to "1/200", 14 to "1/160", 15 to "1/125",
+                16 to "1/100", 17 to "1/80", 18 to "1/60", 19 to "1/50",
+                20 to "1/40", 21 to "1/30", 22 to "1/15", 23 to "1/8",
+                24 to "1/4", 25 to "1/2", 26 to "1s"
+            )
+
+            // Max ISO Section
+            addView(TextView(context).apply { text = "Max Sensitivity (High Limit)" })
+            val maxIsoBtn = MaterialButton(context, null, com.google.android.material.R.attr.materialButtonStyle).apply {
+                text = "Loading..."
+                setOnClickListener { btn ->
+                    val popup = android.widget.PopupMenu(context, btn)
+                    maxIsoOptions.toSortedMap().forEach { (idx, name) -> popup.menu.add(0, idx, idx, name) }
+                    popup.setOnMenuItemClickListener { item ->
+                        val index = item.itemId
+                        thread {
+                            ptpConnection?.setDevicePropValue(PtpConstants.PROP_NIKON_ISO_AUTO_MAX_ISO, index, size = 1)
+                            runOnUiThread { text = maxIsoOptions[index] }
+                        }
+                        true
+                    }
+                    popup.show()
+                }
+            }
+            addView(maxIsoBtn)
+
+            addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(1, 20) })
+
+            // Min Shutter Speed Section
+            addView(TextView(context).apply { text = "Min Shutter Speed (P/A Mode)" })
+            val minShutterBtn = MaterialButton(context, null, com.google.android.material.R.attr.materialButtonStyle).apply {
+                text = "Loading..."
+                setOnClickListener { btn ->
+                    val popup = android.widget.PopupMenu(context, btn)
+                    minShutterOptions.toSortedMap().forEach { (idx, name) -> popup.menu.add(0, idx, idx, name) }
+                    popup.setOnMenuItemClickListener { item ->
+                        val index = item.itemId
+                        thread {
+                            ptpConnection?.setDevicePropValue(PtpConstants.PROP_NIKON_ISO_AUTO_MIN_SHUTTER, index, size = 1)
+                            runOnUiThread { text = minShutterOptions[index] }
+                        }
+                        true
+                    }
+                    popup.show()
+                }
+            }
+            addView(minShutterBtn)
+
+            // Initial Load
+            thread {
+                val currentMaxIdx = ptpConnection?.getDevicePropValue(PtpConstants.PROP_NIKON_ISO_AUTO_MAX_ISO) ?: -1
+                val currentMinShIdx = ptpConnection?.getDevicePropValue(PtpConstants.PROP_NIKON_ISO_AUTO_MIN_SHUTTER) ?: -1
+                
+                runOnUiThread {
+                    maxIsoBtn.text = maxIsoOptions[currentMaxIdx] ?: (if (currentMaxIdx != -1) "Index $currentMaxIdx" else "Select Max ISO")
+                    minShutterBtn.text = minShutterOptions[currentMinShIdx] ?: (if (currentMinShIdx != -1) "Index $currentMinShIdx" else "Select Min Shutter")
+                }
+            }
+        }
+        dialog.setContentView(container)
+        dialog.show()
     }
 
     private fun showWhiteBalanceDialog() {
@@ -954,29 +1001,165 @@ class MainActivity : AppCompatActivity() {
 
             val wbModes = arrayOf(
                 2 to "Auto",
-                4 to "Daylight",
-                5 to "Incandescent",
-                6 to "Fluorescent",
+                4 to "Sunny",
+                5 to "Fluorescent",
+                6 to "Incandescent",
                 7 to "Flash",
-                32784 to "Cloudy",
-                32785 to "Shade"
+                0x8010 to "Cloudy",
+                0x8011 to "Sunny shade",
+                0x8012 to "Color temp",
+                0x8013 to "Preset"
             )
 
+            val gridLayout = android.widget.GridLayout(context).apply {
+                columnCount = 2
+                alignmentMode = android.widget.GridLayout.ALIGN_BOUNDS
+            }
+
             wbModes.forEach { pair ->
-                addView(MaterialButton(context, null, com.google.android.material.R.attr.materialButtonStyle).apply {
+                val button = MaterialButton(context, null, com.google.android.material.R.attr.materialButtonStyle).apply {
                     text = pair.second
-                    layoutParams = LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT
-                    ).apply {
-                        setMargins(0, 0, 0, 10)
+                    textSize = 14f
+                    isAllCaps = false
+                    val params = android.widget.GridLayout.LayoutParams().apply {
+                        width = 0
+                        height = android.widget.GridLayout.LayoutParams.WRAP_CONTENT
+                        columnSpec = android.widget.GridLayout.spec(android.widget.GridLayout.UNDEFINED, 1f)
+                        setMargins(8, 8, 8, 8)
                     }
+                    layoutParams = params
                     setOnClickListener {
                         setWhiteBalance(pair.first, pair.second)
                         dialog.dismiss()
+                        if (pair.first == 0x8012) {
+                            showColorTempDialog()
+                        } else if (pair.first == 0x8013) {
+                            showWbPresetDialog()
+                        }
                     }
-                })
+                }
+                gridLayout.addView(button)
             }
+            addView(gridLayout)
+        }
+        dialog.setContentView(container)
+        dialog.show()
+    }
+
+    private fun showColorTempDialog() {
+        val dialog = BottomSheetDialog(this)
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(60, 40, 60, 60)
+            
+            addView(TextView(context).apply {
+                text = "Set Color Temperature (K)"
+                textSize = 20f
+                setTypeface(null, Typeface.BOLD)
+                gravity = Gravity.CENTER
+                setPadding(0, 0, 0, 10)
+            })
+
+            addView(TextView(context).apply {
+                text = "Range: 2500K - 10000K"
+                textSize = 14f
+                gravity = Gravity.CENTER
+                setTextColor(Color.GRAY)
+                setPadding(0, 0, 0, 30)
+            })
+
+            val input = android.widget.EditText(context).apply {
+                hint = "Kelvin (2500 - 10000)"
+                inputType = android.text.InputType.TYPE_CLASS_NUMBER
+                setText("5000")
+            }
+            addView(input)
+
+            val setBtn = MaterialButton(context).apply {
+                text = "SET KELVIN"
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { setMargins(0, 20, 0, 0) }
+                setOnClickListener {
+                    val kelvinStr = input.text.toString()
+                    val kelvin = kelvinStr.toIntOrNull()
+                    
+                    if (kelvin == null || kelvin < 2500 || kelvin > 10000) {
+                        val errorMsg = "Invalid Kelvin: Range is 2500 - 10000"
+                        Toast.makeText(context, errorMsg, Toast.LENGTH_SHORT).show()
+                        log("Error: $errorMsg (Input: $kelvinStr)")
+                        return@setOnClickListener
+                    }
+
+                    thread {
+                        try {
+                            log("Setting Color Temp to ${kelvin}K...")
+                            val success = ptpConnection?.setDevicePropValue(PtpConstants.PROP_NIKON_WB_COLOR_TEMP, kelvin, size = 2) ?: false
+                            runOnUiThread { log("Set Color Temp: ${if (success) "Success" else "Failed"}") }
+                            if (success) ptpConnection?.deviceReady()
+                        } catch (e: Exception) {
+                            runOnUiThread { log("Set Color Temp Error: ${e.message}") }
+                        }
+                        Thread.sleep(400)
+                        updateProperties()
+                    }
+                    dialog.dismiss()
+                }
+            }
+            addView(setBtn)
+        }
+        dialog.setContentView(container)
+        dialog.show()
+    }
+
+    private fun showWbPresetDialog() {
+        val dialog = BottomSheetDialog(this)
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(60, 40, 60, 60)
+            
+            addView(TextView(context).apply {
+                text = "Select WB Preset"
+                textSize = 20f
+                setTypeface(null, Typeface.BOLD)
+                gravity = Gravity.CENTER
+                setPadding(0, 0, 0, 30)
+            })
+
+            val gridLayout = android.widget.GridLayout(context).apply {
+                columnCount = 3
+            }
+
+            for (i in 0..4) {
+                val button = MaterialButton(context, null, com.google.android.material.R.attr.materialButtonStyle).apply {
+                    text = "d-$i"
+                    val params = android.widget.GridLayout.LayoutParams().apply {
+                        width = 0
+                        height = android.widget.GridLayout.LayoutParams.WRAP_CONTENT
+                        columnSpec = android.widget.GridLayout.spec(android.widget.GridLayout.UNDEFINED, 1f)
+                        setMargins(8, 8, 8, 8)
+                    }
+                    layoutParams = params
+                    setOnClickListener {
+                        thread {
+                            try {
+                                log("Setting WB Preset to d-$i...")
+                                val success = ptpConnection?.setDevicePropValue(PtpConstants.PROP_NIKON_WB_PRESET_NO, i, size = 1) ?: false
+                                runOnUiThread { log("Set WB Preset: ${if (success) "Success" else "Failed"}") }
+                                if (success) ptpConnection?.deviceReady()
+                            } catch (e: Exception) {
+                                runOnUiThread { log("Set WB Preset Error: ${e.message}") }
+                            }
+                            Thread.sleep(400)
+                            updateProperties()
+                        }
+                        dialog.dismiss()
+                    }
+                }
+                gridLayout.addView(button)
+            }
+            addView(gridLayout)
         }
         dialog.setContentView(container)
         dialog.show()

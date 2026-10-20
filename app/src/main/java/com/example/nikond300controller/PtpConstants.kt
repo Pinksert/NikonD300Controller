@@ -57,7 +57,7 @@ object PtpConstants {
     const val PROP_NIKON_CSM_A1 = 0xD048
     const val PROP_NIKON_CSM_A2 = 0xD049
     const val PROP_NIKON_CSM_A5 = 0xD04F
-    const val PROP_NIKON_CSM_A7 = 0xD04B // a4 is D04B in libgphoto2 but user image says a4 is focus tracking with lock-on, a7 focus point wrap-around is D04F or D04B. Let's provide them clearly.
+    const val PROP_NIKON_CSM_A7 = 0xD04B
     const val PROP_NIKON_CSM_B1 = 0xD055
     const val PROP_NIKON_CSM_B2 = 0xD056
     const val PROP_NIKON_CSM_B3 = 0xD057

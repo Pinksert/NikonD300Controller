@@ -246,7 +246,7 @@ class PtpUsbConnection(
         
         val codeHex = "0x${Integer.toHexString(code).uppercase()}"
         if (code == 0xA004) {
-            logger("提示: 尼康 D300 必须将相机机身左上方顶部的【快门释放模式拨盘】物理旋转切换到 [Lv] 档位，且保证电量充足，才能激活实时取景！")
+            logger("提示: 相机当前状态不允许启动实时取景（返回 0xA004 Invalid Status）。无需拨到 [Lv] 档——任意曝光模式下直接点「LV」即可；若仍失败，请确认相机未处于记录/忙碌状态，且 RecordingMedia 已就绪（App 在 openSession 后会自动预设）。")
         }
         logger("Start Live View failed ($codeHex)")
         return false

@@ -127,8 +127,8 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:layout_marginHorizontal="4dp"
-                android:textSize="11sp"
+                android:layout_marginHorizontal="2dp"
+                android:textSize="9sp"
                 android:textAllCaps="false"
                 android:text="Ap Bracket" />
 
@@ -137,10 +137,30 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:layout_marginHorizontal="4dp"
-                android:textSize="11sp"
+                android:layout_marginHorizontal="2dp"
+                android:textSize="9sp"
                 android:textAllCaps="false"
                 android:text="Exp Bracket" />
+
+            <Button
+                android:id="@+id/customSettingsButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginHorizontal="2dp"
+                android:textSize="9sp"
+                android:textAllCaps="false"
+                android:text="Custom Set" />
+
+            <Button
+                android:id="@+id/galleryButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginHorizontal="2dp"
+                android:textSize="9sp"
+                android:textAllCaps="false"
+                android:text="Gallery" />
         </LinearLayout>
 
         <TextView
@@ -286,6 +306,7 @@
             android:textStyle="italic" />
 
         <ScrollView
+            android:id="@+id/logScrollView"
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1"

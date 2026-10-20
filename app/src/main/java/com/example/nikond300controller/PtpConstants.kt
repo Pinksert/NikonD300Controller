@@ -17,6 +17,7 @@ object PtpConstants {
     const val OP_GET_OBJECT_INFO = 0x1008
     const val OP_GET_OBJECT = 0x1009
     const val OP_GET_THUMB = 0x100A
+    const val OP_DELETE_OBJECT = 0x100B
     const val OP_GET_DEVICE_PROP_DESC = 0x1014
     const val OP_GET_DEVICE_PROP_VALUE = 0x1015
     const val OP_SET_DEVICE_PROP_VALUE = 0x1016
@@ -52,13 +53,56 @@ object PtpConstants {
     const val PROP_NIKON_LIVE_VIEW = 0x5013
     const val PROP_NIKON_SHUTTER_SPEED = 0xD100
 
+    // Nikon D300 Custom Settings Properties
+    const val PROP_NIKON_CSM_A1 = 0xD048
+    const val PROP_NIKON_CSM_A2 = 0xD049
+    const val PROP_NIKON_CSM_A5 = 0xD04F
+    const val PROP_NIKON_CSM_A7 = 0xD04B // a4 is D04B in libgphoto2 but user image says a4 is focus tracking with lock-on, a7 focus point wrap-around is D04F or D04B. Let's provide them clearly.
+    const val PROP_NIKON_CSM_B1 = 0xD055
+    const val PROP_NIKON_CSM_B2 = 0xD056
+    const val PROP_NIKON_CSM_B3 = 0xD057
+    const val PROP_NIKON_CSM_B4 = 0xD058
+    const val PROP_NIKON_CSM_B5 = 0xD059
+    const val PROP_NIKON_CSM_C1 = 0xD05E
+    const val PROP_NIKON_CSM_C2 = 0xD062
+    const val PROP_NIKON_CSM_C3 = 0xD063
+    const val PROP_NIKON_CSM_C4 = 0xD064
+    const val PROP_NIKON_CSM_D3 = 0xD06A
+    const val PROP_NIKON_CSM_D6 = 0xD06C
+    const val PROP_NIKON_CSM_D7 = 0xD06F
+    const val PROP_NIKON_CSM_E1 = 0xD074
+    const val PROP_NIKON_CSM_E2 = 0xD075
+    const val PROP_NIKON_CSM_E4 = 0xD077
+    const val PROP_NIKON_CSM_E5 = 0xD078
+    const val PROP_NIKON_CSM_E7 = 0xD07A
+    const val PROP_NIKON_CSM_F2 = 0xD082
+    const val PROP_NIKON_CSM_F4 = 0xD084
+    const val PROP_NIKON_CSM_F7 = 0xD085
+
     // NIKON specific codes
     const val OP_NIKON_INITIATE_CAPTURE = 0x90C0
     const val OP_NIKON_AF_DRIVE = 0x90C1
+    const val OP_NIKON_CHANGE_CAMERA_MODE = 0x90C2
+    const val OP_NIKON_DELETE_IMAGES_IN_SDRAM = 0x90C3
+    const val OP_NIKON_GET_LARGE_THUMB = 0x90C4
+    const val OP_NIKON_GET_EVENT = 0x90C7
+    const val OP_NIKON_DEVICE_READY = 0x90C8
+    const val OP_NIKON_SET_PRE_WB_DATA = 0x90C9
+    const val OP_NIKON_GET_VENDOR_PROP_CODES = 0x90CA
+    const val OP_NIKON_AF_AND_CAPTURE_IN_SDRAM = 0x90CB
+    const val OP_NIKON_GET_PIC_CTRL_DATA = 0x90CC
+    const val OP_NIKON_SET_PIC_CTRL_DATA = 0x90CD
+    const val OP_NIKON_DELETE_CUSTOM_PIC_CTRL = 0x90CE
+    const val OP_NIKON_GET_PIC_CTRL_CAPABILITY = 0x90CF
+    const val OP_NIKON_GET_PREVIEW_IMAGE = 0x9200
     const val OP_NIKON_START_LIVE_VIEW = 0x9201
     const val OP_NIKON_END_LIVE_VIEW = 0x9202
     const val OP_NIKON_GET_LIVE_VIEW_IMAGE = 0x9203
-    const val OP_NIKON_GET_EVENT = 0x90C7
-    const val OP_NIKON_DEVICE_READY = 0x90C8
-    const val OP_NIKON_AF_AND_CAPTURE = 0x9207
+    const val OP_NIKON_MF_DRIVE = 0x9204
+    const val OP_NIKON_CHANGE_AF_AREA = 0x9205
+    const val OP_NIKON_AF_DRIVE_CANCEL = 0x9206
+    const val OP_NIKON_GET_OBJECT_PROPS_SUPPORTED = 0x9801
+    const val OP_NIKON_GET_OBJECT_PROP_DESC = 0x9802
+    const val OP_NIKON_GET_OBJECT_PROP_VALUE = 0x9803
+    const val OP_NIKON_GET_OBJECT_PROP_LIST = 0x9805
 }

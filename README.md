@@ -22,7 +22,7 @@
 - **个人设定菜单（CSM）**：`CsmMenu` 分组呈现 a1–a10 / b1–b6 / c1–c4 / d1–d11 / e1–e7 / f1–f10 自定义设定项，按机身实际返回的量程只读查看或写入；未适配项灰显，不写入。
 - **拍摄菜单**：色彩空间、动态 D-Lighting、JPEG 压缩、NEF 位深、长曝降噪、高 ISO 降噪、取景驱动模式、放大倍率等机内拍摄项。
 - **相册（GalleryActivity）**：浏览相机存储卡照片，两阶段异步加载（先铺缩略图占位、再逐张补图），查看原图、保存到本机相册、分享、删除；支持多选导出（含 NEF → JPG 转换）。
-- **NEF 预览**：`NefPreview` 从尼康 RAW 文件中抠取内嵌 JPEG 预览，无需完整解码大文件。
+- **NEF → JPG 真转档**：`NefDecoder` 借助 **LibRaw（原生 C++ / JNI 模块，源码在 `app/src/main/cpp`）** 真正解码 D300 的 Bayer RAW 数据（霍夫曼解码 → 线性化 → 机身白平衡 → AHD 彩色插值 → sRGB），输出几 MB 的正常 JPEG，而不是机身内嵌的那张 239 KB 预览。`NefPreview` 负责从原 NEF 把 EXIF 原样搬进转出图，保证拍摄日期 / 曝光参数不丢。
 - **EXIF 摘要**：`PhotoExif` 解析快门 / 光圈 / ISO / 焦距 / 补偿 / 白平衡 / 测光，渲染为三行信息条。
 - **快门数读取**：`ShutterCountReader` 读取机身拍摄张数（EXIF MakerNote）。
 - **取景录制**：`LiveViewRecorder` 支持把取景画面录制保存。
@@ -60,7 +60,7 @@
 
 ## 从源码构建
 
-需要：Android Studio（或仅命令行）、JDK 17+、Android SDK（含对应平台与构建工具）。
+需要：Android Studio（或仅命令行）、JDK 17+、Android SDK（含对应平台与构建工具）。NEF 真转档依赖原生代码，需额外安装 **NDK** 与 **CMake**（Android Studio 的 SDK Manager 中勾选），由 CMake 把 `app/src/main/cpp` 下的 LibRaw 编为 `libnefdecoder.so`。
 
 ```bash
 # 在项目根目录
@@ -98,7 +98,8 @@ app/src/main/java/com/example/nikond300controller/
 ├── CsmMenu.kt             # 个人设定（CSM）菜单分组与读数/写值
 ├── ShootingMenu.kt        # 拍摄菜单（色彩空间、D-Lighting、NEF 位深、降噪、取景模式等）
 ├── SheetUi.kt             # 底部抽屉 / 网格选择器构件（各参数页复用）
-├── NefPreview.kt          # 从 NEF 抠取内嵌 JPEG 预览
+├── NefDecoder.kt          # NEF → JPG 真转档（JNI 调 LibRaw 解 RAW，非抠预览）
+├── NefPreview.kt          # NEF 内嵌预览定位 + 把原 NEF 的 EXIF 原样搬进转出 JPG
 ├── PhotoExif.kt           # EXIF 解析与三行信息条渲染
 ├── LiveViewRecorder.kt    # 取景画面录制
 └── ShutterCountReader.kt  # 读取机身快门数（EXIF MakerNote）
@@ -109,6 +110,8 @@ app/src/main/res/layout/
 ├── item_gallery_photo.xml # 相册缩略图单元
 └── item_menu_row.xml      # 菜单行单元
 ```
+
+> 原生模块 `app/src/main/cpp/`：内含 **LibRaw**（dcraw 的库化版本）与 JNI 桥 `nef_jni.cpp`，经 CMake 编译为 `libnefdecoder.so`（目标 ABI：`arm64-v8a`、`armeabi-v7a`），由 `NefDecoder` 通过 JNI 调用完成 NEF → PPM 解码。
 
 核心通信封装在 `PtpUsbConnection`：所有对 `UsbDeviceConnection` 的读写都经 `usbLock` 串行化，避免轮询 / 取景 / 相册线程并发抢占同一 Bulk 端点导致响应错乱或管道挂死；并在每次事务后消费残留响应、必要时 `clearHalt` 救援。
 

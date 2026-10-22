@@ -19,6 +19,20 @@ object PtpConstants {
     const val OP_GET_THUMB = 0x100A
 
     /**
+     * SendObjectInfo（0x100C）/ SendObject（0x100D）—— **往机身上写文件**。
+     *
+     * 用法：先 0x100C 带一个 ObjectInfo 数据集（存哪张卡、挂在哪个目录下、文件名、
+     * 多大），机身回一个新对象句柄；再 0x100D 把文件字节发过去。
+     * 目前只为一件事服务：**NCP 滤镜导入**（把 Picture Control 文件写到卡根目录，
+     * 机身再自己「管理优化校准 → 载入/保存 → 复制到相机」装进 C-1…C-9）。
+     */
+    const val OP_SEND_OBJECT_INFO = 0x100C
+    const val OP_SEND_OBJECT = 0x100D
+
+    /** 未定义类型：机身不认识扩展名时就是它，写 .ncp 用这个即可 */
+    const val FORMAT_UNDEFINED = 0x3000
+
+    /**
      * GetPartialObject（0x101B）—— 只读对象的一段，不必把整个文件拖回来。
      *
      * NEF 的用处就在这里：一张 15 MB 的 RAW，真正需要的预览 JPEG 只占其中
@@ -250,7 +264,8 @@ object PtpConstants {
      *
      * 候选码来自官方 226 项属性表（0x180103582）：手持/三脚架是**两档**，
      * 值域 0..1 的 `0xD1A0` 与 `0xD1A2` 是首选；`0xD1A3`(0..6) 更像取景图像尺寸。
-     * 真机上用参数页的「探测取景属性」跑一次即可确认（日志会打出类型/当前值/值域）。
+     * 这几个码的属性类型/值域需要时可用 PtpUsbConnection.probeLiveViewModeProperties() 探测
+     * （日志会打出类型/当前值/值域）；界面上已不再挂入口。
      */
     const val PROP_NIKON_LIVE_VIEW_MODE = 0xD1A0
 

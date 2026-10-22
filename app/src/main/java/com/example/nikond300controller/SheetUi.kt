@@ -6,7 +6,7 @@ package com.example.nikond300controller
  * 这些页面原来各自手搓 View：按钮用系统 MaterialButton、输入框白底、
  * 开关默认蓝、进度条默认蓝——在主界面这块深色盘面上很跳。
  * 这里把说服力收回到一套 token 上：同一张卡片底、同一种 48dp 行高、
- * 同一个琥珀强调色，跟参数页完全一致；具体业务（PTP 读写）仍留在 MainActivity 里。
+ * 同一套强调色，跟参数页完全一致；具体业务（PTP 读写）仍留在 MainActivity 里。
  */
 import android.content.Context
 import android.content.res.ColorStateList
@@ -259,7 +259,7 @@ fun Context.sheetInfoRow(label: String, initial: String): Pair<LinearLayout, Tex
 
 data class SheetSwitchRow(val view: LinearLayout, val switch: MaterialSwitch)
 
-/** 开关行：跟取值行一样 48dp 一行，右边的 MaterialSwitch 染成琥珀 */
+/** 开关行：跟取值行一样 48dp 一行，右边的 MaterialSwitch 染成强调色 */
 fun Context.sheetSwitchRow(
     label: String,
     checked: Boolean = false,

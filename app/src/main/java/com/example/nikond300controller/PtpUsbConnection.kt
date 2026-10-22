@@ -1798,6 +1798,93 @@ class PtpUsbConnection(
         data.array().copyOfRange(12, limit)
     }
 
+    // ------------------------------------------------------------------
+    // 写文件到机身（SendObjectInfo + SendObject）
+    //
+    // 目前只服务 NCP 滤镜导入：尼康把"个人设定优化校准"存在**卡根目录**的
+    // PICCON01.NCP … PICCON99.NCP 上（说明书第 158–160 页：插槽 1–99），
+    // 机身那边再走 管理优化校准 → 载入/保存 → 复制到相机，装进 C-1…C-9。
+    // 所以 App 这边要做的只是"把文件放到卡根目录下"，不需要机身额外的私有命令。
+    // ------------------------------------------------------------------
+
+    /**
+     * 把一段字节写成卡上的一个文件。
+     *
+     * @param parentObject 0 = 卡根目录（机身把 PICCON 文件放在根上，不是 DCIM 里）
+     * @return 新对象的句柄；失败返回 -1（机身不支持写 / 拒绝，看日志里的响应码）
+     */
+    fun sendFileToStorage(
+        fileName: String,
+        bytes: ByteArray,
+        storageId: Int,
+        parentObject: Int = 0
+    ): Int = synchronized(usbLock) {
+        try {
+            drain()
+            val info = buildObjectInfo(storageId, parentObject, fileName, bytes.size)
+            if (!sendPacket(createCommandPacket(PtpConstants.OP_SEND_OBJECT_INFO, storageId, parentObject))) return -1
+            if (!sendPacket(createDataPacket(PtpConstants.OP_SEND_OBJECT_INFO, info))) return -1
+            val r1 = receiveResponse(5000)
+            if (r1?.responseCode != PtpConstants.RESP_OK) {
+                logger("SendObjectInfo 被拒（${r1?.let { "0x${Integer.toHexString(it.responseCode).uppercase()}" } ?: "TIMEOUT"}）")
+                return -1
+            }
+            // 响应参数 [StorageID, ParentObject, ObjectHandle]
+            val handle = r1.params.getOrElse(2) { 0 }
+            android.util.Log.d("PTP_TX_CMD", "SendObjectInfo OK：$fileName → handle 0x${Integer.toHexString(handle).uppercase()}")
+
+            drain()
+            if (!sendPacket(createCommandPacket(PtpConstants.OP_SEND_OBJECT))) return -1
+            if (!sendPacket(createDataPacket(PtpConstants.OP_SEND_OBJECT, bytes))) return -1
+            val r2 = receiveResponse(15000)
+            if (r2?.responseCode != PtpConstants.RESP_OK) {
+                logger("SendObject 被拒（${r2?.let { "0x${Integer.toHexString(it.responseCode).uppercase()}" } ?: "TIMEOUT"}）")
+                return -1
+            }
+            logger("$fileName 已写入存储卡（${bytes.size} 字节）")
+            handle
+        } catch (e: Exception) {
+            logger("写文件出错：${e.message}")
+            -1
+        }
+    }
+
+    /**
+     * 拼一个 ObjectInfo 数据集（PTP 规范 §5.3.2 的字段顺序，一个都不能挪）。
+     * 日期/关键字都留空：PTP 允许空串（长度字节写 0），机身自己会填当前时间。
+     */
+    private fun buildObjectInfo(storageId: Int, parentObject: Int, fileName: String, size: Int): ByteArray {
+        val nameField = ByteArray(1 + (fileName.length + 1) * 2)
+        nameField[0] = (fileName.length + 1).toByte()
+        for (i in fileName.indices) {
+            val c = fileName[i].code
+            nameField[1 + i * 2] = (c and 0xFF).toByte()
+            nameField[2 + i * 2] = ((c ushr 8) and 0xFF).toByte()
+        }
+
+        val buf = java.nio.ByteBuffer.allocate(52 + nameField.size + 3).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        buf.putInt(storageId)                                        // StorageID
+        buf.putShort(PtpConstants.FORMAT_UNDEFINED.toShort())        // ObjectFormatCode
+        buf.putShort(0)                                              // ProtectionStatus
+        buf.putInt(size)                                             // ObjectCompressedSize
+        buf.putShort(0)                                              // ThumbFormat
+        buf.putInt(0)                                                // ThumbCompressedSize
+        buf.putInt(0)                                                // ThumbPixWidth
+        buf.putInt(0)                                                // ThumbPixHeight
+        buf.putInt(0)                                                // ImagePixWidth
+        buf.putInt(0)                                                // ImagePixHeight
+        buf.putInt(0)                                                // ImageBitDepth
+        buf.putInt(parentObject)                                     // ParentObject
+        buf.putShort(0)                                              // AssociationType
+        buf.putInt(0)                                                // AssociationDesc
+        buf.putInt(0)                                                // SequenceNumber
+        buf.put(nameField)                                           // Filename（UTF-16LE + 结尾 0）
+        buf.put(0.toByte())                                          // CaptureDate（空串）
+        buf.put(0.toByte())                                          // ModificationDate（空串）
+        buf.put(0.toByte())                                          // Keywords（空串）
+        return buf.array()
+    }
+
     /**
      * 递归展开目录，收集所有照片句柄。
      *
@@ -2509,14 +2596,17 @@ class PtpUsbConnection(
                 return null
             }
 
+            val extra = if (length >= 16) (length - 12) / 4 else 0
+            val params = IntArray(extra) { k -> buffer.getInt(12 + k * 4) }
+
             if (type == PtpConstants.PACKET_TYPE_RESPONSE) {
                 android.util.Log.d("PTP_RX", "Response 0x${Integer.toHexString(code).uppercase()} in ${elapsed}ms")
-                return PtpResponse(type, code, transactionId)
+                return PtpResponse(type, code, transactionId, params)
             } else if (type == PtpConstants.PACKET_TYPE_EVENT) {
                 android.util.Log.d("PTP_RX", "Event 0x${Integer.toHexString(code).uppercase()} received at ${elapsed}ms")
             } else {
                 android.util.Log.w("PTP_RX", "Type 0x${Integer.toHexString(type).uppercase()} packet at ${elapsed}ms")
-                return PtpResponse(type, code, transactionId)
+                return PtpResponse(type, code, transactionId, params)
             }
         }
         android.util.Log.w("PTP_RX", "等待响应包超时：循环结束仍未收到合法响应")
@@ -2738,5 +2828,14 @@ class PtpUsbConnection(
         return String(hexChars)
     }
 
-    data class PtpResponse(val type: Int, val responseCode: Int, val transactionId: Int)
+    /**
+     * 响应包。[params] 是包里跟在 12 字节头后面的参数（SendObjectInfo 要靠它拿回
+     * 机身新分配的对象句柄），多数命令没有参数，默认空数组。
+     */
+    data class PtpResponse(
+        val type: Int,
+        val responseCode: Int,
+        val transactionId: Int,
+        val params: IntArray = intArrayOf()
+    )
 }

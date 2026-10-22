@@ -17,8 +17,23 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
+        // NEF → JPG 真转档要解 RAW，走 LibRaw（源码在 src/main/cpp/libraw）
+        externalNativeBuild {
+            cmake {
+                cppFlags += "-std=c++14"
+            }
+        }
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
     }
 
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
 
     buildTypes {
         release {
@@ -39,8 +54,8 @@ dependencies {
     implementation(libs.androidx.constraintlayout)
     implementation(libs.androidx.core.ktx)
     implementation(libs.material)
-    // 相册列表 (GalleryActivity) 仍使用 RecyclerView，且 MainActivity 用到 lifecycle，
-    // 显式保留依赖以确保可编译（master 版本移除了这两项，靠传递依赖不一定稳定）。
+    // 相册列表 (GalleryActivity) 仍使用 RecyclerView，MainActivity 用到 lifecycleScope；
+    // NEF 解码版的 build.gradle 曾移除这两项，这里显式保留以确保可编译。
     implementation(libs.androidx.recyclerview)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     testImplementation(libs.junit)

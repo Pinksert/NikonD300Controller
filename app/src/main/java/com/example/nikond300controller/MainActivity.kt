@@ -25,6 +25,7 @@ import android.graphics.PixelFormat
 import android.graphics.drawable.Drawable
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.ColorInt
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -175,7 +176,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
     // 实时取景模式：手持 / 三脚架
     // 参数页的「手持 / 三脚架」分段选择器已删（与拍摄页长按取景键重复），
     // 取景模式现在只在拍摄页体现：长按 LV 键切换 + LV 按钮图标。
-    private lateinit var lvModeProbeButton: Button
+    // 「探测取景属性」那一行也删了（只往日志里打调试信息，日常用不到）。
 
     /**
      * 当前取景模式：0=手持，1=三脚架，-1=还没读到。
@@ -385,12 +386,40 @@ class MainActivity : AppCompatActivity(), SheetHost {
     /** 闪光同步（X 同步）：机身 PTP 里用 -2 表示，同样不在描述符里 */
     private val SHUTTER_FLASH = -2
 
-    /** 档位排法：正常档（1/8000 → 30s）按值升序，B 门 / 闪光同步垫在最后 */
+    /** 档位排法：正常档（1/8000 → 30s）按曝光时长升序，B 门 / 闪光同步垫在最后 */
     private fun shutterRank(v: Int): Int = when (v) {
         SHUTTER_BULB -> 1
         SHUTTER_FLASH -> 2
         else -> 0
     }
+
+    /**
+     * 一个档位代表多少秒 —— **排序只能按它，不能按 PTP 原始值**。
+     *
+     * 这就是"档位顺序乱"的根因：0xD100 是 bit-packed（高 16 分子 / 低 16 分母），
+     * 原始整数大小和快慢毫无关系。比如 1" 是 0x00010001（65537）、1/8000 是 0x00011F40（73536），
+     * 按原始值升序排就变成 1" → 1/2 → 1/4 → … → 1/8000 → 2" → 30"，
+     * 前半段慢到快、后半段又快回慢，用户看到的就是"乱的"。
+     * 标准属性 0x500D 是 1/10000 秒为单位，原始值大小和时长倒是同向，但也统一换算成秒更省心。
+     */
+    private fun shutterSeconds(v: Int): Double {
+        if (v == SHUTTER_BULB || v == SHUTTER_FLASH) return 0.0
+        return if (activeShutterProp == PtpConstants.PROP_NIKON_SHUTTER_SPEED) {
+            val numerator = (v shr 16) and 0xFFFF
+            val denominator = v and 0xFFFF
+            if (numerator <= 0 || denominator <= 0) 0.0 else numerator.toDouble() / denominator.toDouble()
+        } else {
+            v / 10000.0
+        }
+    }
+
+    /** 快门档位统一排法：正常档按时长由短到长，B 门 / 闪光同步垫底 */
+    private fun shuttersSorted(values: Iterable<Int>): List<Int> =
+        values.sortedWith(
+            compareBy<Int> { shutterRank(it) }
+                .thenBy { shutterSeconds(it) }
+                .thenBy { it }
+        )
 
     private fun getShutterString(valCode: Int): String {
         if (valCode == SHUTTER_BULB) return "B 门"
@@ -464,6 +493,9 @@ class MainActivity : AppCompatActivity(), SheetHost {
 
     @Volatile
     private var isConnected = false
+
+    /** NCP 滤镜导入的文件选择器（选 .ncp） */
+    private lateinit var ncpPicker: androidx.activity.result.ActivityResultLauncher<Array<String>>
     @Volatile
     private var isPollingPaused = false
 
@@ -629,6 +661,12 @@ class MainActivity : AppCompatActivity(), SheetHost {
         lvGridStyle = FocusBoxView.GridStyle.values()
             .getOrElse(afPrefs.getInt(LV_GRID_KEY, 0)) { FocusBoxView.GridStyle.OFF }
 
+        // NCP 滤镜导入：选手机上的一个 .ncp 文件（Picture Control Utility 导出的
+        // 个人设定优化校准），写到机身卡的插槽里。注册必须在 onCreate 之前完成。
+        ncpPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri != null) showNcpImportSheet(uri)
+        }
+
         // 返回键：全屏时先退出全屏；取景中先停取景再退出。
         // 直接 finish 会把读帧线程留在后台占着 USB（见 onDestroy 的说明）。
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
@@ -687,7 +725,6 @@ class MainActivity : AppCompatActivity(), SheetHost {
         findViewById<View>(R.id.lvFullCaptureButton).setOnClickListener { doCaptureOnce() }
 
 
-        lvModeProbeButton = findViewById(R.id.lvModeProbeButton)
         setupLiveViewModeControls()
 
         focusChip = findViewById(R.id.focusChip)
@@ -991,7 +1028,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
      *  点击处理要拿它和 [isLiveViewRunning] 对账 —— 两者不一致就说明状态漂移了。 */
     private var liveViewUiState = 0
 
-    /** 取景键三态：0 未取景 / 1 开启中 / 2 取景中（设计稿用琥珀底 + 深色图标表示已开启） */
+    /** 取景键三态：0 未取景 / 1 开启中 / 2 取景中（已开启用强调色底 + 深色图标） */
     private fun setLiveViewState(state: Int) {
         liveViewUiState = state
         if (state == 2) {
@@ -1033,7 +1070,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
      *
      * 之前用的是 `showValueMenu` —— 一列 46dp 的行，ISO 19 项、光圈 27 项、快门 30 多项，
      * 得滚着找，而且只能在半透明的窄条里逐行扫。
-     * 换成 4 列网格：一屏基本能看全，点哪档就是哪档，当前档标琥珀色。
+     * 换成 4 列网格：一屏基本能看全，点哪档就是哪档，当前档用强调色标出。
      */
     private fun showExposureValueSheet(
         title: String,
@@ -1056,7 +1093,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
         }
         card.addView(grid.view)
         if (stepCard != null) page.content.addView(stepCard { page.dialog.dismiss() })
-        page.content.addView(sheetHint(hintText ?: "当前档位标琥珀色，点一下立即生效。"))
+        page.content.addView(sheetHint(hintText ?: "点一下立即生效。"))
         page.show()
     }
 
@@ -1553,7 +1590,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
         page.content.addView(status)
         // 快门档位直接来自机身描述符，b2 步长一变它自己就跟着变；这里补一块步长设定 + 提示
         page.content.addView(evStepControlCard { page.dialog.dismiss() })
-        val hint = sheetHint("琥珀色 = 机身当前快门；档位 1/8000 → 30s 由快到慢，B 门 / 闪光同步在最后。${evControlStepHint()}")
+        val hint = sheetHint("档位 1/8000 → 30s 由快到慢，B 门 / 闪光同步在最后。${evControlStepHint()}")
         page.content.addView(hint)
         page.show()
         // ★ 打开就把当前档那一行滚到中间：50 多档要滚好几屏，
@@ -1576,7 +1613,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
                     }
                     else -> status.text = "机身当前可选 $after 档，与缓存一致"
                 }
-                hint.text = "琥珀色 = 机身当前快门；档位 1/8000 → 30s 由快到慢，B 门 / 闪光同步在最后。${evControlStepHint()}"
+                hint.text = "档位 1/8000 → 30s 由快到慢，B 门 / 闪光同步在最后。${evControlStepHint()}"
             }
         }
     }
@@ -1601,8 +1638,8 @@ class MainActivity : AppCompatActivity(), SheetHost {
         // 但机身上确实存在、手动控快门时也用得到，所以在这里补齐，挂在 30s 之后。
         merged.add(SHUTTER_BULB)
         merged.add(SHUTTER_FLASH)
-        // 排序：正常档按值升序（1/8000 → 30s），B 门 / 闪光同步这两个负值档垫底
-        val sorted = merged.sortedWith(compareBy<Int> { shutterRank(it) }.thenBy { it })
+        // 排序：正常档按曝光时长升序（1/8000 → 30s），B 门 / 闪光同步这两个负值档垫底
+        val sorted = shuttersSorted(merged)
 
         val oldValue = shutters.getOrNull(currentShIndex)?.first
         cameraSupportedShutters = sorted.toIntArray()
@@ -1634,7 +1671,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
             "当前 ${evLabel(currentEvRaw)} · ${evStepSummary()}"
         )
         val card = sheetCard(page.content, null)
-        val status = sheetStatusText("琥珀色 = 机身当前补偿量，点一下立即生效")
+        val status = sheetStatusText("点一下立即生效")
         val hint = sheetHint(evStepHint())
 
         /** 档位表被刷新过，网格要能整块重建 */
@@ -1773,7 +1810,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
         }
     }
 
-    /** 菜单行适配器：当前档打勾 + 琥珀色字 */
+    /** 菜单行适配器：当前档打勾 + 强调色字 */
     private inner class MenuAdapter(
         items: List<String>,
         private val selectedIndex: Int
@@ -1930,6 +1967,109 @@ class MainActivity : AppCompatActivity(), SheetHost {
     /** 当前正在看哪一组（组内页"重新读取"用它；null = 全部） */
     private var csmActiveGroup: CsmGroup? = null
 
+    // ------------------------------------------------------------------
+    // NCP 滤镜导入
+    //
+    // 「滤镜」这里指尼康的**个人设定优化校准**：Picture Control Utility 做出来的
+    // .ncp 文件。说明书第 158–160 页写得很清楚：
+    //   · 卡上最多存 99 个（插槽 1–99，文件就是根目录的 PICCONnn.NCP）
+    //   · 机身用 管理优化校准 → 载入/保存 → 复制到相机，把卡上的插槽装进 C-1…C-9
+    // 所以 PTP 这边要做的事只有一件：**把文件写进卡根目录**（0x100C + 0x100D），
+    // 不需要任何私有命令。装进相机那一步还是得用户在机身上按（机身菜单不走 PTP）。
+    // ------------------------------------------------------------------
+
+    /** 卡根目录上已经占了哪些插槽（PICCONnn.NCP 的 nn） */
+    private fun readNcpSlots(): List<Int> {
+        val ptp = ptpConnection ?: return emptyList()
+        val storage = ptp.firstStorageId()
+        if (storage == 0) return emptyList()
+        val handles = ptp.getObjectHandlesIn(storage, 0) ?: return emptyList()
+        val out = mutableListOf<Int>()
+        for (h in handles) {
+            val info = ptp.getObjectInfo(h) ?: continue
+            val m = Regex("PICCON(\\d{2})\\.NCP", RegexOption.IGNORE_CASE).find(info.filename) ?: continue
+            m.groupValues[1].toIntOrNull()?.let { out.add(it) }
+        }
+        return out.sorted()
+    }
+
+    private fun showNcpImportSheet(uri: android.net.Uri) {
+        val bytes = runCatching {
+            contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        }.getOrNull()
+        if (bytes == null || bytes.isEmpty()) {
+            toast("读不到这个文件")
+            return
+        }
+        val name = runCatching {
+            val cursor = contentResolver.query(uri, null, null, null, null)
+            cursor?.use {
+                val idx = it.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                if (idx >= 0 && it.moveToFirst()) it.getString(idx) else null
+            }
+        }.getOrNull() ?: "已选文件"
+
+        val page = buildSheetPage("NCP 滤镜导入")
+        val status = sheetStatusText("$name · ${bytes.size} 字节")
+        page.content.addView(status)
+
+        val card = sheetCard(page.content, "卡上的插槽")
+        var slot = 1
+        var grid: SheetTileGrid? = null
+        grid = sheetTileGrid(4, (1..99).map { "%02d".format(it) }, 0) { idx ->
+            slot = idx + 1
+            grid?.select(idx)
+        }
+        card.addView(grid.view)
+        page.content.addView(sheetHint(
+            "文件会写成卡根目录的 PICCONnn.NCP。传完之后到机身上：管理优化校准 → " +
+                "载入/保存 → 复制到相机，选一个 C-1…C-9 的位置装进去。已占用的插槽会被覆盖。"
+        ))
+
+        val goBtn = sheetPrimaryButton("导入到机身卡（插槽 01）")
+        goBtn.setOnClickListener {
+            val target = slot
+            goBtn.isEnabled = false
+            status.text = "正在写入 PICCON%02d.NCP …".format(target)
+            thread {
+                val storage = ptpConnection?.firstStorageId() ?: 0
+                val fileName = "PICCON%02d.NCP".format(target)
+                val handle = ptpConnection?.sendFileToStorage(fileName, bytes, storage) ?: -1
+                runOnUiThread {
+                    goBtn.isEnabled = true
+                    if (handle > 0) {
+                        status.text = "$fileName 已写入机身卡（句柄 0x${Integer.toHexString(handle).uppercase()}）"
+                        toast("已写入 $fileName，请到机身菜单载入")
+                    } else {
+                        status.text = "写入失败：机身拒绝了（详见日志）。换个插槽或先解锁卡试试。"
+                    }
+                }
+            }
+        }
+        page.content.addView(goBtn)
+        page.show()
+
+        // 开页后把卡上已占用的插槽报出来：不然用户可能一不留神覆盖掉自己已有的滤镜
+        thread {
+            val used = readNcpSlots()
+            runOnUiThread {
+                if (used.isEmpty()) {
+                    status.text = "$name · ${bytes.size} 字节 · 卡上还没有 NCP 滤镜"
+                } else {
+                    val list = used.joinToString("、") { "%02d".format(it) }
+                    status.text = "$name · ${bytes.size} 字节 · 卡上已占用：$list"
+                    // 默认落在第一个空插槽上
+                    val free = (1..99).firstOrNull { it !in used }
+                    if (free != null) {
+                        slot = free
+                        grid?.select(free - 1)
+                    }
+                }
+                goBtn.text = "导入到机身卡（插槽 %02d）".format(slot)
+            }
+        }
+    }
+
     /**
      * 个人设定菜单 —— **第一层：分区列表**（a/b/c/d/e/f），点一组进第二层。
      *
@@ -1939,7 +2079,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
     private fun showCsmSheet() {
         if (!isConnected) { toast("请先连接相机"); return }
         csmActiveGroup = null
-        val page = buildSheetPage("相机设定菜单")
+        val page = buildSheetPage("个人设定菜单")
 
         for (group in CsmMenu.groups) {
             val adapted = group.items.count { csmCode(it) != PtpConstants.CSM_CODE_UNKNOWN }
@@ -1995,7 +2135,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
         val page = buildSheetPage(group.title, "${group.items.size} 项 · 打开自动读取")
 
         csmReadButton = sheetActionButton("读取中…") { }
-        csmHint = sheetHint("点任一项切换档位；长按可手输属性码。与出厂值不同的项标琥珀色。")
+        csmHint = sheetHint("点任一项切换档位；长按可手输属性码。")
         csmList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
         page.content.addView(csmReadButton)
@@ -2360,7 +2500,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
                             tv.setTextColor(getColor(R.color.text_disabled))
                         } else {
                             tv.text = describeCsmValue(item, current.toInt())
-                            // 和出厂值不一样就是被改过，标琥珀色
+                            // 和出厂值不一样就是被改过，用强调色标出来
                             tv.setTextColor(
                                 if (current != desc.factoryValue) getColor(R.color.accent_amber)
                                 else getColor(R.color.text_primary)
@@ -2382,7 +2522,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
                         pending > 0 ->
                             "已读出 $supported/$total 项；还有 $pending 项属性码未适配，点「扫描未适配项」去匹配。"
                         else ->
-                            "已读出 $supported/$total 项。点任一项切换档位；与出厂值不同的项标琥珀色。"
+                            "已读出 $supported/$total 项。点任一项切换档位。"
                     }
                     log("个人设定：机身应答 $supported/$total 项" +
                         if (pending > 0) "，未适配 $pending 项" else "")
@@ -2711,17 +2851,6 @@ class MainActivity : AppCompatActivity(), SheetHost {
      *   任意位置移动 → 这时才把取景画面的点击接上，走 0x9205。
      */
     private fun setupLiveViewModeControls() {
-        lvModeProbeButton.setOnClickListener {
-            if (!isConnected) { toast("请先连接相机"); return@setOnClickListener }
-            log("探测取景属性…")
-            thread {
-                val lines = ptpConnection?.probeLiveViewModeProperties()
-                runOnUiThread {
-                    if (lines == null) log("探测失败：机身没应答")
-                    else lines.forEach { log(it) }
-                }
-            }
-        }
         renderLiveViewMode(-1)
     }
 
@@ -3237,7 +3366,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
 
     /**
      * 放大倍率二级菜单（长按倍率文字打开）：和曝光参数那套一样，
-     * 点一格直接切到那个百分比，当前档位标琥珀色。
+     * 点一格直接切到那个百分比，当前档位用强调色标出。
      */
     private fun showLvZoomSheet() {
         if (!isConnected) { toast("请先连接相机"); return }
@@ -3398,7 +3527,6 @@ class MainActivity : AppCompatActivity(), SheetHost {
             shutterUpButton.isEnabled = isConnected
             shutterDownButton.isEnabled = isConnected
 
-            lvModeProbeButton.isEnabled = isConnected
             // 这三个控件现在建在「个人设定」抽屉里（打开抽屉才存在）：
             // 没打开过就跳过 —— 直接访问 lateinit 会抛 UninitializedPropertyAccessException。
             if (::customScanButton.isInitialized) {
@@ -3744,7 +3872,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
                         log(msg)
                         Toast.makeText(this@MainActivity, "$msg，再点一次 LV 可重试", Toast.LENGTH_LONG).show()
                         // 机身没确认退出，界面就不能假装已经关了。
-                        // 这里保持"取景中"的琥珀外观，但 isLiveViewRunning 仍为 false：
+                        // 这里保持"取景中"的外观，但 isLiveViewRunning 仍为 false：
                         // 再点一次 LV 会先探测到机身确实还在取景、接管画面，然后可以重试退出。
                         setLiveViewState(2)
                     }
@@ -4046,8 +4174,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
                         val withSpecials = LinkedHashSet<Int>(cameraSupportedShutters!!.toList())
                         withSpecials.add(SHUTTER_BULB)
                         withSpecials.add(SHUTTER_FLASH)
-                        val ordered = withSpecials
-                            .sortedWith(compareBy<Int> { shutterRank(it) }.thenBy { it })
+                        val ordered = shuttersSorted(withSpecials)
                         cameraSupportedShutters = ordered.toIntArray()
                         shutterMap = ordered.associateWith { getShutterString(it) }
                         shutters = ordered.map { it to getShutterString(it) }.toTypedArray()
@@ -5155,7 +5282,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
             if (current == -999999) "0x500B · 未读到" else "机身当前：${meteringLabel(current.toLong())}"
         )
         val card = sheetCard(page.content, null)
-        val status = sheetStatusText("琥珀色 = 机身当前测光方式")
+        val status = sheetStatusText("高亮项是机身当前测光方式")
         card.addView(
             sheetTileGrid(3, entries.map { it.second }, entries.indexOfFirst { it.first == current }) { idx ->
                 val (code, label) = entries[idx]
@@ -5253,7 +5380,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
             val values = desc.allowed
             val size = propSize(desc.dataType)
             runOnUiThread {
-                // 底部不再挂"当前：xx · Uint8"那行：当前档位已经由琥珀色块标出来了，
+                // 底部不再挂"当前：xx · Uint8"那行：当前档位已经由色块标出来了，
                 // 数据类型（Uint8 之类）是机身协议的细节，对拍照没有任何用处。
                 sheetStatus.text = ""
                 sheetStatus.visibility = View.GONE
@@ -5845,7 +5972,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
 
     /**
      * 这三组行都放在参数页的卡片里（XML 只留空容器），行控件统一用 [sheetValueRow]：
-     * 跟白平衡、包围曝光那些二级页同一套 48dp 行高、同样的琥珀值色和箭头。
+     * 跟白平衡、包围曝光那些二级页同一套 48dp 行高、同样的强调色数值和箭头。
      * 这样以后加一门设置只要加一行，不用再写一段 XML。
      */
     private companion object {
@@ -5950,7 +6077,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
 
         // ---- 个人设定：a–f 共 50 项收进二级页，参数页只留这一行 ----
         val csmEntryHost = findViewById<LinearLayout>(R.id.csmEntryList)
-        val csmEntry = sheetValueRow("相机设定菜单", "${CsmMenu.items.size} 项") { _ ->
+        val csmEntry = sheetValueRow("个人设定菜单", "${CsmMenu.items.size} 项") { _ ->
             if (!isConnected) toast("请先连接相机") else showCsmSheet()
         }
         csmEntryHost.addView(csmEntry.view)
@@ -5960,6 +6087,20 @@ class MainActivity : AppCompatActivity(), SheetHost {
             if (!isConnected) toast("请先连接相机") else showShootingMenuSheet()
         }
         csmEntryHost.addView(shootEntry.view)
+
+        // ---- NCP 滤镜导入 ----
+        // 尼康的「个人设定优化校准」就是装在卡根目录 PICCON01…99.NCP 上的滤镜文件，
+        // 机身那边再走 管理优化校准 → 载入/保存 → 复制到相机 装进 C-1…C-9
+        // （说明书第 158–160 页）。App 能做的是把手机上这个 .ncp 传进卡里的插槽。
+        val ncpEntry = sheetValueRow("NCP 滤镜导入", "选 .ncp 传到卡上") { _ ->
+            if (!isConnected) {
+                toast("请先连接相机")
+            } else {
+                runCatching { ncpPicker.launch(arrayOf("*/*")) }
+                    .onFailure { toast("打不开文件选择器：${it.message}") }
+            }
+        }
+        csmEntryHost.addView(ncpEntry.view)
 
         // 重设个人设定不放在参数页：它属于个人设定菜单（机身菜单里也在那一页的末尾），
         // 现在是 showCsmSheet() 的最后一行 —— 见那里的说明。
@@ -6637,11 +6778,9 @@ class MainActivity : AppCompatActivity(), SheetHost {
             })
             addView(endCell)
         })
-        cardRange.addView(sheetHint("点起始或结束光圈即可改范围（默认取镜头可用光圈的全程）。夜景长曝光时，程序会等机身真正拍完再走下一档。"))
 
         // ---- 分组：拍摄 ----
         val cardShoot = sheetCard(page.content, "拍摄")
-        cardShoot.addView(sheetHint("每档先自动对焦、合焦再释放快门；机身当前是手动对焦时自动跳过对焦直接拍。"))
 
         // 倒计时：按下「开始」之后先等几秒再拍第一张。
         // 没有它，人按完开始键手还搭在机身上，第一张最容易糊 —— 给一点离开机身的时间。
@@ -6927,6 +7066,10 @@ class MainActivity : AppCompatActivity(), SheetHost {
         }
         cardParam.addView(countRow.view)
 
+        // 当前快门：先让用户在按「开始」之前确认机身停在哪一档 ——
+        // 包围是以它为圆心往两边迈的，圆心认错了整组都偏（快门菜单里看不到"机身现在在哪"）。
+        val (curRow, curValue) = sheetInfoRow("当前快门", "读取中…")
+        cardParam.addView(curRow)
         val (rangeRow, rangeValue) = sheetInfoRow("快门范围", "--")
         rangeValueRef = rangeValue
         rangeValue.setTextColor(ContextCompat.getColor(this, R.color.accent_amber))
@@ -7092,13 +7235,21 @@ class MainActivity : AppCompatActivity(), SheetHost {
 
         page.show()
 
-        // 进来先看清机身现在停在哪档快门，好把"范围"填出来
+        // 进来先看清机身现在停在哪档快门，好把"当前快门"和"范围"都填出来
         thread {
             val currentShVal = ptpConnection?.getDevicePropValue(activeShutterProp) ?: -999999
             val idx = shutters.indexOfFirst { it.first == currentShVal }
-            if (idx >= 0) {
-                currentShutterIndex = idx
-                runOnUiThread { refreshRange() }
+            runOnUiThread {
+                if (idx >= 0) {
+                    currentShutterIndex = idx
+                    curValue.text = shutters[idx].second
+                    refreshRange()
+                } else {
+                    // 机身报的值不在档位表里（B 门 / 闪光同步 / 刚切过模式）：
+                    // 按原始值直接翻成文字，至少让用户看见机身现在是什么
+                    curValue.text = if (currentShVal == -999999) "--"
+                    else getShutterString(currentShVal)
+                }
             }
         }
     }

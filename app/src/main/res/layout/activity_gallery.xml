@@ -10,11 +10,12 @@
         android:layout_height="match_parent"
         android:orientation="vertical">
 
-        <!-- ===== 顶栏 ===== -->
+        <!-- ===== 顶栏 =====
+             底色跟主页面一致：整页背景就是 bg_base，这里**不再单独铺 bg_surface** ——
+             相册顶栏比主页面亮一档，来回切页时看着像两个 App。 -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="56dp"
-            android:background="@color/bg_surface"
             android:gravity="center_vertical"
             android:paddingStart="6dp"
             android:paddingEnd="16dp">
@@ -62,20 +63,8 @@
                 android:textColor="@color/text_secondary"
                 android:textSize="13sp" />
 
-            <!-- 多选：进相册要能一次挑一批导出到手机，单张「保存」不够用 -->
-            <Button
-                android:id="@+id/selectButton"
-                android:layout_width="wrap_content"
-                android:layout_height="32dp"
-                android:background="@drawable/bg_btn_dark"
-                android:minWidth="0dp"
-                android:paddingStart="12dp"
-                android:paddingEnd="12dp"
-                android:stateListAnimator="@null"
-                android:text="多选"
-                android:textColor="@color/text_secondary"
-                android:textSize="12sp"
-                android:visibility="gone" />
+            <!-- 多选不再占顶栏按钮：长按任一张照片直接进入多选（勾中的就是长按那张）。
+                 顶栏只留返回 / 相册名 / 张数 / 刷新。 -->
 
             <ImageButton
                 android:id="@+id/refreshButton"
@@ -150,7 +139,7 @@
                     android:textSize="13sp"
                     android:textStyle="bold" />
 
-                <Button
+                <androidx.appcompat.widget.AppCompatButton
                     android:id="@+id/selAllButton"
                     android:layout_width="wrap_content"
                     android:layout_height="34dp"
@@ -164,7 +153,7 @@
                     android:textColor="@color/text_primary"
                     android:textSize="12sp" />
 
-                <Button
+                <androidx.appcompat.widget.AppCompatButton
                     android:id="@+id/selExitButton"
                     android:layout_width="wrap_content"
                     android:layout_height="34dp"
@@ -186,7 +175,7 @@
                 android:layout_marginTop="10dp"
                 android:orientation="horizontal">
 
-                <Button
+                <androidx.appcompat.widget.AppCompatButton
                     android:id="@+id/selJpgButton"
                     android:layout_width="0dp"
                     android:layout_height="42dp"
@@ -198,7 +187,7 @@
                     android:textColor="@color/text_secondary"
                     android:textSize="13sp" />
 
-                <Button
+                <androidx.appcompat.widget.AppCompatButton
                     android:id="@+id/selExportButton"
                     android:layout_width="0dp"
                     android:layout_height="42dp"
@@ -287,7 +276,7 @@
                 android:layout_marginTop="12dp"
                 android:orientation="horizontal">
 
-                <Button
+                <androidx.appcompat.widget.AppCompatButton
                     android:id="@+id/saveButton"
                     android:layout_width="0dp"
                     android:layout_height="42dp"
@@ -299,7 +288,7 @@
                     android:textSize="13sp"
                     android:textStyle="bold" />
 
-                <Button
+                <androidx.appcompat.widget.AppCompatButton
                     android:id="@+id/closeViewerButton"
                     android:layout_width="0dp"
                     android:layout_height="42dp"

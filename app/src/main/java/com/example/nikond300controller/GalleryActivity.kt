@@ -134,12 +134,12 @@ class GalleryActivity : AppCompatActivity() {
     private lateinit var saveButton: Button
 
     // ---- 多选导出 ----
-    private lateinit var selectButton: Button
     private lateinit var selectionBar: LinearLayout
     private lateinit var selCount: TextView
     private lateinit var selProgress: ProgressBar
     private lateinit var selStatus: TextView
     private lateinit var selJpgButton: Button
+    private lateinit var selExportButton: Button
 
     /** 导出时把 NEF 用内嵌预览转成 JPG（JPEG 原文件不受影响，直接拷字节） */
     private var exportAsJpg = false
@@ -270,6 +270,37 @@ class GalleryActivity : AppCompatActivity() {
     private val previewCache = mutableMapOf<Int, Bitmap?>()
     private val previewLock = Any()
 
+    // ------------------------------------------------------------------
+    // 原文件字节缓存
+    //
+    // ★ 以前 NEF 要传**两遍**整文件：一遍抠预览（loadNefPreview），一遍"供保存"
+    // （startFullFetch）。十几 MB × 2，慢不说，EXIF 还要等第二遍传完才出现 ——
+    // 用户点开一张要对着空白详情区等十几秒。
+    // 现在全文件只取一次，字节留在这里：预览、EXIF、保存三件事共用同一份，
+    // 左右滑回刚看过的那张也能瞬间出图 + 立刻有参数。
+    // 上限压到 2 份（≈30 MB），多了就淘汰最久没用的。
+    // ------------------------------------------------------------------
+    private val fullBytes = object : LinkedHashMap<Int, ByteArray>(4, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, ByteArray>?): Boolean =
+            size > 2
+    }
+    private val fullBytesLock = Any()
+
+    /** 取一张照片的完整字节（带缓存 + 一次重试）；断连或机身不给就 null */
+    private fun fetchFull(ptp: PtpUsbConnection, info: PtpObjectInfo): ByteArray? {
+        synchronized(fullBytesLock) { fullBytes[info.handle]?.let { return it } }
+        if (!pageAlive) return null
+        // NEF 十几 MB 传一半失败很常见（机身忙 / USB 抖动），补一次重试，
+        // 别让用户为了一次抖动去退出重进
+        var bytes = ptp.getObject(info.handle, info.byteSize)
+        if (bytes == null && pageAlive) {
+            Thread.sleep(600)
+            bytes = ptp.getObject(info.handle, info.byteSize)
+        }
+        if (bytes != null) synchronized(fullBytesLock) { fullBytes[info.handle] = bytes }
+        return bytes
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_gallery)
@@ -298,13 +329,12 @@ class GalleryActivity : AppCompatActivity() {
         refreshButton.setOnClickListener { reload() }
 
         // ---- 多选导出 ----
-        selectButton = findViewById(R.id.selectButton)
         selectionBar = findViewById(R.id.selectionBar)
         selCount = findViewById(R.id.selCount)
         selProgress = findViewById(R.id.selProgress)
         selStatus = findViewById(R.id.selStatus)
-        selectButton.setOnClickListener { setSelectMode(!adapter.selectMode) }
-        // 有照片才给「多选」入口：空相册点了只会弹出一条空操作条
+        // 进多选只有一个入口：**长按任一张照片**（长按那张顺手就勾上），
+        // 顶栏不再放「多选」按钮 —— 多一个入口就多一处状态要同步。
         findViewById<Button>(R.id.selAllButton).setOnClickListener {
             if (adapter.selected.size == entries.size) adapter.selected.clear()
             else entries.forEach { adapter.selected.add(it.info.handle) }
@@ -317,21 +347,30 @@ class GalleryActivity : AppCompatActivity() {
             exportAsJpg = !exportAsJpg
             updateSelectionUi()
         }
-        findViewById<Button>(R.id.selExportButton).setOnClickListener { exportSelected() }
+        selExportButton = findViewById(R.id.selExportButton)
+        selExportButton.setOnClickListener { exportSelected() }
 
         // 全屏查看时，返回键先关查看层而不是直接退出相册
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (viewerOverlay.visibility == View.VISIBLE) {
-                    closeViewer()
-                } else {
-                    isEnabled = false
-                    onBackPressedDispatcher.onBackPressed()
+                when {
+                    viewerOverlay.visibility == View.VISIBLE -> closeViewer()
+                    // 多选状态下返回键先退出多选，别把整个相册关掉
+                    adapter.selectMode -> setSelectMode(false)
+                    else -> {
+                        isEnabled = false
+                        onBackPressedDispatcher.onBackPressed()
+                    }
                 }
             }
         })
 
-        adapter = ThumbAdapter(entries, { openViewer(it) }) { updateSelectionUi() }
+        adapter = ThumbAdapter(
+            entries,
+            { openViewer(it) },
+            { updateSelectionUi() },
+            { entry -> enterSelectMode(entry) }
+        )
         // 左右滑动切上一张 / 下一张（看大图时不必退出去再点下一格）
         setupViewerSwipe()
         recycler.layoutManager = GridLayoutManager(this, 3)
@@ -502,7 +541,10 @@ class GalleryActivity : AppCompatActivity() {
             if (token != loadToken) return@runOnUiThread
             entries.clear()
             entries.addAll(seeded)
+            // 换相册了：勾选的是句柄，留着会对不上新列表里的照片
+            if (adapter.selectMode) adapter.selected.clear()
             adapter.notifyDataSetChanged()
+            updateSelectionUi()
             updateCountText()
         }
         // 等 UI 线程真的把列表换好，再开始往里填图 —— 否则后台读到的可能还是旧列表
@@ -715,7 +757,7 @@ class GalleryActivity : AppCompatActivity() {
         val d = resources.displayMetrics.density
         val amber = getColor(R.color.accent_amber)
 
-        /** 一块 chip：矢量图标（有就置左）或文本符号染琥珀色做视觉锚点 */
+        /** 一块 chip：矢量图标（有就置左）或文本符号染强调色做视觉锚点 */
         fun chip(c: PhotoExif.Chip): TextView {
             val tv = TextView(this).apply {
                 textSize = 12f
@@ -729,7 +771,7 @@ class GalleryActivity : AppCompatActivity() {
                 ).apply { marginEnd = (6 * d).toInt(); bottomMargin = (6 * d).toInt() }
             }
             if (c.iconRes != 0) {
-                // 图标本身已经画成琥珀色，直接挂上即可（12dp 描边小图标，和参数页那套一致）
+                // 图标本身已经带强调色，直接挂上即可（12dp 描边小图标，和参数页那套一致）
                 tv.setCompoundDrawablesRelativeWithIntrinsicBounds(c.iconRes, 0, 0, 0)
                 tv.compoundDrawablePadding = (4 * d).toInt()
             }
@@ -742,7 +784,7 @@ class GalleryActivity : AppCompatActivity() {
                     0, c.symbol.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
                 )
             }
-            // 曝光补偿：值首位的符号（+ / - / 归零时的 ±）也染琥珀色，
+            // 曝光补偿：值首位的符号（+ / - / 归零时的 ±）也染强调色，
             // 和上面图标/符号同一套高亮 —— 0 EV 时写成 "±0.0"，那个 ± 同样要亮
             if (c.signOrange && c.value.isNotEmpty() &&
                 (c.value[0] == '+' || c.value[0] == '-' || c.value[0] == '±')
@@ -979,118 +1021,69 @@ class GalleryActivity : AppCompatActivity() {
             return
         }
 
-        // NEF 先看缓存里有没有预览，有就直接上屏，省掉两趟 USB
-        val cached = synchronized(previewLock) {
-            if (previewCache.containsKey(entry.info.handle)) previewCache[entry.info.handle] else null
-        }
-        if (cached != null) {
+        // 字节已经在缓存里（刚看过 / 刚导出过）：不用再走 USB，图 + EXIF 立刻到位
+        val cachedBytes = synchronized(fullBytesLock) { fullBytes[entry.info.handle] }
+        if (cachedBytes != null) {
             viewerProgress.visibility = View.GONE
-            setViewerBitmap(cached)
-            renderViewerInfo(
-                "预览 ${cached.width}×${cached.height} · 点「保存」可导出 NEF 原文件\n" +
-                    "正在后台读取原文件用于保存…"
-            )
-            startFullFetch(ptp, entry.info, head, token)
+            showBytes(entry, cachedBytes, token)
             return
         }
 
-        bg {
-            if (!pageAlive) return@bg
-            if (entry.info.isJpeg) {
-                val bytes = ptp.getObject(entry.info.handle, entry.info.byteSize)
-                runOnUiThread {
-                    if (token != viewerToken) return@runOnUiThread     // 已经滑走了
-                    viewerProgress.visibility = View.GONE
-                    if (bytes == null) {
-                        renderViewerInfo("原图读取失败")
-                        return@runOnUiThread
-                    }
-                    currentBytes = bytes
-                    saveButton.isEnabled = true
-                    val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                    if (bmp != null) {
-                        setViewerBitmap(bmp)
-                        renderViewerInfo("${bmp.width}×${bmp.height}")
-                        // 详情页要看日期时间和曝光参数，这里把 EXIF 补上
-                        attachExif(bytes, "${bmp.width}×${bmp.height}", token)
-                    } else {
-                        renderViewerInfo("解码失败")
-                        attachExif(bytes, "解码失败", token)
-                    }
-                }
-            } else {
-                // NEF：先取预览（快），再后台拉原文件（慢）供保存
-                val preview = loadNefPreview(ptp, entry.info)
-                synchronized(previewLock) { previewCache[entry.info.handle] = preview }
-                runOnUiThread {
-                    if (token != viewerToken) return@runOnUiThread
-                    viewerProgress.visibility = View.GONE
-                    if (preview != null) {
-                        setViewerBitmap(preview)
-                        renderViewerInfo(
-                            "预览 ${preview.width}×${preview.height} · 正在后台读取原文件用于保存…"
-                        )
-                    } else {
-                        renderViewerInfo(
-                            "${entry.info.pixWidth}×${entry.info.pixHeight} · 未找到内嵌预览，正在读取原文件…"
-                        )
-                    }
-                }
-                startFullFetch(ptp, entry.info, head, token)
-            }
+        // NEF 先看预览缓存：虽然字节没留住，位图还在就能先顶上，至少不是空白
+        val cached = synchronized(previewLock) {
+            if (previewCache.containsKey(entry.info.handle)) previewCache[entry.info.handle] else null
         }
-    }
+        if (cached != null) setViewerBitmap(cached)
 
-    /** 后台把原文件拉回来，只为「保存」按钮服务；预览早就上屏了，用户不用等 */
-    private fun startFullFetch(ptp: PtpUsbConnection, info: PtpObjectInfo, head: String, token: Int) {
         bg {
             if (!pageAlive) return@bg
-            // NEF 十几 MB 传一半失败很常见（机身忙 / USB 抖动），失败重试一次，
-            // 别让用户为了一次抖动去退出重进
-            var bytes = ptp.getObject(info.handle, info.byteSize)
-            if (bytes == null && pageAlive) {
-                Thread.sleep(600)
-                bytes = ptp.getObject(info.handle, info.byteSize)
-            }
+            // ★ 只取一次：预览、EXIF、保存共用这一份字节
+            // （以前 NEF 要传两遍整文件，EXIF 还得等第二遍传完才出现）
+            val bytes = fetchFull(ptp, entry.info)
             runOnUiThread {
                 // 已经滑到别的照片：这张的结果全部作废（画面 / EXIF / 保存按钮都不许动）
                 if (token != viewerToken) return@runOnUiThread
+                viewerProgress.visibility = View.GONE
                 if (bytes == null) {
                     renderViewerInfo("原文件读取失败，无法保存")
                     return@runOnUiThread
                 }
-                currentBytes = bytes
-                saveButton.isEnabled = true
-                // 完整字节到手就重新抠一次内嵌预览：网格缩略图只有一百多像素，
-                // 换成内嵌 JPEG（通常 4288×2848 的缩小版）看着才像样
-                val bmp = decodeNefFromFull(bytes)
-                if (bmp != null) {
-                    setViewerBitmap(bmp)
-                    synchronized(previewLock) { previewCache[info.handle] = bmp }
-                    renderViewerInfo("预览 ${bmp.width}×${bmp.height}")
-                    // NEF 也是 TIFF，内嵌的拍摄时间/曝光参数一样能读
-                    attachExif(bytes, "预览 ${bmp.width}×${bmp.height}", token)
-                } else {
-                    renderViewerInfo("${info.pixWidth}×${info.pixHeight} · NEF 无内嵌预览，可保存原文件")
-                    attachExif(bytes, "${info.pixWidth}×${info.pixHeight} · NEF 无内嵌预览，可保存原文件", token)
-                }
+                showBytes(entry, bytes, token)
             }
         }
     }
 
-    /**
-     * 取 NEF 的内嵌预览（**只在用户点开某一张时调用**）。
-     *
-     * 以前这里先试 0x101B 分段读取、只传 256 KB —— 真机实测 D300 **不支持 0x101B**
-     * （回"无数据"），那条路从来没成功过，反而每次都留下一次失败事务。
-     * 现在直接整张 getObject（NEF 十几 MB，几秒），从完整字节里抠内嵌 JPEG。
-     */
-    private fun loadNefPreview(ptp: PtpUsbConnection, info: PtpObjectInfo): Bitmap? {
-        val full = ptp.getObject(info.handle, info.byteSize) ?: return null
-        return decodeNefFromFull(full)
+    /** 完整字节到手后的统一出口：上画面 + 开保存 + 立刻解析 EXIF */
+    private fun showBytes(entry: Entry, bytes: ByteArray, token: Int) {
+        currentBytes = bytes
+        saveButton.isEnabled = true
+        if (entry.info.isJpeg) {
+            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            if (bmp != null) {
+                setViewerBitmap(bmp)
+                renderViewerInfo("${bmp.width}×${bmp.height}")
+                attachExif(bytes, "${bmp.width}×${bmp.height}", token)
+            } else {
+                renderViewerInfo("解码失败")
+                attachExif(bytes, "解码失败", token)
+            }
+        } else {
+            // NEF 本身是 TIFF，Android 解不了 —— 抠它内嵌的那张 JPEG 预览
+            val bmp = decodeNefFromFull(bytes)
+            if (bmp != null) {
+                setViewerBitmap(bmp)
+                synchronized(previewLock) { previewCache[entry.info.handle] = bmp }
+                renderViewerInfo("预览 ${bmp.width}×${bmp.height}")
+                attachExif(bytes, "预览 ${bmp.width}×${bmp.height}", token)
+            } else {
+                val fallback = "${entry.info.pixWidth}×${entry.info.pixHeight} · NEF 无内嵌预览，可保存原文件"
+                renderViewerInfo(fallback)
+                attachExif(bytes, fallback, token)
+            }
+        }
     }
 
-    /** 已经拿到完整 NEF 字节时的备用抠图路径 */
+    /** 已经拿到完整 NEF 字节时的抠图路径 */
     private fun decodeNefFromFull(full: ByteArray): Bitmap? {
         val loc = NefPreview.locate(full) ?: return null
         val jpeg = NefPreview.slice(full, loc) ?: return null
@@ -1148,83 +1141,137 @@ class GalleryActivity : AppCompatActivity() {
             for (b in thumbCache.values) b?.recycle()
             thumbCache.clear()
         }
+        // 原文件字节：一张 NEF 十几 MB，整页走了就别占着（位图要 recycle，字节交给 GC 即可）
+        synchronized(fullBytesLock) { fullBytes.clear() }
     }
 
-    // ---- 多选导出：原始开发分支里漏提交这三个成员，这里补齐以恢复可编译 ----
+    // ------------------------------------------------------------------
+    // 多选 → 导出到手机
+    //
+    // 单张「保存到手机」解决不了"一次带走一批"的需求：卡里几百张，
+    // 想留 30 张就得点开 30 次。这里在网格上直接勾选，一次导出。
+    // ------------------------------------------------------------------
+
+    /** 长按某张照片：进多选并顺手勾上它 */
+    private fun enterSelectMode(entry: Entry) {
+        adapter.selected.add(entry.info.handle)
+        setSelectMode(true)
+    }
+
+    /** 进出多选模式 */
     private fun setSelectMode(on: Boolean) {
         adapter.selectMode = on
         if (!on) adapter.selected.clear()
+        selectionBar.visibility = if (on) View.VISIBLE else View.GONE
+        // 多选期间不进单张查看：那会盖住整屏，勾了一半看不见底下的操作条
+        if (!on) {
+            selProgress.visibility = View.GONE
+            selStatus.visibility = View.GONE
+        }
         adapter.notifyDataSetChanged()
         updateSelectionUi()
     }
 
     private fun updateSelectionUi() {
         val n = adapter.selected.size
-        selCount.text = if (n > 0) "$n 已选" else ""
-        selectionBar.visibility = if (adapter.selectMode) View.VISIBLE else View.GONE
-        selJpgButton.isSelected = exportAsJpg
+        selCount.text = if (n == 0) "已选 0 张（点照片勾选）" else "已选 $n 张"
+        selJpgButton.text = if (exportAsJpg) "转为 JPG ✓" else "转为 JPG"
+        selJpgButton.setTextColor(
+            ContextCompat.getColor(this, if (exportAsJpg) R.color.accent_amber else R.color.text_secondary)
+        )
+        selExportButton.isEnabled = n > 0 && !exporting
     }
 
-    private fun exportSelected() {
-        if (adapter.selected.isEmpty()) {
-            Toast.makeText(this, "未选择任何照片", Toast.LENGTH_SHORT).show()
-            return
-        }
-        val ptp = PtpUsbConnection.activeInstance
-        if (ptp == null) {
-            Toast.makeText(this, "未连接相机", Toast.LENGTH_SHORT).show()
-            return
-        }
-        val targets = entries.filter { adapter.selected.contains(it.info.handle) }
-        val total = targets.size
-        selStatus.text = "导出中 0/$total"
-        var done = 0
-        var failed = 0
-        bg {
-            for (entry in targets) {
-                val bytes = ptp.getObject(entry.info.handle, entry.info.byteSize)
-                if (bytes != null) {
-                    saveBytesToGallery(entry.info, bytes)
-                    done++
-                } else {
-                    failed++
-                }
-                val d = done + failed
-                runOnUiThread { selStatus.text = "导出中 $d/$total" }
-            }
-            val ok = done
-            val bad = failed
-            runOnUiThread {
-                selStatus.text = "已导出 $ok/$total" + if (bad > 0) "（失败 $bad）" else ""
-                Toast.makeText(
-                    this@GalleryActivity,
-                    if (bad > 0) "导出完成：成功 $ok，失败 $bad" else "已导出 $ok 张到 相册/D300",
-                    Toast.LENGTH_LONG
-                ).show()
-                setSelectMode(false)
-            }
-        }
-    }
-
-    /** 把单张照片字节写入手机相册（与 saveCurrent 同款 MediaStore 落盘） */
-    private fun saveBytesToGallery(info: PtpObjectInfo, bytes: ByteArray) {
-        try {
+    /** 把字节写进手机相册（Pictures/D300），成功返回文件名 */
+    private fun writeToPhone(name: String, mime: String, bytes: ByteArray): Boolean {
+        return try {
             val values = ContentValues().apply {
-                put(MediaStore.Images.Media.DISPLAY_NAME, info.filename)
-                put(
-                    MediaStore.Images.Media.MIME_TYPE,
-                    if (info.isJpeg) "image/jpeg" else "image/x-nikon-nef"
-                )
+                put(MediaStore.Images.Media.DISPLAY_NAME, name)
+                put(MediaStore.Images.Media.MIME_TYPE, mime)
+                // API 29+ 生效；低版本会被忽略，落进 Pictures 根目录，不会崩
                 put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/D300")
                 put(MediaStore.Images.Media.IS_PENDING, 1)
             }
-            val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return
-            contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
+            val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                ?: return false
+            contentResolver.openOutputStream(uri)?.use { it.write(bytes) } ?: return false
             values.clear()
             values.put(MediaStore.Images.Media.IS_PENDING, 0)
             contentResolver.update(uri, values, null, null)
+            true
         } catch (_: Exception) {
-            // 单张失败不影响其余，失败数已在 exportSelected 统计
+            false
+        }
+    }
+
+    /** 导出勾选的那批照片（可选把 NEF 转成 JPG） */
+    private fun exportSelected() {
+        val ptp = PtpUsbConnection.activeInstance
+        if (ptp == null) { Toast.makeText(this, "未连接相机", Toast.LENGTH_SHORT).show(); return }
+        if (exporting) return
+        val targets = entries.filter { adapter.selected.contains(it.info.handle) }
+        if (targets.isEmpty()) { Toast.makeText(this, "还没勾选照片", Toast.LENGTH_SHORT).show(); return }
+
+        exporting = true
+        val asJpg = exportAsJpg
+        selProgress.visibility = View.VISIBLE
+        selProgress.isIndeterminate = false
+        selProgress.max = targets.size
+        selProgress.progress = 0
+        selStatus.visibility = View.VISIBLE
+        selStatus.text = "准备导出 ${targets.size} 张…"
+        updateSelectionUi()
+
+        bg {
+            var ok = 0
+            var failed = 0
+            var converted = 0
+            for ((i, e) in targets.withIndex()) {
+                if (!pageAlive) break
+                runOnUiThread {
+                    // 转档那一步要解 RAW，一张要好几秒，把"正在转档"说清楚，
+                    // 否则进度条停在同一个数上看着像卡死了
+                    val doing = if (asJpg && !e.info.isJpeg) "正在转档并导出" else "正在导出"
+                    selStatus.text = "$doing ${i + 1}/${targets.size}：${e.info.filename}"
+                    selProgress.progress = i
+                }
+                val bytes = fetchFull(ptp, e.info)
+                if (bytes == null) { failed++; continue }
+
+                if (asJpg && !e.info.isJpeg) {
+                    // NEF 转 JPG：**真解 RAW**（LibRaw），不再抠机身内嵌的那张预览 ——
+                    // 那张预览只有 239 KB，画质和体积都不像一张正常照片。
+                    // 解出来的图没有 EXIF，NefDecoder 内部会把原 NEF 的元数据搬进 APP1。
+                    val jpg = NefDecoder.toJpeg(bytes, cacheDir)
+                    if (jpg == null) {
+                        // 解不出来就退回存原文件，别把这张丢了
+                        if (writeToPhone(e.info.filename,
+                                "image/x-nikon-nef", bytes)
+                        ) ok++ else failed++
+                        continue
+                    }
+                    val outName = e.info.filename.substringBeforeLast('.') + ".jpg"
+                    if (writeToPhone(outName, "image/jpeg", jpg)) { ok++; converted++ } else failed++
+                } else {
+                    val mime = if (e.info.isJpeg) "image/jpeg" else "image/x-nikon-nef"
+                    if (writeToPhone(e.info.filename, mime, bytes)) ok++ else failed++
+                }
+            }
+            runOnUiThread {
+                exporting = false
+                selProgress.progress = targets.size
+                selStatus.text = buildString {
+                    append("导出完成：$ok 张已存到 相册/D300")
+                    if (converted > 0) append("（其中 $converted 张 NEF 已转 JPG）")
+                    if (failed > 0) append(" · $failed 张失败（详见日志）")
+                }
+                Toast.makeText(
+                    this,
+                    if (failed > 0) "导出完成，有 $failed 张失败" else "已导出 $ok 张到 相册/D300",
+                    Toast.LENGTH_LONG
+                ).show()
+                updateSelectionUi()
+            }
         }
     }
 
@@ -1235,37 +1282,15 @@ class GalleryActivity : AppCompatActivity() {
 
         // 保存到手机：纯本地 IO，不占 USB，不用登记进 bgThreads
         thread {
-            try {
-                val values = ContentValues().apply {
-                    put(MediaStore.Images.Media.DISPLAY_NAME, entry.info.filename)
-                    put(MediaStore.Images.Media.MIME_TYPE,
-                        if (entry.info.isJpeg) "image/jpeg" else "image/x-nikon-nef")
-                    // API 29+ 生效；低版本会被忽略，落进 Pictures 根目录，不会崩
-                    put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/D300")
-                    put(MediaStore.Images.Media.IS_PENDING, 1)
-                }
-                val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-                if (uri == null) {
-                    runOnUiThread {
-                        Toast.makeText(this, "保存失败：无法创建文件", Toast.LENGTH_SHORT).show()
-                        saveButton.isEnabled = true
-                    }
-                    return@thread
-                }
-                contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
-                values.clear()
-                values.put(MediaStore.Images.Media.IS_PENDING, 0)
-                contentResolver.update(uri, values, null, null)
-
-                runOnUiThread {
+            val mime = if (entry.info.isJpeg) "image/jpeg" else "image/x-nikon-nef"
+            val ok = writeToPhone(entry.info.filename, mime, bytes)
+            runOnUiThread {
+                if (ok) {
                     Toast.makeText(this, "已保存到 相册/D300/${entry.info.filename}", Toast.LENGTH_LONG).show()
-                    saveButton.isEnabled = true
+                } else {
+                    Toast.makeText(this, "保存失败：无法创建文件", Toast.LENGTH_SHORT).show()
                 }
-            } catch (e: Exception) {
-                runOnUiThread {
-                    Toast.makeText(this, "保存失败：${e.message}", Toast.LENGTH_SHORT).show()
-                    saveButton.isEnabled = true
-                }
+                saveButton.isEnabled = true
             }
         }
     }
@@ -1276,26 +1301,27 @@ class GalleryActivity : AppCompatActivity() {
         else -> "$bytes B"
     }
 
-    /** 网格里每格的 ViewHolder：从 ThumbAdapter 中提出来，因为 Kotlin 不允许 inner class 内部再嵌套 class */
-    private class Holder(view: View) : RecyclerView.ViewHolder(view) {
-        val thumb: ImageView = view.findViewById(R.id.thumb)
-        val badge: TextView = view.findViewById(R.id.badge)
-        val name: TextView = view.findViewById(R.id.filename)
-        val check: android.widget.CheckBox = view.findViewById(R.id.check)
-    }
-
-    private inner class ThumbAdapter(
+    private class ThumbAdapter(
         private val entries: List<Entry>,
         private val onClick: (Entry) -> Unit,
         /** 勾选变化：用来刷新底部"已选 N 张" */
-        private val onSelectionChanged: () -> Unit
-    ) : RecyclerView.Adapter<Holder>() {
+        private val onSelectionChanged: () -> Unit,
+        /** 长按某张：直接进入多选并勾上它（不用先去顶栏点「多选」再回来找） */
+        private val onEnterSelect: (Entry) -> Unit
+    ) : RecyclerView.Adapter<ThumbAdapter.Holder>() {
 
         /** 多选模式：点格子变成勾选，右上角出现勾选框 */
         var selectMode = false
 
         /** 已勾选的照片句柄（用句柄而不是下标：切相册/刷新时下标会变） */
         val selected = mutableSetOf<Int>()
+
+        class Holder(view: View) : RecyclerView.ViewHolder(view) {
+            val thumb: ImageView = view.findViewById(R.id.thumb)
+            val badge: TextView = view.findViewById(R.id.badge)
+            val name: TextView = view.findViewById(R.id.filename)
+            val check: android.widget.CheckBox = view.findViewById(R.id.check)
+        }
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder {
             val view = LayoutInflater.from(parent.context)
@@ -1341,12 +1367,7 @@ class GalleryActivity : AppCompatActivity() {
             }
             // 长按直接进入多选：不用先去顶栏点「多选」再回来找照片
             holder.itemView.setOnLongClickListener {
-                if (!selectMode) {
-                    selectMode = true
-                    selected.add(entry.info.handle)
-                    setSelectMode(true)
-                    notifyDataSetChanged()
-                }
+                if (!selectMode) onEnterSelect(entry)
                 true
             }
         }

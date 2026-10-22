@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="12dp"
+    android:height="12dp"
+    android:viewportWidth="12"
+    android:viewportHeight="12">
+    <!-- 曝光模式：模式转盘 -->
+    <path
+        android:pathData="M1.6,3.4 L10.4,3.4 A1.2,1.2 0 0 1 11.6,4.6 L11.6,8.2 A1.2,1.2 0 0 1 10.4,9.4 L1.6,9.4 A1.2,1.2 0 0 1 0.4,8.2 L0.4,4.6 A1.2,1.2 0 0 1 1.6,3.4 Z"
+        android:strokeColor="#8A94A6"
+        android:strokeWidth="1.2"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M9.2,6.4 L9.2,4.6"
+        android:strokeColor="#8A94A6"
+        android:strokeWidth="1.2"
+        android:strokeLineCap="round" />
+</vector>

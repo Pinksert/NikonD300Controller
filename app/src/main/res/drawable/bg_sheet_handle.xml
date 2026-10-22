@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 抽屉顶部那条把手，暗示"可以往下滑收起" -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <solid android:color="#39414F" />
+    <corners android:radius="999dp" />
+</shape>

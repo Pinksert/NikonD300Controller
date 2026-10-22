@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 二级页面（底部抽屉）的底：上半部两个大圆角，跟主界面的卡片同一套深浅 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <solid android:color="@color/bg_surface" />
+    <corners
+        android:topLeftRadius="20dp"
+        android:topRightRadius="20dp" />
+</shape>

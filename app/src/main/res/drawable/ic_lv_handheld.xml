@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  手持取景模式：一个人把相机举在胸前构图。
+  对应说明书第 80 页"手持"那个小图（人形 + 相机）。
+  线条风格与 ic_liveview 一致：26×26 视区、1.6 描边、圆头。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="26dp"
+    android:height="26dp"
+    android:viewportWidth="26"
+    android:viewportHeight="26">
+
+    <!-- 整体放大 1.15 倍：画满一点，放在 64dp 的圆钮上才够醒目 -->
+    <group
+        android:pivotX="13"
+        android:pivotY="13"
+        android:scaleX="1.15"
+        android:scaleY="1.15">
+
+        <!-- 头 -->
+        <path
+            android:pathData="M13,2.4 A2.05,2.05 0 1,1 13,6.5 A2.05,2.05 0 1,1 13,2.4"
+            android:strokeColor="#E8EDF4"
+            android:strokeWidth="1.6" />
+
+        <!-- 肩线 -->
+        <path
+            android:pathData="M8.1,20.6 C8.1,16.2 9.9,13.4 13,13.4 C16.1,13.4 17.9,16.2 17.9,20.6"
+            android:strokeColor="#E8EDF4"
+            android:strokeWidth="1.6"
+            android:strokeLineCap="round" />
+
+        <!-- 相机机身 -->
+        <path
+            android:pathData="M8.6,14.2 L17.4,14.2 A1.3,1.3 0 0 1 18.7,15.5 L18.7,19.5 A1.3,1.3 0 0 1 17.4,20.8 L8.6,20.8 A1.3,1.3 0 0 1 7.3,19.5 L7.3,15.5 A1.3,1.3 0 0 1 8.6,14.2 Z"
+            android:strokeColor="#E8EDF4"
+            android:strokeWidth="1.6" />
+
+        <!-- 镜头 -->
+        <path
+            android:pathData="M13,16 A1.55,1.55 0 1,1 13,19.1 A1.55,1.55 0 1,1 13,16"
+            android:strokeColor="#E8EDF4"
+            android:strokeWidth="1.4" />
+
+        <!-- 双手 -->
+        <path
+            android:pathData="M7.3,17.5 L4.9,17.5 M18.7,17.5 L21.1,17.5"
+            android:strokeColor="#E8EDF4"
+            android:strokeWidth="1.6"
+            android:strokeLineCap="round" />
+    </group>
+</vector>

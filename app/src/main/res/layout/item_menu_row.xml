@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 下拉菜单的一行：左边当前值打勾（占位保持缩进对齐），右边档位名 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="46dp"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:paddingStart="14dp"
+    android:paddingEnd="14dp">
+
+    <TextView
+        android:id="@+id/menuCheck"
+        android:layout_width="16dp"
+        android:layout_height="wrap_content"
+        android:text="✓"
+        android:textColor="@color/accent_amber"
+        android:textSize="14sp"
+        android:visibility="invisible" />
+
+    <TextView
+        android:id="@+id/menuLabel"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="10dp"
+        android:layout_weight="1"
+        android:ellipsize="end"
+        android:singleLine="true"
+        android:textColor="@color/text_primary"
+        android:textSize="14sp" />
+
+</LinearLayout>

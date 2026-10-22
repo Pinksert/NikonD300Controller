@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="12dp"
+    android:height="12dp"
+    android:viewportWidth="12"
+    android:viewportHeight="12">
+    <!-- 焦距：带四向刻度的光圈环 -->
+    <path
+        android:pathData="M6,2.2 A3.8,3.8 0 1,1 6,9.8 A3.8,3.8 0 1,1 6,2.2"
+        android:strokeColor="#8A94A6"
+        android:strokeWidth="1.2"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M6,0.8 L6,2.6 M6,9.4 L6,11.2 M0.8,6 L2.6,6 M9.4,6 L11.2,6"
+        android:strokeColor="#8A94A6"
+        android:strokeWidth="1.2"
+        android:strokeLineCap="round" />
+</vector>

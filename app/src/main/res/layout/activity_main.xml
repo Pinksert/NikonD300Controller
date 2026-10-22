@@ -5,322 +5,1044 @@
     android:id="@+id/main"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:background="@color/bg_base"
     tools:context=".MainActivity">
 
     <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
+        android:id="@+id/topStatusBar"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
         android:orientation="vertical"
-        android:padding="16dp">
+        android:padding="16dp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent">
 
+        <!-- ===== 顶栏·机身状态 =====
+             ⚠️ 这一行有 id 是给"取景全屏"用的：全屏时只收起这一行，
+             千万别改成隐藏 topStatusBar —— 它是整页的根容器，取景画面就在它里面，
+             隐藏它 = 整屏黑 + 全屏按钮一起消失（历史上正是这么错的）。 -->
         <LinearLayout
+            android:id="@+id/topBarRow"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:gravity="center_vertical"
             android:orientation="horizontal">
+
+            <View
+                android:id="@+id/statusDot"
+                android:layout_width="8dp"
+                android:layout_height="8dp"
+                android:background="@drawable/bg_status_dot_off" />
+
             <TextView
                 android:id="@+id/statusText"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
                 android:layout_weight="1"
+                android:ellipsize="end"
+                android:maxLines="1"
                 android:text="@string/status_disconnected"
-                android:textSize="18sp"
+                android:textColor="@color/text_primary"
+                android:textSize="17sp"
                 android:textStyle="bold" />
+
             <TextView
                 android:id="@+id/batteryText"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
+                android:fontFamily="monospace"
                 android:text="--%"
-                android:textSize="16sp"
-                android:textStyle="bold"
-                android:textColor="#2E7D32" />
-        </LinearLayout>
+                android:textColor="@color/state_ok"
+                android:textSize="13sp"
+                android:textStyle="bold" />
 
-        <Button
-            android:id="@+id/connectButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:text="@string/btn_connect" />
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="8dp">
-
-            <Button
-                android:id="@+id/captureButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginHorizontal="4dp"
-                android:textSize="11sp"
-                android:textAllCaps="false"
-                android:text="Capture" />
-
-            <Button
-                android:id="@+id/focusButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginHorizontal="4dp"
-                android:textSize="11sp"
-                android:textAllCaps="false"
-                android:text="Focus" />
-
-            <Button
-                android:id="@+id/liveViewButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginHorizontal="4dp"
-                android:textSize="11sp"
-                android:textAllCaps="false"
-                android:text="LV" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="4dp">
-
-            <Button
-                android:id="@+id/modeButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginHorizontal="4dp"
-                android:textSize="11sp"
-                android:textAllCaps="false"
-                android:text="Mode" />
-
-            <Button
-                android:id="@+id/wbButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginHorizontal="4dp"
-                android:textSize="11sp"
-                android:textAllCaps="false"
-                android:text="WB" />
-
-            <Button
-                android:id="@+id/isoAutoButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginHorizontal="4dp"
-                android:textSize="11sp"
-                android:textAllCaps="false"
-                android:text="ISO Auto" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="2dp">
-
-            <Button
-                android:id="@+id/apBracketingButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginHorizontal="2dp"
-                android:textSize="9sp"
-                android:textAllCaps="false"
-                android:text="Ap Bracket" />
-
-            <Button
-                android:id="@+id/expBracketingButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginHorizontal="2dp"
-                android:textSize="9sp"
-                android:textAllCaps="false"
-                android:text="Exp Bracket" />
-
-            <Button
-                android:id="@+id/customSettingsButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginHorizontal="2dp"
-                android:textSize="9sp"
-                android:textAllCaps="false"
-                android:text="Custom Set" />
-
-            <Button
-                android:id="@+id/galleryButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginHorizontal="2dp"
-                android:textSize="9sp"
-                android:textAllCaps="false"
-                android:text="Gallery" />
-        </LinearLayout>
-
-        <TextView
-            android:id="@+id/propText"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:text="Focus: -- | Focal: -- | Bias: --"
-            android:textSize="16sp" />
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="8dp">
-
-            <!-- ISO Control -->
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="vertical"
-                android:gravity="center"
-                android:layout_marginHorizontal="4dp">
-                <Button
-                    android:id="@+id/isoUpButton"
-                    android:layout_width="64dp"
-                    android:layout_height="32dp"
-                    android:layout_gravity="center_horizontal"
-                    android:minHeight="0dp"
-                    android:minWidth="0dp"
-                    android:insetTop="0dp"
-                    android:insetBottom="0dp"
-                    android:padding="0dp"
-                    android:text="▲" />
-                <Button
-                    android:id="@+id/isoButton"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:padding="2dp"
-                    android:textSize="11sp"
-                    android:textAllCaps="false"
-                    android:text="ISO" />
-                <Button
-                    android:id="@+id/isoDownButton"
-                    android:layout_width="64dp"
-                    android:layout_height="32dp"
-                    android:layout_gravity="center_horizontal"
-                    android:minHeight="0dp"
-                    android:minWidth="0dp"
-                    android:insetTop="0dp"
-                    android:insetBottom="0dp"
-                    android:padding="0dp"
-                    android:text="▼" />
-            </LinearLayout>
-
-            <!-- Aperture Control -->
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="vertical"
-                android:gravity="center"
-                android:layout_marginHorizontal="4dp">
-                <Button
-                    android:id="@+id/apertureUpButton"
-                    android:layout_width="64dp"
-                    android:layout_height="32dp"
-                    android:layout_gravity="center_horizontal"
-                    android:minHeight="0dp"
-                    android:minWidth="0dp"
-                    android:insetTop="0dp"
-                    android:insetBottom="0dp"
-                    android:padding="0dp"
-                    android:text="▲" />
-                <Button
-                    android:id="@+id/apertureButton"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:padding="2dp"
-                    android:textSize="11sp"
-                    android:textAllCaps="false"
-                    android:text="Aperture" />
-                <Button
-                    android:id="@+id/apertureDownButton"
-                    android:layout_width="64dp"
-                    android:layout_height="32dp"
-                    android:layout_gravity="center_horizontal"
-                    android:minHeight="0dp"
-                    android:minWidth="0dp"
-                    android:insetTop="0dp"
-                    android:insetBottom="0dp"
-                    android:padding="0dp"
-                    android:text="▼" />
-            </LinearLayout>
-
-            <!-- Shutter Control -->
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="vertical"
-                android:gravity="center"
-                android:layout_marginHorizontal="4dp">
-                <Button
-                    android:id="@+id/shutterUpButton"
-                    android:layout_width="64dp"
-                    android:layout_height="32dp"
-                    android:layout_gravity="center_horizontal"
-                    android:minHeight="0dp"
-                    android:minWidth="0dp"
-                    android:insetTop="0dp"
-                    android:insetBottom="0dp"
-                    android:padding="0dp"
-                    android:text="▲" />
-                <Button
-                    android:id="@+id/shutterButton"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:padding="2dp"
-                    android:textSize="11sp"
-                    android:textAllCaps="false"
-                    android:text="Shutter" />
-                <Button
-                    android:id="@+id/shutterDownButton"
-                    android:layout_width="64dp"
-                    android:layout_height="32dp"
-                    android:layout_gravity="center_horizontal"
-                    android:minHeight="0dp"
-                    android:minWidth="0dp"
-                    android:insetTop="0dp"
-                    android:insetBottom="0dp"
-                    android:padding="0dp"
-                    android:text="▼" />
-            </LinearLayout>
-        </LinearLayout>
-
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:text="@string/info_label"
-            android:textStyle="italic" />
-
-        <ScrollView
-            android:id="@+id/logScrollView"
-            android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:layout_weight="1"
-            android:layout_marginTop="4dp"
-            android:background="#F0F0F0"
-            android:padding="8dp">
+            <ImageView
+                android:id="@+id/batteryIcon"
+                android:layout_width="24dp"
+                android:layout_height="12dp"
+                android:layout_marginStart="6dp"
+                android:src="@drawable/ic_battery"
+                tools:ignore="ContentDescription" />
 
             <TextView
-                android:id="@+id/infoText"
-                android:layout_width="match_parent"
+                android:id="@+id/galleryButton"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:fontFamily="monospace"
-                android:text="Logs will appear here..." />
-        </ScrollView>
+                android:layout_marginStart="12dp"
+                android:background="@drawable/bg_param_card"
+                android:paddingStart="10dp"
+                android:paddingTop="5dp"
+                android:paddingEnd="10dp"
+                android:paddingBottom="5dp"
+                android:text="相册"
+                android:textColor="@color/accent_amber"
+                android:textSize="13sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+
+        <!-- ===== 连接 ===== -->
+        <androidx.appcompat.widget.AppCompatButton
+            android:id="@+id/connectButton"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="12dp"
+            android:background="@drawable/bg_btn_dark"
+            android:stateListAnimator="@null"
+            android:text="@string/btn_connect"
+            android:textAllCaps="false"
+            android:textColor="@color/text_primary"
+            android:textSize="15sp"
+            android:textStyle="bold" />
+
+        <!-- ===== 内容区（三页切换） ===== -->
+        <FrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_marginTop="12dp"
+            android:layout_weight="1">
+
+            <!-- 页1：拍摄 -->
+            <LinearLayout
+                android:id="@+id/shootSection"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:orientation="vertical">
+
+                <!-- 取景画面：尺寸**恒定**（weight=1 吃掉剩余空间），
+                     打开/关闭实时取景窗口不再伸缩跳动 —— 未取景时这里显示对焦点阵，
+                     取景时同一块区域显示实时画面，对焦点叠在上面。 -->
+                <FrameLayout
+                    android:id="@+id/viewfinder"
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_card"
+                    android:clipToOutline="true">
+
+                    <ImageView
+                        android:id="@+id/liveViewImage"
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent"
+                        android:scaleType="fitCenter"
+                        android:visibility="gone"
+                        tools:ignore="ContentDescription" />
+
+                    <com.example.nikond300controller.FocusBoxView
+                        android:id="@+id/focusBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent" />
+
+                    <!-- 空闲时不放提示文案（用户要求取消）；这个 TextView 只在"正在开启取景…"加载时短暂出现 -->
+                    <TextView
+                        android:id="@+id/liveViewPlaceholder"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_gravity="bottom|center_horizontal"
+                        android:layout_marginBottom="56dp"
+                        android:text="正在开启取景…"
+                        android:textColor="@color/text_disabled"
+                        android:textSize="12sp"
+                        android:visibility="gone" />
+
+                    <!-- 录制按钮：D300 机身没有录像功能，动态画面只能靠手机把
+                         0x9203 取景帧编码成 MP4，所以这个按钮只在取景中可用。
+                         点一下开始（红底走时），再点一下停止并存盘。
+                         位置放在左上角（原来「● LIVE」角标那儿）——
+                         LIVE 只是"正在取景"的冗余提示，录制才是这里真正要按的按钮。 -->
+                    <TextView
+                        android:id="@+id/recButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="28dp"
+                        android:layout_gravity="top|start"
+                        android:layout_marginStart="12dp"
+                        android:layout_marginTop="12dp"
+                        android:background="@drawable/bg_overlay_chip"
+                        android:gravity="center"
+                        android:paddingStart="10dp"
+                        android:paddingEnd="10dp"
+                        android:text="● 录制"
+                        android:textColor="@color/accent_red"
+                        android:textSize="11sp"
+                        android:textStyle="bold"
+                        android:visibility="gone" />
+
+                    <!-- 全屏：把取景画面铺满整块屏幕（视频软件那种全屏按钮）。
+                         全屏时隐藏顶栏、曝光卡片、底部导航，只留画面和一个「退出」。 -->
+                    <TextView
+                        android:id="@+id/lvFullscreenButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="28dp"
+                        android:layout_gravity="top|end"
+                        android:layout_marginTop="12dp"
+                        android:layout_marginEnd="12dp"
+                        android:background="@drawable/bg_overlay_chip"
+                        android:gravity="center"
+                        android:paddingStart="10dp"
+                        android:paddingEnd="10dp"
+                        android:text="全屏"
+                        android:textColor="@color/text_primary"
+                        android:textSize="11sp"
+                        android:visibility="gone" />
+
+                    <!-- 底部信息条：对焦状态 + 本次张数 -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="34dp"
+                        android:layout_gravity="bottom"
+                        android:layout_margin="12dp"
+                        android:background="@drawable/bg_info_bar"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal"
+                        android:paddingStart="10dp"
+                        android:paddingEnd="10dp">
+
+                        <View
+                            android:id="@+id/focusStatusDot"
+                            android:layout_width="7dp"
+                            android:layout_height="7dp"
+                            android:background="@drawable/bg_status_dot_off" />
+
+                        <TextView
+                            android:id="@+id/focusStatusText"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="6dp"
+                            android:text="未合焦"
+                            android:textColor="@color/text_primary"
+                            android:textSize="11sp" />
+
+                        <View
+                            android:layout_width="0dp"
+                            android:layout_height="1dp"
+                            android:layout_weight="1" />
+
+                        <TextView
+                            android:id="@+id/shotCountText"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="本次已拍 0 张"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="11sp" />
+                    </LinearLayout>
+
+                    <!-- 全屏时的操作条：放大/缩小（手动对焦看细节）+ 对焦 + 拍摄。
+                         非全屏时这些按钮就在下方按钮行里，这里只在全屏出现。
+                         位置压在底部信息条上方（信息条 34dp + 12dp 边距）。 -->
+                    <LinearLayout
+                        android:id="@+id/lvFullControls"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_gravity="bottom|center_horizontal"
+                        android:layout_marginBottom="52dp"
+                        android:background="@drawable/bg_info_bar"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal"
+                        android:paddingStart="8dp"
+                        android:paddingTop="5dp"
+                        android:paddingEnd="8dp"
+                        android:paddingBottom="5dp"
+                        android:visibility="gone">
+
+                        <TextView
+                            android:id="@+id/lvZoomOutButton"
+                            android:layout_width="40dp"
+                            android:layout_height="36dp"
+                            android:background="@drawable/bg_overlay_chip"
+                            android:gravity="center"
+                            android:text="－"
+                            android:textColor="@color/text_primary"
+                            android:textSize="18sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/lvZoomText"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="6dp"
+                            android:layout_marginEnd="6dp"
+                            android:gravity="center"
+                            android:minWidth="62dp"
+                            android:text="全画面"
+                            android:textColor="@color/accent_amber"
+                            android:textSize="12sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/lvZoomInButton"
+                            android:layout_width="40dp"
+                            android:layout_height="36dp"
+                            android:background="@drawable/bg_overlay_chip"
+                            android:gravity="center"
+                            android:text="＋"
+                            android:textColor="@color/text_primary"
+                            android:textSize="18sp"
+                            android:textStyle="bold" />
+
+                        <View
+                            android:layout_width="10dp"
+                            android:layout_height="1dp" />
+
+                        <TextView
+                            android:id="@+id/lvFullAfButton"
+                            android:layout_width="wrap_content"
+                            android:layout_height="36dp"
+                            android:background="@drawable/bg_overlay_chip"
+                            android:gravity="center"
+                            android:paddingStart="14dp"
+                            android:paddingEnd="14dp"
+                            android:text="AF"
+                            android:textColor="@color/text_primary"
+                            android:textSize="13sp"
+                            android:textStyle="bold" />
+
+                        <View
+                            android:layout_width="8dp"
+                            android:layout_height="1dp" />
+
+                        <TextView
+                            android:id="@+id/lvFullCaptureButton"
+                            android:layout_width="wrap_content"
+                            android:layout_height="36dp"
+                            android:background="@drawable/bg_overlay_chip"
+                            android:gravity="center"
+                            android:paddingStart="16dp"
+                            android:paddingEnd="16dp"
+                            android:text="拍摄"
+                            android:textColor="@color/accent_red"
+                            android:textSize="13sp"
+                            android:textStyle="bold" />
+                    </LinearLayout>
+                </FrameLayout>
+
+                <!-- 机身参数行：对焦模式 + 焦距 / 曝光补偿 / 曝光模式。
+                     放在取景区外面、曝光参数上面 —— 压在实拍画面上会挡构图，
+                     而且这一行是常显信息，不该跟着取景框一起缩放。 -->
+                <HorizontalScrollView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:scrollbars="none">
+
+                    <LinearLayout
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal">
+
+                        <TextView
+                            android:id="@+id/focusChip"
+                            android:layout_width="wrap_content"
+                            android:layout_height="28dp"
+                            android:background="@drawable/bg_param_card"
+                            android:gravity="center"
+                            android:paddingStart="10dp"
+                            android:paddingEnd="10dp"
+                            android:text="AF-S"
+                            android:textColor="@color/text_primary"
+                            android:textSize="11sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/focalChip"
+                            android:layout_width="wrap_content"
+                            android:layout_height="28dp"
+                            android:layout_marginStart="6dp"
+                            android:background="@drawable/bg_param_card"
+                            android:drawablePadding="6dp"
+                            android:drawableTint="@color/text_secondary"
+                            android:gravity="center"
+                            android:paddingStart="8dp"
+                            android:paddingEnd="8dp"
+                            android:text="--"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="11sp"
+                            app:drawableStartCompat="@drawable/ic_focal" />
+
+                        <TextView
+                            android:id="@+id/evChip"
+                            android:layout_width="wrap_content"
+                            android:layout_height="28dp"
+                            android:layout_marginStart="6dp"
+                            android:background="@drawable/bg_param_card"
+                            android:drawablePadding="4dp"
+                            android:gravity="center"
+                            android:paddingStart="8dp"
+                            android:paddingEnd="6dp"
+                            android:text="-- EV"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="11sp"
+                            app:drawableEndCompat="@drawable/ic_chevron_right"
+                            app:drawableStartCompat="@drawable/ic_ev"
+                            app:drawableTint="@color/text_secondary" />
+
+                        <TextView
+                            android:id="@+id/modeChip"
+                            android:layout_width="wrap_content"
+                            android:layout_height="28dp"
+                            android:layout_marginStart="6dp"
+                            android:background="@drawable/bg_param_card"
+                            android:drawablePadding="4dp"
+                            android:gravity="center"
+                            android:paddingStart="8dp"
+                            android:paddingEnd="6dp"
+                            android:text="--"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="11sp"
+                            app:drawableEndCompat="@drawable/ic_chevron_right"
+                            app:drawableStartCompat="@drawable/ic_mode"
+                            app:drawableTint="@color/text_secondary" />
+                    </LinearLayout>
+                </HorizontalScrollView>
+
+                <!-- 取景框现在恒定 weight=1 吃掉剩余空间，这个占位不再需要承重
+                     （留着但不参与布局：weight 会和取景框打架，所以直接 gone）。 -->
+                <View
+                    android:id="@+id/shootSpacer"
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:visibility="gone" />
+
+                <!-- 参数三档 -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:baselineAligned="false"
+                    android:orientation="horizontal">
+
+                    <!-- ISO -->
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginEnd="4dp"
+                        android:layout_weight="1"
+                        android:background="@drawable/bg_param_card"
+                        android:gravity="center"
+                        android:orientation="vertical"
+                        android:padding="10dp">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:letterSpacing="0.1"
+                            android:text="ISO"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="10sp"
+                            android:textStyle="bold" />
+
+                        <androidx.appcompat.widget.AppCompatButton
+                            android:id="@+id/isoUpButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="20dp"
+                            android:layout_marginTop="3dp"
+                            android:background="@null"
+                            android:minHeight="0dp"
+                            android:padding="0dp"
+                            android:stateListAnimator="@null"
+                            android:text="▲"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="10sp" />
+
+                        <androidx.appcompat.widget.AppCompatButton
+                            android:id="@+id/isoButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="3dp"
+                            android:background="@null"
+                            android:fontFamily="monospace"
+                            android:minHeight="0dp"
+                            android:stateListAnimator="@null"
+                            android:text="ISO"
+                            android:textAllCaps="false"
+                            android:textColor="@color/accent_amber"
+                            android:textSize="20sp"
+                            android:textStyle="bold" />
+
+                        <androidx.appcompat.widget.AppCompatButton
+                            android:id="@+id/isoDownButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="20dp"
+                            android:layout_marginTop="3dp"
+                            android:background="@null"
+                            android:minHeight="0dp"
+                            android:padding="0dp"
+                            android:stateListAnimator="@null"
+                            android:text="▼"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="10sp" />
+                    </LinearLayout>
+
+                    <!-- 光圈 -->
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="4dp"
+                        android:layout_marginEnd="4dp"
+                        android:layout_weight="1"
+                        android:background="@drawable/bg_param_card"
+                        android:gravity="center"
+                        android:orientation="vertical"
+                        android:padding="10dp">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:letterSpacing="0.1"
+                            android:text="光圈"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="10sp"
+                            android:textStyle="bold" />
+
+                        <androidx.appcompat.widget.AppCompatButton
+                            android:id="@+id/apertureUpButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="20dp"
+                            android:layout_marginTop="3dp"
+                            android:background="@null"
+                            android:minHeight="0dp"
+                            android:padding="0dp"
+                            android:stateListAnimator="@null"
+                            android:text="▲"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="10sp" />
+
+                        <androidx.appcompat.widget.AppCompatButton
+                            android:id="@+id/apertureButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="3dp"
+                            android:background="@null"
+                            android:fontFamily="monospace"
+                            android:minHeight="0dp"
+                            android:stateListAnimator="@null"
+                            android:text="f/--"
+                            android:textAllCaps="false"
+                            android:textColor="@color/accent_amber"
+                            android:textSize="20sp"
+                            android:textStyle="bold" />
+
+                        <androidx.appcompat.widget.AppCompatButton
+                            android:id="@+id/apertureDownButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="20dp"
+                            android:layout_marginTop="3dp"
+                            android:background="@null"
+                            android:minHeight="0dp"
+                            android:padding="0dp"
+                            android:stateListAnimator="@null"
+                            android:text="▼"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="10sp" />
+                    </LinearLayout>
+
+                    <!-- 快门 -->
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="4dp"
+                        android:layout_weight="1"
+                        android:background="@drawable/bg_param_card"
+                        android:gravity="center"
+                        android:orientation="vertical"
+                        android:padding="10dp">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:letterSpacing="0.1"
+                            android:text="快门"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="10sp"
+                            android:textStyle="bold" />
+
+                        <androidx.appcompat.widget.AppCompatButton
+                            android:id="@+id/shutterUpButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="20dp"
+                            android:layout_marginTop="3dp"
+                            android:background="@null"
+                            android:minHeight="0dp"
+                            android:padding="0dp"
+                            android:stateListAnimator="@null"
+                            android:text="▲"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="10sp" />
+
+                        <androidx.appcompat.widget.AppCompatButton
+                            android:id="@+id/shutterButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="3dp"
+                            android:background="@null"
+                            android:fontFamily="monospace"
+                            android:minHeight="0dp"
+                            android:stateListAnimator="@null"
+                            android:text="1/--"
+                            android:textAllCaps="false"
+                            android:textColor="@color/accent_amber"
+                            android:textSize="20sp"
+                            android:textStyle="bold" />
+
+                        <androidx.appcompat.widget.AppCompatButton
+                            android:id="@+id/shutterDownButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="20dp"
+                            android:layout_marginTop="3dp"
+                            android:background="@null"
+                            android:minHeight="0dp"
+                            android:padding="0dp"
+                            android:stateListAnimator="@null"
+                            android:text="▼"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="10sp" />
+                    </LinearLayout>
+                </LinearLayout>
+
+                <!-- 方向键（上下左右中）已按用户要求取消：对焦点现在直接在
+                     即时取景窗口里点阵选点，不再需要逐个方向跳。 -->
+
+                <!-- 快门操作区 -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:gravity="center"
+                    android:orientation="horizontal">
+
+                    <androidx.appcompat.widget.AppCompatImageButton
+                        android:id="@+id/focusButton"
+                        android:layout_width="64dp"
+                        android:layout_height="64dp"
+                        android:background="@drawable/bg_circle_dark"
+                        android:contentDescription="自动对焦"
+                        android:scaleType="center"
+                        android:src="@drawable/ic_focus"
+                        android:stateListAnimator="@null" />
+
+                    <androidx.appcompat.widget.AppCompatImageButton
+                        android:id="@+id/captureButton"
+                        android:layout_width="96dp"
+                        android:layout_height="96dp"
+                        android:layout_marginStart="24dp"
+                        android:layout_marginEnd="24dp"
+                        android:background="@drawable/bg_shutter"
+                        android:contentDescription="释放快门"
+                        android:scaleType="center"
+                        android:src="@drawable/ic_aperture"
+                        android:stateListAnimator="@null" />
+
+                    <androidx.appcompat.widget.AppCompatImageButton
+                        android:id="@+id/liveViewButton"
+                        android:layout_width="64dp"
+                        android:layout_height="64dp"
+                        android:background="@drawable/bg_circle_dark"
+                        android:contentDescription="实时取景"
+                        android:scaleType="center"
+                        android:src="@drawable/ic_liveview"
+                        android:stateListAnimator="@null" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- 页2：参数（按设计稿 S2 的分组列表形态） -->
+            <ScrollView
+                android:id="@+id/paramsSection"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+
+                    <!-- 分组·机身 -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:background="@drawable/bg_card"
+                        android:orientation="vertical"
+                        android:padding="8dp">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:letterSpacing="0.08"
+                            android:paddingStart="6dp"
+                            android:paddingBottom="4dp"
+                            android:text="存储"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="11sp"
+                            android:textStyle="bold" />
+
+                        <!-- 白平衡已挪进「曝光与画质」（它属于曝光，不该和储存卡同组），
+                             行在代码里建（同一套 sheetValueRow 构件，右侧显示当前模式）。
+                             机身信息 / 存储卡 / 格式化：行同样在代码里建。 -->
+                        <LinearLayout
+                            android:id="@+id/deviceMgmtList"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="vertical" />
+                    </LinearLayout>
+
+                    <!-- 分组·曝光与画质：测光 / 闪光 / 画质三行，档位一律按机身描述符动态生成 -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:background="@drawable/bg_card"
+                        android:orientation="vertical"
+                        android:padding="8dp">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:letterSpacing="0.08"
+                            android:paddingStart="6dp"
+                            android:paddingBottom="4dp"
+                            android:text="曝光与画质"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="11sp"
+                            android:textStyle="bold" />
+
+                        <LinearLayout
+                            android:id="@+id/exposureQualityList"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="vertical" />
+                    </LinearLayout>
+
+                    <!-- 分组·包围曝光 -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:background="@drawable/bg_card"
+                        android:orientation="vertical"
+                        android:padding="8dp">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:letterSpacing="0.08"
+                            android:paddingStart="6dp"
+                            android:paddingBottom="4dp"
+                            android:text="包围曝光"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="11sp"
+                            android:textStyle="bold" />
+
+                        <androidx.appcompat.widget.AppCompatButton
+                            android:id="@+id/apBracketingButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="48dp"
+                            android:background="@drawable/bg_setting_row"
+                            android:drawableEnd="@drawable/ic_chevron_right"
+                            android:gravity="start|center_vertical"
+                            android:paddingStart="14dp"
+                            android:paddingEnd="12dp"
+                            android:stateListAnimator="@null"
+                            android:text="光圈包围"
+                            android:textAllCaps="false"
+                            android:textColor="@color/text_primary"
+                            android:textSize="14sp" />
+
+                        <androidx.appcompat.widget.AppCompatButton
+                            android:id="@+id/expBracketingButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="48dp"
+                            android:layout_marginTop="2dp"
+                            android:background="@drawable/bg_setting_row"
+                            android:drawableEnd="@drawable/ic_chevron_right"
+                            android:gravity="start|center_vertical"
+                            android:paddingStart="14dp"
+                            android:paddingEnd="12dp"
+                            android:stateListAnimator="@null"
+                            android:text="快门包围"
+                            android:textAllCaps="false"
+                            android:textColor="@color/text_primary"
+                            android:textSize="14sp" />
+                    </LinearLayout>
+
+                    <!-- 分组·拍摄流程：自拍延时 / 间隔拍摄 / 拍完自动下载 -->
+                    <LinearLayout
+                        android:id="@+id/workflowCard"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:background="@drawable/bg_card"
+                        android:orientation="vertical"
+                        android:padding="8dp">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:letterSpacing="0.08"
+                            android:paddingStart="6dp"
+                            android:paddingBottom="4dp"
+                            android:text="拍摄流程"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="11sp"
+                            android:textStyle="bold" />
+
+                        <LinearLayout
+                            android:id="@+id/workflowList"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="vertical" />
+                    </LinearLayout>
+
+                    <!-- 分组·相机设定：机身个人设定（CSM）a–f 共 50 项全部收进二级页，
+                         参数页只留一个入口 —— 50 行铺在这里会有两千多 dp 的滚动条。
+                         抬头按用户口径叫「相机设定」（里面仍是机身的 a–f 六组）。 -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:background="@drawable/bg_card"
+                        android:orientation="vertical"
+                        android:padding="8dp">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:letterSpacing="0.08"
+                            android:paddingStart="6dp"
+                            android:paddingBottom="4dp"
+                            android:text="相机设定"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="11sp"
+                            android:textStyle="bold" />
+
+                        <LinearLayout
+                            android:id="@+id/csmEntryList"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="vertical" />
+                    </LinearLayout>
+
+                    <!-- 分组·实时取景。
+                         手持 / 三脚架的分段选择器已从参数页删掉：拍摄页长按取景键就能切，
+                         这里再放一个是重复入口（改了还容易和拍摄页的状态对不上）。 -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:background="@drawable/bg_card"
+                        android:orientation="vertical"
+                        android:padding="8dp">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:letterSpacing="0.08"
+                            android:paddingStart="6dp"
+                            android:paddingBottom="4dp"
+                            android:text="实时取景"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="11sp"
+                            android:textStyle="bold" />
+
+                        <!-- 对焦点数量（51 / 11 点，写 0xD08D）：从取景框右上角挪到这里，
+                             主页不再放切换按钮 —— 它属于设置项，不是每次都要点的操作。 -->
+                        <LinearLayout
+                            android:id="@+id/afCountList"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="vertical" />
+
+                        <!-- 取景框显示（构图网格）：App 侧叠加在实时取景画面上的辅助线。
+                             行本身在代码里建（和 afCountList 同一套构件）。 -->
+                        <LinearLayout
+                            android:id="@+id/lvGridList"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="vertical" />
+
+                        <androidx.appcompat.widget.AppCompatButton
+                            android:id="@+id/lvModeProbeButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="44dp"
+                            android:layout_marginTop="4dp"
+                            android:background="@drawable/bg_setting_row"
+                            android:gravity="start|center_vertical"
+                            android:paddingStart="14dp"
+                            android:paddingEnd="12dp"
+                            android:stateListAnimator="@null"
+                            android:text="探测取景属性（写入日志）"
+                            android:textAllCaps="false"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="14sp" />
+                    </LinearLayout>
+
+                </LinearLayout>
+            </ScrollView>
+
+            <!-- 页3：日志 -->
+            <LinearLayout
+                android:id="@+id/logContainer"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="40dp"
+                    android:background="@drawable/bg_btn_dark"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:paddingStart="14dp"
+                    android:paddingEnd="8dp">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="日志"
+                        android:textColor="@color/text_secondary"
+                        android:textSize="12sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/stopAllButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:paddingStart="12dp"
+                        android:paddingTop="6dp"
+                        android:paddingEnd="12dp"
+                        android:paddingBottom="6dp"
+                        android:text="停止"
+                        android:textColor="#FF6B6B"
+                        android:textSize="12sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/clearLogButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:paddingStart="12dp"
+                        android:paddingTop="6dp"
+                        android:paddingEnd="12dp"
+                        android:paddingBottom="6dp"
+                        android:text="清空"
+                        android:textColor="@color/accent_amber"
+                        android:textSize="12sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <ScrollView
+                    android:id="@+id/logScroll"
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_marginTop="6dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_card"
+                    android:padding="10dp">
+
+                    <TextView
+                        android:id="@+id/infoText"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="monospace"
+                        android:text="日志将显示在这里…"
+                        android:textColor="@color/text_secondary"
+                        android:textSize="11sp" />
+                </ScrollView>
+            </LinearLayout>
+        </FrameLayout>
+
+        <!-- ===== 底部导航胶囊 ===== -->
+        <LinearLayout
+            android:id="@+id/navCapsule"
+            android:layout_width="match_parent"
+            android:layout_height="62dp"
+            android:layout_marginTop="12dp"
+            android:background="@drawable/bg_nav_capsule"
+            android:orientation="horizontal"
+            android:padding="4dp">
+
+            <LinearLayout
+                android:id="@+id/navShoot"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:background="@drawable/bg_nav_item_selected"
+                android:gravity="center"
+                android:orientation="vertical">
+
+                <ImageView
+                    android:id="@+id/navShootIcon"
+                    android:layout_width="18dp"
+                    android:layout_height="18dp"
+                    android:src="@drawable/ic_nav_shoot"
+                    tools:ignore="ContentDescription" />
+
+                <TextView
+                    android:id="@+id/navShootText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="拍摄"
+                    android:textColor="@color/bg_base"
+                    android:textSize="10sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/navParams"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_marginStart="4dp"
+                android:layout_weight="1"
+                android:gravity="center"
+                android:orientation="vertical">
+
+                <ImageView
+                    android:id="@+id/navParamsIcon"
+                    android:layout_width="18dp"
+                    android:layout_height="18dp"
+                    android:src="@drawable/ic_nav_params"
+                    tools:ignore="ContentDescription" />
+
+                <TextView
+                    android:id="@+id/navParamsText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="参数"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="10sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/navLog"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_marginStart="4dp"
+                android:layout_weight="1"
+                android:gravity="center"
+                android:orientation="vertical">
+
+                <ImageView
+                    android:id="@+id/navLogIcon"
+                    android:layout_width="18dp"
+                    android:layout_height="18dp"
+                    android:src="@drawable/ic_nav_log"
+                    tools:ignore="ContentDescription" />
+
+                <TextView
+                    android:id="@+id/navLogText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="日志"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="10sp" />
+            </LinearLayout>
+        </LinearLayout>
 
     </LinearLayout>
 

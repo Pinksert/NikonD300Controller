@@ -1,2 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources></resources>
+<resources>
+    <!-- 专业相机暗色 · 设计令牌 -->
+    <color name="bg_base">#0B0E13</color>
+    <color name="bg_surface">#141922</color>
+    <color name="bg_elevated">#1C222C</color>
+    <color name="stroke">#262D38</color>
+
+    <color name="text_primary">#E8EDF4</color>
+    <color name="text_secondary">#8A94A6</color>
+    <color name="text_disabled">#5A6472</color>
+
+    <color name="accent_amber">#FF9F0A</color>
+    <color name="accent_red">#E5484D</color>
+    <color name="state_ok">#30A46C</color>
+    <color name="state_warn">#F57C00</color>
+    <color name="state_bad">#E5484D</color>
+</resources>

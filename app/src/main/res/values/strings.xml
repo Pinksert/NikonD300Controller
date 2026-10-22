@@ -1,7 +1,12 @@
 <resources>
+    <!--
+      显示名保持和老版本一致（D300 Controller）。
+      两个版本靠 applicationId 区分：老版 com.example.nikond300controller，
+      新版 com.example.nikond300controller2，显示名相同也不会互相覆盖。
+    -->
     <string name="app_name">D300 Controller</string>
-    <string name="btn_connect">Connect Camera</string>
-    <string name="status_disconnected">Status: Disconnected</string>
-    <string name="status_connected">Status: Connected to %s</string>
-    <string name="info_label">Camera Info:</string>
+    <string name="btn_connect">连接相机</string>
+    <string name="status_disconnected">未连接</string>
+    <string name="status_connected">已连接 · %s</string>
+    <string name="info_label">相机信息</string>
 </resources>

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="18dp"
+    android:height="18dp"
+    android:viewportWidth="18"
+    android:viewportHeight="18">
+    <!-- 参数：双滑轨 -->
+    <path
+        android:pathData="M1.5,6.4 L16.5,6.4 M1.5,11.6 L16.5,11.6"
+        android:strokeColor="#8A94A6"
+        android:strokeWidth="1.4"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M6,4.4 A2,2 0 1,1 6,8.4 A2,2 0 1,1 6,4.4"
+        android:fillColor="#141922"
+        android:strokeColor="#8A94A6"
+        android:strokeWidth="1.4" />
+    <path
+        android:pathData="M12,9.6 A2,2 0 1,1 12,13.6 A2,2 0 1,1 12,9.6"
+        android:fillColor="#141922"
+        android:strokeColor="#8A94A6"
+        android:strokeWidth="1.4" />
+</vector>

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="26dp"
+    android:height="26dp"
+    android:viewportWidth="26"
+    android:viewportHeight="26">
+    <!-- 自动对焦：对焦环 + 十字 -->
+    <path
+        android:pathData="M13,5.4 A7.6,7.6 0 1,1 13,20.6 A7.6,7.6 0 1,1 13,5.4"
+        android:strokeColor="#E8EDF4"
+        android:strokeWidth="1.6" />
+    <path
+        android:pathData="M13,0.8 L13,5 M13,21 L13,25.2 M0.8,13 L5,13 M21,13 L25.2,13"
+        android:strokeColor="#E8EDF4"
+        android:strokeWidth="1.6"
+        android:strokeLineCap="round" />
+</vector>

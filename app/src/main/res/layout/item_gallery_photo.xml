@@ -1,30 +1,59 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
-    android:layout_height="wrap_content"
-    android:background="?attr/selectableItemBackground"
-    android:orientation="vertical"
-    android:padding="4dp">
+    android:layout_height="110dp"
+    android:layout_margin="3dp">
 
     <ImageView
-        android:id="@+id/photoThumb"
+        android:id="@+id/thumb"
         android:layout_width="match_parent"
-        android:layout_height="96dp"
-        android:background="#DDDDDD"
-        android:contentDescription="缩略图"
-        android:padding="2dp"
-        android:scaleType="centerCrop"
-        android:src="@android:drawable/ic_menu_gallery" />
+        android:layout_height="match_parent"
+        android:background="@color/bg_elevated"
+        android:scaleType="centerCrop" />
 
+    <!-- 左下角：文件名（不带后缀 —— 格式在右下角那一枚已经标了） -->
     <TextView
-        android:id="@+id/photoName"
-        android:layout_width="match_parent"
+        android:id="@+id/filename"
+        android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:ellipsize="middle"
-        android:gravity="center"
+        android:layout_gravity="bottom|start"
+        android:layout_margin="4dp"
+        android:background="@drawable/bg_param_card"
+        android:ellipsize="end"
+        android:maxWidth="86dp"
+        android:paddingStart="5dp"
+        android:paddingTop="2dp"
+        android:paddingEnd="5dp"
+        android:paddingBottom="2dp"
         android:singleLine="true"
-        android:text="IMG_0001.JPG"
-        android:textColor="#424242"
-        android:textSize="11sp" />
+        android:textColor="@color/text_secondary"
+        android:textSize="10sp" />
 
-</LinearLayout>
+    <!-- 多选模式的勾选框：只在多选时出现，点整个格子就能切换 -->
+    <CheckBox
+        android:id="@+id/check"
+        android:layout_width="26dp"
+        android:layout_height="26dp"
+        android:layout_gravity="top|end"
+        android:layout_margin="4dp"
+        android:buttonTint="@color/accent_amber"
+        android:clickable="false"
+        android:visibility="gone" />
+
+    <!-- NEF 这类解不了的 Raw，右下角标一下格式 -->
+    <TextView
+        android:id="@+id/badge"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end"
+        android:layout_margin="4dp"
+        android:background="@drawable/bg_param_card"
+        android:paddingStart="5dp"
+        android:paddingTop="2dp"
+        android:paddingEnd="5dp"
+        android:paddingBottom="2dp"
+        android:textColor="@color/accent_amber"
+        android:textSize="10sp"
+        android:textStyle="bold"
+        android:visibility="gone" />
+</FrameLayout>

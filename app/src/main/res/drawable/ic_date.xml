@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="12dp"
+    android:height="12dp"
+    android:viewportWidth="12"
+    android:viewportHeight="12">
+    <!-- 拍摄日期：日历（风格对齐 ic_focal / ic_ev 的描边小图标，橙色） -->
+    <path
+        android:pathData="M2.2,2.6 h7.6 a1,1 0 0 1 1,1 v6.6 a1,1 0 0 1 -1,1 h-7.6 a1,1 0 0 1 -1,-1 v-6.6 a1,1 0 0 1 1,-1 z"
+        android:strokeColor="@color/accent_amber"
+        android:strokeWidth="1.1"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:pathData="M1.2,5.2 L10.8,5.2"
+        android:strokeColor="@color/accent_amber"
+        android:strokeWidth="1.1"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M3.8,0.9 L3.8,2.4 M8.2,0.9 L8.2,2.4"
+        android:strokeColor="@color/accent_amber"
+        android:strokeWidth="1.1"
+        android:strokeLineCap="round" />
+</vector>

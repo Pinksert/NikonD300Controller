@@ -1301,8 +1301,63 @@ class PtpUsbConnection(
     // 事件回调：拍照完成、属性变更等（在 USB 线程上触发）
     var eventHandler: ((PtpEvent) -> Unit)? = null
 
-    // 复用 Bitmap，避免 10fps 下每帧分配导致 GC 卡顿（参考 remoteyourcam 的 inBitmap 方案）
-    private var reusableBitmap: Bitmap? = null
+    // ------------------------------------------------------------------
+    // 取景帧 Bitmap 轮转池（参考 remoteyourcam 的 inBitmap 方案）
+    //
+    // 为什么必须 inMutable = true：inBitmap 要求目标位图**可写**。
+    // 以前只设了 inBitmap 没设 inMutable，解出来的是 immutable Bitmap，
+    // 于是从第二帧起 decode 就抛 IllegalArgumentException，被下面的 catch 吞掉后
+    // 退化成"每帧新建一块"——复用从来没真正生效过，14fps 下等于每秒扔掉十几 MB 垃圾。
+    //
+    // 为什么是池子而不是一块：UI 侧是 40ms 去抖后 runOnUiThread 异步引用这块 Bitmap
+    // （见 MainActivity 取景循环），录像侧也要在下一帧覆盖前画完。只留一块的话
+    // "正在显示的"会被"正在解码的"写穿，画面撕裂。取景间隔 70ms、UI 去抖 40ms，
+    // 同时在飞的帧最多 2 个，留 3 块足够。
+    // ------------------------------------------------------------------
+    private val lvBitmapPool = arrayOfNulls<Bitmap>(3)
+    private var lvPoolCursor = 0
+
+    /** 退出取景/断连时调：放掉引用，让这几块大 Bitmap 能被回收 */
+    fun clearLiveViewBitmapPool() {
+        for (i in lvBitmapPool.indices) lvBitmapPool[i] = null
+        lvPoolCursor = 0
+    }
+
+    /**
+     * 解一帧，尽量复用池子里的 Bitmap。
+     * 池子为空或分辨率变了（机身切换取景尺寸）时会自动补新的进去。
+     */
+    private fun decodeLiveViewJpeg(array: ByteArray, offset: Int, length: Int): Bitmap? {
+        val opts = BitmapFactory.Options().apply {
+            inSampleSize = 1
+            inMutable = true                       // ★ 没有这行 inBitmap 就是摆设
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+
+        // 从最旧的一块开始试，尺寸对不上就换下一块
+        for (i in lvBitmapPool.indices) {
+            val idx = (lvPoolCursor + i) % lvBitmapPool.size
+            val candidate = lvBitmapPool[idx]
+            opts.inBitmap = if (candidate != null && !candidate.isRecycled) candidate else null
+            val decoded = try {
+                BitmapFactory.decodeByteArray(array, offset, length, opts)
+            } catch (e: IllegalArgumentException) {
+                null                                // 这块用不了，换下一块
+            }
+            if (decoded != null) {
+                lvBitmapPool[idx] = decoded
+                lvPoolCursor = (idx + 1) % lvBitmapPool.size
+                return decoded
+            }
+        }
+
+        // 兜底：池子全对不上，最后一次不作复用要求
+        return try {
+            BitmapFactory.decodeByteArray(array, offset, length)
+        } catch (e: Exception) {
+            null
+        }
+    }
 
     /**
      * 解析 Nikon LiveView 帧。
@@ -1446,16 +1501,7 @@ class PtpUsbConnection(
         val jpgLen = data.limit() - jpgOffset
         if (jpgLen <= 0) return null
 
-        val opts = BitmapFactory.Options()
-        opts.inSampleSize = 1
-        reusableBitmap?.let { opts.inBitmap = it } // 尺寸匹配时直接复用
-        val bitmap = try {
-            BitmapFactory.decodeByteArray(array, jpgOffset, jpgLen, opts)
-                ?: BitmapFactory.decodeByteArray(array, jpgOffset, jpgLen)
-        } catch (e: Exception) {
-            try { BitmapFactory.decodeByteArray(array, jpgOffset, jpgLen) } catch (e2: Exception) { null }
-        }
-        bitmap?.let { reusableBitmap = it }
+        val bitmap = decodeLiveViewJpeg(array, jpgOffset, jpgLen)
         return LiveViewFrame(bitmap, busy = false, afCenterX, afCenterY, afW, afH, wholeW, wholeH, frameW, frameH)
     }
 
@@ -2502,9 +2548,32 @@ class PtpUsbConnection(
      *    再去等一个永远不来的包，超时返回 null，上层就判成"读取失败"。
      *    现在多读到的部分先拆出来塞进 lastResponse。
      */
+    // ------------------------------------------------------------------
+    // 大块接收的复用缓冲
+    //
+    // 一张 NEF 十几 MB，getObject 甚至会按 expectedSize 把 maxSize 顶到 64 MB。
+    // 以前每收一次就现开一块这么大的 ByteArray —— 批量导出 30 张，
+    // 就是 30 个十几 MB 的大对象轮流进出堆，GC 全被它拖住。
+    // 现在 ≥1 MiB 的接收复用同一块，尺寸不够才换大的。
+    //
+    // 能这么改的前提：所有大接收的调用方都在**本次调用内**把数据用掉 ——
+    // getObject / getPartialObject 是 copyOfRange 拷出去，取景帧是当场解成 Bitmap，
+    // probeLiveViewActive 只看 limit()。没有谁把 ByteBuffer 留着以后用，
+    // 否则下一次接收会把它的内容写花。小接收（<1 MiB）仍然现分配，那点开销无所谓。
+    // ------------------------------------------------------------------
+    private val BIG_SCRATCH_MIN = 1024 * 1024
+    private var bigScratch: ByteArray? = null
+
+    private fun obtainScratch(size: Int): ByteArray {
+        bigScratch?.let { if (it.size >= size) return it }
+        val n = ByteArray(size)
+        bigScratch = n
+        return n
+    }
+
     private fun receiveData(maxSize: Int = 4096, firstTimeoutMs: Int = 5000): ByteBuffer? {
         val ep = inEndpoint ?: return null
-        val tempBuffer = ByteArray(maxSize)
+        val tempBuffer = if (maxSize >= BIG_SCRATCH_MIN) obtainScratch(maxSize) else ByteArray(maxSize)
         val header = ByteBuffer.wrap(tempBuffer).order(ByteOrder.LITTLE_ENDIAN)
 
         var totalRead = 0
@@ -2811,6 +2880,8 @@ class PtpUsbConnection(
     }
 
     fun close() {
+        clearLiveViewBitmapPool()   // 断连后没必要再占着几块取景帧 Bitmap
+        bigScratch = null           // 十几 MB 的接收缓冲同理
         try {
             connection.releaseInterface(usbInterface)
             connection.close()

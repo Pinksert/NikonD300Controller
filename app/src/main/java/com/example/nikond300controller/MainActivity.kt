@@ -65,6 +65,10 @@ class MainActivity : AppCompatActivity(), SheetHost {
     private lateinit var focusBox: FocusBoxView
     private lateinit var liveViewPlaceholder: TextView
 
+    /** 峰值对焦：叠加层 + 取景时才出现的开关 chip */
+    private lateinit var peakingView: PeakingView
+    private lateinit var peakButton: TextView
+
     // 对焦点控制全部收在取景框上：右上角 chip 切 11/51 点，画面上点对焦点（写 0xD108），
     // 三脚架模式点画面挪 AF 框（0x9205）。参数页那张「自动对焦」卡片已按用户要求整块删除。
 
@@ -307,6 +311,11 @@ class MainActivity : AppCompatActivity(), SheetHost {
     /** 机身事件里报的最新对象句柄 —— 自动下载靠它定位"刚拍的那张" */
     @Volatile
     private var lastNewObjectHandle = -1
+
+    /** 取景帧上屏的最小间隔（纳秒）：40ms ≈ 25fps，再密只是让主线程白排队 */
+    private val UI_POST_INTERVAL_NS = 40_000_000L
+    /** 写参数后回读前的等待（毫秒），见 [settleAndRefresh] */
+    private val SETTLE_MS = 300L
 
     // Current internal selection indices for arrow adjustment
     private var currentIsoIndex = 0
@@ -704,6 +713,10 @@ class MainActivity : AppCompatActivity(), SheetHost {
         recButton = findViewById(R.id.recButton)
         recButton.setOnClickListener { toggleRecording() }
 
+        peakingView = findViewById(R.id.peakingView)
+        peakButton = findViewById(R.id.peakButton)
+        peakButton.setOnClickListener { togglePeaking() }
+
         topStatusBar = findViewById(R.id.topStatusBar)
         topBarRow = findViewById(R.id.topBarRow)
         lvFullscreenButton = findViewById(R.id.lvFullscreenButton)
@@ -1017,10 +1030,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
         pollingPausedForSheet = false
         // 菜单里刚写过机身，回来立刻补一次刷新，界面上不用等下一轮轮询（最长 5 秒）
         if (isConnected && !pollingPausedForTab) {
-            thread {
-                Thread.sleep(300)   // 让最后那次写入收尾，免得读到旧值
-                updateProperties()
-            }
+            thread { settleAndRefresh() }
         }
     }
 
@@ -1247,10 +1257,22 @@ class MainActivity : AppCompatActivity(), SheetHost {
                 runOnUiThread { log("设置 ISO 出错：${e.message}") }
             } finally {
                 isPollingPaused = false
-                Thread.sleep(300)
-                updateProperties()
+                settleAndRefresh()
             }
         }
+    }
+
+    /**
+     * 写完机身参数后等一下再回读刷新。
+     *
+     * 注意这**不是失败重试** —— 写命令已经回 OK 了，等的是机身把新值落到属性区。
+     * 立刻回读经常还是旧值，界面就成了"选了档位但显示没变"。
+     * 300ms 是实测够用的下限；真要做到"确认生效"得为每个属性写一套回读比对，
+     * 代价远大于收益，所以这里就是一个集中的、有名字的等待。
+     */
+    private fun settleAndRefresh() {
+        Thread.sleep(SETTLE_MS)
+        updateProperties()
     }
 
     /**
@@ -1268,8 +1290,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
                 isPollingPaused = false
                 refreshIsoChip()
                 onDone?.let { cb -> runOnUiThread(cb) }
-                Thread.sleep(300)
-                updateProperties()
+                settleAndRefresh()
             }
         }
     }
@@ -1701,8 +1722,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
                                 log("曝光补偿设置失败：$label EV，机身返回 0x${Integer.toHexString(code).uppercase()}")
                             }
                         }
-                        Thread.sleep(300)
-                        updateProperties()
+                        settleAndRefresh()
                     } catch (e: Exception) {
                         runOnUiThread { log("设置曝光补偿出错：${e.message}") }
                     } finally {
@@ -3557,6 +3577,23 @@ class MainActivity : AppCompatActivity(), SheetHost {
         }
     }
 
+    /**
+     * 峰值对焦开关。
+     *
+     * 只在取景中能按：开销是按帧算的（每帧要跑一遍 Sobel），没取景时不该有一分开销。
+     * 关掉时 peakingView 会主动 clear() 把上一帧的掩码从屏幕上撤下来，
+     * 否则会留一层"卡住的红边"在画面上。
+     */
+    private fun togglePeaking() {
+        val on = !peakingView.peakingEnabled
+        peakingView.peakingEnabled = on
+        peakButton.text = if (on) "峰值 ●" else "峰值"
+        peakButton.setTextColor(
+            if (on) getColor(R.color.accent_red) else getColor(R.color.text_disabled)
+        )
+        log(if (on) "峰值对焦已开启：合焦处会泛红" else "峰值对焦已关闭")
+    }
+
     private fun startLiveView(keepAfLock: Boolean = false) {
         // 防重入：整条开启链路可能跑十几秒。以前这期间不设防，用户等不及再点一次
         // 就会再起一个线程，几个线程同时抢 usbLock，越点越慢，最后谁都开不起来。
@@ -3635,6 +3672,8 @@ class MainActivity : AppCompatActivity(), SheetHost {
                         focusBox.attachImageView(liveViewImage)
                         // 取景时才谈得上录像（录制的是取景帧）
                         recButton.visibility = View.VISIBLE
+                        // 峰值对焦同理：只对实时画面有意义，且开销是按帧算的
+                        peakButton.visibility = View.VISIBLE
                         lvFullscreenButton.visibility = View.VISIBLE
                         renderRecState(recorder?.isRecording == true)
                         // 取景一开，点阵要不要显示由取景模式决定（三脚架模式只留 AF 框）
@@ -3659,6 +3698,11 @@ class MainActivity : AppCompatActivity(), SheetHost {
                     }
                     // 帧节拍：以前每帧固定 sleep(100)，加上取帧本身 50~60ms，实测只有 6fps。
                     // 改成"目标帧间隔 − 本帧已耗时"：取帧快就多睡、慢就少睡，帧率贴着 USB 能力走。
+                    //
+                    // ★ 计时一律用 nanoTime() 而不是 currentTimeMillis()：
+                    //   后者是墙上时钟，取景途中被网络对时或用户改一下系统时间就会跳变，
+                    //   spent 能算成负数或者好几秒，帧率当场乱掉。nanoTime 单调递增，
+                    //   量间隔这件事只认它。
                     var lastUiPost = 0L
                     while (isLiveViewRunning) {
                         // 拍摄期间让路：快门命令要独占 USB，别和读帧抢
@@ -3666,7 +3710,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
                             Thread.sleep(50)
                             continue
                         }
-                        val frameStart = System.currentTimeMillis()
+                        val frameStart = System.nanoTime()
                         try {
                             val frame = ptpConnection?.getLiveViewFrame()
                             if (frame?.busy == true) {
@@ -3693,9 +3737,13 @@ class MainActivity : AppCompatActivity(), SheetHost {
                                 // 提交必须在下一帧覆盖它之前完成 —— 所以是同步调用。
                                 recorder?.submitFrame(bmp)
 
+                                // 峰值对焦：同样必须同步算。这块 Bitmap 是池子里轮着用的，
+                                // 下一帧就可能写进新内容，异步去读会读到半张新半张旧。
+                                peakingView.submit(bmp)
+
                                 // 屏幕刷新去抖：主线程忙时不给每一帧都排队，40ms（≈25fps）一次足够
-                                val now = System.currentTimeMillis()
-                                if (now - lastUiPost >= 40) {
+                                val now = System.nanoTime()
+                                if (now - lastUiPost >= UI_POST_INTERVAL_NS) {
                                     lastUiPost = now
                                     runOnUiThread {
                                         liveViewImage.setImageBitmap(bmp)
@@ -3710,12 +3758,13 @@ class MainActivity : AppCompatActivity(), SheetHost {
                         } catch (e: Exception) {
                             runOnUiThread { log("LV 帧错误: ${e.message}") }
                         }
-                        val spent = System.currentTimeMillis() - frameStart
+                        val spent = (System.nanoTime() - frameStart) / 1_000_000L
                         val target = if (recorder?.isRecording == true) 66L else 70L
                         val wait = target - spent
                         if (wait > 5) Thread.sleep(wait)
                     }
                     focusBox.clear()
+                    peakingView.clear()
                 } else {
                     // 失败原因直接摆到用户面前：以前只有一行日志，而日志面板默认是收起的
                     runOnUiThread {
@@ -3723,6 +3772,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
                         setViewfinderExpanded(false)
                         liveViewPlaceholder.visibility = View.GONE
                         recButton.visibility = View.GONE
+                        peakButton.visibility = View.GONE
                         renderLiveViewMode(currentLiveViewMode)
                         log("Live View 启动失败：${result.reason}")
                         Toast.makeText(this@MainActivity, "取景启动失败：${result.reason}", Toast.LENGTH_LONG).show()
@@ -3769,6 +3819,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
             // 取景没了，录制的帧源也没了 —— 在录的话就地收尾，别留下半个文件
             if (recorder?.isRecording == true) stopRecording()
             recButton.visibility = View.GONE
+            peakButton.visibility = View.GONE
             lvFullscreenButton.visibility = View.GONE
             if (isLvFullscreen) {
                 isLvFullscreen = false
@@ -3776,6 +3827,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
             }
             liveViewPlaceholder.visibility = View.GONE
             focusBox.clear()
+            peakingView.clear()
             // 退出取景后点阵回到"未取景恒显示"的状态
             renderLiveViewMode(currentLiveViewMode)
         }
@@ -3811,6 +3863,9 @@ class MainActivity : AppCompatActivity(), SheetHost {
             runOnUiThread { log("读帧循环未在 3s 内退出，继续发送退出命令") }
         }
         liveViewThread = null
+
+        // 读帧循环已经停了，不会再有帧去引用池子里的 Bitmap，放掉让 GC 能收
+        ptpConnection?.clearLiveViewBitmapPool()
 
         // 退出命令本身也设上限：机身不回应时不能把整条链路挂死，
         // 否则负责清理标志位的 finally 永远执行不到，之后每次点 LV 都会被防重入吞掉。

@@ -26,6 +26,8 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 import kotlin.jvm.Volatile
 import java.util.LinkedHashMap
@@ -250,7 +252,7 @@ class GalleryActivity : AppCompatActivity() {
     private val bgThreads = mutableListOf<Thread>()
 
     /** 启动后台任务并登记，退出相册时要能等到它 */
-    private fun bg(block: () -> Unit) {
+    private fun bg(block: () -> Unit): Thread {
         val t = thread {
             try {
                 block()
@@ -259,15 +261,28 @@ class GalleryActivity : AppCompatActivity() {
             }
         }
         synchronized(bgLock) { bgThreads.add(t) }
+        return t
     }
+
+    /** 同 [bg]，但把 Thread 交回来 —— 需要 join 的地方（比如导出流水线）用这个 */
+    private fun bgThread(block: () -> Unit): Thread = bg(block)
 
     /**
      * NEF 预览缓存：句柄 → 预览位图。
      *
      * 一张预览要跑两趟 USB（读头部定位 + 读预览本体），来回点开同一张
      * 每次都重传就太亏了。缓存按句柄存，退出相册随 Activity 一起回收。
+     *
+     * ★ 上限按**字节**算，不再是无界 Map：一张 4288×2848 的预览位图就是 ~49 MB
+     *   （ARGB_8888）。以前没有上限，连着翻十几张 NEF 就能把堆吃光崩掉。
+     *   这里给到最大堆的 1/8，超了淘汰最久没看的。
+     *   淘汰时**不** recycle —— 那块位图可能还挂在 fullImage 上正显示着。
      */
-    private val previewCache = mutableMapOf<Int, Bitmap?>()
+    private val previewCache = object : android.util.LruCache<Int, Bitmap>(
+        (Runtime.getRuntime().maxMemory() / 1024 / 8).toInt().coerceAtLeast(16 * 1024)
+    ) {
+        override fun sizeOf(key: Int, value: Bitmap): Int = (value.byteCount / 1024).coerceAtLeast(1)
+    }
     private val previewLock = Any()
 
     // ------------------------------------------------------------------
@@ -286,17 +301,23 @@ class GalleryActivity : AppCompatActivity() {
     }
     private val fullBytesLock = Any()
 
-    /** 取一张照片的完整字节（带缓存 + 一次重试）；断连或机身不给就 null */
+    /** 取一张照片的完整字节（带缓存 + 退避重试）；断连或机身不给就 null */
     private fun fetchFull(ptp: PtpUsbConnection, info: PtpObjectInfo): ByteArray? {
         synchronized(fullBytesLock) { fullBytes[info.handle]?.let { return it } }
         if (!pageAlive) return null
-        // NEF 十几 MB 传一半失败很常见（机身忙 / USB 抖动），补一次重试，
-        // 别让用户为了一次抖动去退出重进
-        var bytes = ptp.getObject(info.handle, info.byteSize)
-        if (bytes == null && pageAlive) {
-            Thread.sleep(600)
+
+        // NEF 十几 MB 传一半失败很常见（机身忙 / USB 抖动）。
+        // 用退避而不是固定等 600ms：偶发抖动时第一次 250ms 就回来了，不必每次都白等 600；
+        // 真卡住（机身还在写卡）再把间隔拉到 1.2s 给它喘气。
+        // 最后一次失败后**不再 sleep** —— 那纯粹是让用户干等一段注定没结果的时间。
+        val backoffMs = longArrayOf(250, 600, 1200)
+        var bytes: ByteArray? = null
+        for (attempt in backoffMs.indices) {
             bytes = ptp.getObject(info.handle, info.byteSize)
+            if (bytes != null || !pageAlive) break
+            if (attempt < backoffMs.lastIndex) Thread.sleep(backoffMs[attempt])
         }
+
         if (bytes != null) synchronized(fullBytesLock) { fullBytes[info.handle] = bytes }
         return bytes
     }
@@ -1030,9 +1051,7 @@ class GalleryActivity : AppCompatActivity() {
         }
 
         // NEF 先看预览缓存：虽然字节没留住，位图还在就能先顶上，至少不是空白
-        val cached = synchronized(previewLock) {
-            if (previewCache.containsKey(entry.info.handle)) previewCache[entry.info.handle] else null
-        }
+        val cached = synchronized(previewLock) { previewCache.get(entry.info.handle) }
         if (cached != null) setViewerBitmap(cached)
 
         bg {
@@ -1053,28 +1072,63 @@ class GalleryActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * 按屏幕尺寸采样解码的结果。
+     * [width]/[height] 是**原始**像素尺寸（只是拿来给界面显示"4288×2848"），
+     * [bitmap] 则是采样后的位图 —— 两者故意分开，别再拿 bitmap 的宽高当原图尺寸。
+     */
+    private class Decoded(val bitmap: Bitmap, val width: Int, val height: Int)
+
+    /**
+     * 采样解码：先用 inJustDecodeBounds 探尺寸，再按屏幕宽度算 inSampleSize。
+     *
+     * 为什么非要采样：4288×2848 全尺寸解一张就是 ~49 MB 的 ARGB_8888 位图，
+     * 翻几张就顶到堆上限。1080p / 1440p 手机上算下来 sample 都是 2，
+     * 内存降到 1/4，2 倍缩放以内看不出差别 —— 继续放大才会发虚，这是有意的取舍。
+     */
+    private fun decodeSampled(bytes: ByteArray, offset: Int, length: Int): Decoded? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, offset, length, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+
+        // ImageView 还没量出来时退回屏幕宽度
+        val req = maxOf(fullImage.width, resources.displayMetrics.widthPixels).coerceAtLeast(1)
+        var sample = 1
+        while (bounds.outWidth / (sample * 2) >= req) sample *= 2
+
+        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+        val bmp = try {
+            BitmapFactory.decodeByteArray(bytes, offset, length, opts)
+        } catch (e: Exception) {
+            null
+        } ?: return null
+        return Decoded(bmp, bounds.outWidth, bounds.outHeight)
+    }
+
     /** 完整字节到手后的统一出口：上画面 + 开保存 + 立刻解析 EXIF */
     private fun showBytes(entry: Entry, bytes: ByteArray, token: Int) {
         currentBytes = bytes
         saveButton.isEnabled = true
         if (entry.info.isJpeg) {
-            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-            if (bmp != null) {
-                setViewerBitmap(bmp)
-                renderViewerInfo("${bmp.width}×${bmp.height}")
-                attachExif(bytes, "${bmp.width}×${bmp.height}", token)
+            val d = decodeSampled(bytes, 0, bytes.size)
+            if (d != null) {
+                setViewerBitmap(d.bitmap)
+                val dims = "${d.width}×${d.height}"
+                renderViewerInfo(dims)
+                attachExif(bytes, dims, token)
             } else {
                 renderViewerInfo("解码失败")
                 attachExif(bytes, "解码失败", token)
             }
         } else {
             // NEF 本身是 TIFF，Android 解不了 —— 抠它内嵌的那张 JPEG 预览
-            val bmp = decodeNefFromFull(bytes)
-            if (bmp != null) {
-                setViewerBitmap(bmp)
-                synchronized(previewLock) { previewCache[entry.info.handle] = bmp }
-                renderViewerInfo("预览 ${bmp.width}×${bmp.height}")
-                attachExif(bytes, "预览 ${bmp.width}×${bmp.height}", token)
+            val d = decodeNefPreviewSampled(bytes)
+            if (d != null) {
+                setViewerBitmap(d.bitmap)
+                synchronized(previewLock) { previewCache.put(entry.info.handle, d.bitmap) }
+                val dims = "预览 ${d.width}×${d.height}"
+                renderViewerInfo(dims)
+                attachExif(bytes, dims, token)
             } else {
                 val fallback = "${entry.info.pixWidth}×${entry.info.pixHeight} · NEF 无内嵌预览，可保存原文件"
                 renderViewerInfo(fallback)
@@ -1083,11 +1137,11 @@ class GalleryActivity : AppCompatActivity() {
         }
     }
 
-    /** 已经拿到完整 NEF 字节时的抠图路径 */
-    private fun decodeNefFromFull(full: ByteArray): Bitmap? {
+    /** 已经拿到完整 NEF 字节时的抠图路径（同样按屏幕采样，不再全尺寸解） */
+    private fun decodeNefPreviewSampled(full: ByteArray): Decoded? {
         val loc = NefPreview.locate(full) ?: return null
         val jpeg = NefPreview.slice(full, loc) ?: return null
-        return BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size)
+        return decodeSampled(jpeg, 0, jpeg.size)
     }
 
     private fun closeViewer() {
@@ -1132,8 +1186,8 @@ class GalleryActivity : AppCompatActivity() {
         // 预览缓存里存的都是解码后的位图，一张几百 KB 到几 MB，
         // Activity 走了就得还给系统，不能靠 GC 慢慢收
         synchronized(previewLock) {
-            for (b in previewCache.values) b?.recycle()
-            previewCache.clear()
+            for (b in previewCache.snapshot().values) b.recycle()
+            previewCache.evictAll()
         }
         // 缩略图缓存同理（注意：网格里的 Entry 引用的是同一批位图对象，
         // 这里整页都要走了才回收，不能在切换相册时清）
@@ -1222,22 +1276,35 @@ class GalleryActivity : AppCompatActivity() {
         selStatus.text = "准备导出 ${targets.size} 张…"
         updateSelectionUi()
 
-        bg {
-            var ok = 0
-            var failed = 0
-            var converted = 0
-            for ((i, e) in targets.withIndex()) {
-                if (!pageAlive) break
-                runOnUiThread {
-                    // 转档那一步要解 RAW，一张要好几秒，把"正在转档"说清楚，
-                    // 否则进度条停在同一个数上看着像卡死了
-                    val doing = if (asJpg && !e.info.isJpeg) "正在转档并导出" else "正在导出"
-                    selStatus.text = "$doing ${i + 1}/${targets.size}：${e.info.filename}"
-                    selProgress.progress = i
-                }
-                val bytes = fetchFull(ptp, e.info)
-                if (bytes == null) { failed++; continue }
+        // ------------------------------------------------------------------
+        // 导出流水线：1 个下载线程 + N 个解码线程
+        //
+        // 以前是一条线程串行"传完一张 → 解一张"，30 张 NEF 得等到天荒地老：
+        // USB 传输和 LibRaw 解码根本不抢同一份资源，却硬被排成一队。
+        // 现在拆开 —— USB 必须串行（PtpUsbConnection 内部有 usbLock，本来也并发不了），
+        // 但解码是纯 CPU，可以多开。下载线程往前跑，把字节丢进有界队列，
+        // 解码线程各自取一张解完再写盘。
+        //
+        // 队列有界是刻意的：一张 NEF 十几 MB，一张解出来的 Bitmap 又是 49 MB
+        // （4288×2848 ARGB_8888），无界预取会直接把堆撑爆。
+        // 解码线程数按机器内存给，小内存机退回 1（实质还是串行），宁可慢也别崩。
+        // ------------------------------------------------------------------
+        val maxMemMb = Runtime.getRuntime().maxMemory() / 1048576
+        val decoders = when {
+            maxMemMb < 192 -> 1
+            maxMemMb < 384 -> 2
+            else -> minOf(3, maxOf(2, Runtime.getRuntime().availableProcessors() / 2))
+        }
+        val queue = ArrayBlockingQueue<ExportJob>(maxOf(1, decoders))
 
+        bg {
+            val ok = AtomicInteger()
+            val failed = AtomicInteger()
+            val converted = AtomicInteger()
+            val done = AtomicInteger()
+
+            /** 单张落地：JPEG 直存，NEF 看开关决定转档还是存原文件 */
+            fun processOne(e: Entry, bytes: ByteArray) {
                 if (asJpg && !e.info.isJpeg) {
                     // NEF 转 JPG：**真解 RAW**（LibRaw），不再抠机身内嵌的那张预览 ——
                     // 那张预览只有 239 KB，画质和体积都不像一张正常照片。
@@ -1245,35 +1312,87 @@ class GalleryActivity : AppCompatActivity() {
                     val jpg = NefDecoder.toJpeg(bytes, cacheDir)
                     if (jpg == null) {
                         // 解不出来就退回存原文件，别把这张丢了
-                        if (writeToPhone(e.info.filename,
-                                "image/x-nikon-nef", bytes)
-                        ) ok++ else failed++
-                        continue
+                        if (writeToPhone(e.info.filename, "image/x-nikon-nef", bytes)) ok.incrementAndGet()
+                        else failed.incrementAndGet()
+                        return
                     }
                     val outName = e.info.filename.substringBeforeLast('.') + ".jpg"
-                    if (writeToPhone(outName, "image/jpeg", jpg)) { ok++; converted++ } else failed++
+                    if (writeToPhone(outName, "image/jpeg", jpg)) {
+                        ok.incrementAndGet(); converted.incrementAndGet()
+                    } else failed.incrementAndGet()
                 } else {
                     val mime = if (e.info.isJpeg) "image/jpeg" else "image/x-nikon-nef"
-                    if (writeToPhone(e.info.filename, mime, bytes)) ok++ else failed++
+                    if (writeToPhone(e.info.filename, mime, bytes)) ok.incrementAndGet()
+                    else failed.incrementAndGet()
                 }
             }
+
+            // 解码/写盘：队列里取一张做一张，取到哨兵就收工
+            val workers = (0 until decoders).map {
+                bgThread {
+                    while (pageAlive) {
+                        val job = queue.take()
+                        val e = job.entry ?: break          // 哨兵
+                        val bytes = job.bytes ?: break
+                        try {
+                            processOne(e, bytes)
+                        } catch (t: Throwable) {
+                            android.util.Log.w("Export", "导出 ${e.info.filename} 异常：${t.message}")
+                            failed.incrementAndGet()
+                        }
+                        val d = done.incrementAndGet()
+                        runOnUiThread {
+                            // 转档那一步要解 RAW，一张好几秒 —— 说清楚"第几张"，
+                            // 否则进度条停在同一个数上看着像卡死了
+                            selStatus.text = "已完成 $d/${targets.size}：${e.info.filename}"
+                            selProgress.progress = d
+                        }
+                    }
+                }
+            }
+
+            try {
+                // 下载：串行占 USB，往前多取一点让解码线程不断粮
+                for (e in targets) {
+                    if (!pageAlive) break
+                    val bytes = fetchFull(ptp, e.info)
+                    if (bytes == null) {
+                        failed.incrementAndGet()
+                        val d = done.incrementAndGet()
+                        runOnUiThread { selProgress.progress = d }
+                        continue
+                    }
+                    queue.put(ExportJob(e, bytes))
+                }
+            } finally {
+                // 无论怎么退出的，都得把解码线程放出来，否则它们永远卡在 take()
+                repeat(decoders) { queue.offer(ExportJob(null, null)) }
+            }
+
+            for (w in workers) {
+                try { w.join() } catch (_: Exception) {}
+            }
+
             runOnUiThread {
                 exporting = false
                 selProgress.progress = targets.size
                 selStatus.text = buildString {
-                    append("导出完成：$ok 张已存到 相册/D300")
-                    if (converted > 0) append("（其中 $converted 张 NEF 已转 JPG）")
-                    if (failed > 0) append(" · $failed 张失败（详见日志）")
+                    append("导出完成：${ok.get()} 张已存到 相册/D300")
+                    if (converted.get() > 0) append("（其中 ${converted.get()} 张 NEF 已转 JPG）")
+                    if (failed.get() > 0) append(" · ${failed.get()} 张失败（详见日志）")
                 }
                 Toast.makeText(
                     this,
-                    if (failed > 0) "导出完成，有 $failed 张失败" else "已导出 $ok 张到 相册/D300",
+                    if (failed.get() > 0) "导出完成，有 ${failed.get()} 张失败" else "已导出 ${ok.get()} 张到 相册/D300",
                     Toast.LENGTH_LONG
                 ).show()
                 updateSelectionUi()
             }
         }
     }
+
+    /** 流水线里传的一张活；entry 为 null 是收工哨兵 */
+    private data class ExportJob(val entry: Entry?, val bytes: ByteArray?)
 
     private fun saveCurrent() {
         val entry = currentEntry ?: return

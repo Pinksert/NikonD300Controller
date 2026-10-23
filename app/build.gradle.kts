@@ -37,9 +37,17 @@ android {
 
     buildTypes {
         release {
+            // ★ 开 R8：关着的时候 classes*.dex 合计 10.5 MB，占未压缩体积的 61%，
+            //   是整个 APK 的大头。开起来顺带把没用到的资源一起裁掉。
             optimization {
-                enable = false
+                enable = true
             }
+            // nef_jni.cpp 走的是静态注册（Java_com_example_nikond300controller_NefDecoder_*），
+            // 类名和方法名必须原样保留，否则装上去一解 NEF 就 UnsatisfiedLinkError。
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
         }
     }
     compileOptions {

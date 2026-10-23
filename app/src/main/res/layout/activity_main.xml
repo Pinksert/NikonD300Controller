@@ -130,6 +130,13 @@
                         android:visibility="gone"
                         tools:ignore="ContentDescription" />
 
+                    <!-- 峰值对焦叠加层：夹在取景画面和对焦框之间，
+                         画在画面之上、对焦框之下，两层互不遮挡。 -->
+                    <com.example.nikond300controller.PeakingView
+                        android:id="@+id/peakingView"
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent" />
+
                     <com.example.nikond300controller.FocusBoxView
                         android:id="@+id/focusBox"
                         android:layout_width="match_parent"
@@ -165,6 +172,25 @@
                         android:paddingEnd="10dp"
                         android:text="● 录制"
                         android:textColor="@color/accent_red"
+                        android:textSize="11sp"
+                        android:textStyle="bold"
+                        android:visibility="gone" />
+
+                    <!-- 峰值对焦开关：只在取景中出现，压在录制按钮下方（48dp 避让）。
+                         手动对焦时靠它判断合焦，开着会有额外的计算开销，不需要就关掉。 -->
+                    <TextView
+                        android:id="@+id/peakButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="28dp"
+                        android:layout_gravity="top|start"
+                        android:layout_marginStart="12dp"
+                        android:layout_marginTop="48dp"
+                        android:background="@drawable/bg_overlay_chip"
+                        android:gravity="center"
+                        android:paddingStart="10dp"
+                        android:paddingEnd="10dp"
+                        android:text="峰值"
+                        android:textColor="@color/text_disabled"
                         android:textSize="11sp"
                         android:textStyle="bold"
                         android:visibility="gone" />

@@ -41,8 +41,12 @@ object NefDecoder {
      * @return 转好的 JPEG 字节（带 EXIF）；失败返回 null，调用方退回存原文件
      */
     fun toJpeg(nef: ByteArray, cacheDir: File): ByteArray? {
-        val inFile = File(cacheDir, "nef_in.tmp")
-        val outFile = File(cacheDir, "nef_out.ppm")
+        // ★ 文件名必须按线程区分：批量导出是多个解码线程并发调这里，
+        //   写死名字的话两个线程会抢同一个 nef_in.tmp —— 一个写一半被另一个覆盖，
+        //   解出来就是花屏或者"文件不存在"。
+        val tag = android.os.Process.myTid()
+        val inFile = File(cacheDir, "nef_in_$tag.tmp")
+        val outFile = File(cacheDir, "nef_out_$tag.ppm")
         return try {
             inFile.writeBytes(nef)
             val rc = convertToPpm(inFile.absolutePath, outFile.absolutePath)

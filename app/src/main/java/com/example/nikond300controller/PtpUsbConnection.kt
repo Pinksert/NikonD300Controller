@@ -501,6 +501,72 @@ class PtpUsbConnection(
         return code
     }
 
+    /**
+     * 列举当前能看见的全部对象句柄（逐卡为主 + 全卡兜底）。
+     *
+     * D300 上「storage=全部卡 + parent=0」这一问法实测会回空或 0x2013（见 [getObjectHandlesIn]），
+     * 所以主路是逐卡列举，全卡那一路只作兜底，两条结果合并去重。
+     */
+    private fun enumerateAllHandles(): Set<Int> {
+        val out = LinkedHashSet<Int>()
+        getStorageIds()?.forEach { sid ->
+            getObjectHandlesIn(sid, 0)?.forEach { out.add(it) }
+        }
+        getObjectHandles()?.forEach { out.add(it) }
+        return out
+    }
+
+    /**
+     * 拍一张**不落卡**的照片，取回它的缩略图 —— 用作「曝光预览」。
+     *
+     * 链路：`0x90C0 InitiateCaptureRecInSdram` → 机身把照片放进自己的内存（**卡里不会有**）
+     * → 比对拍摄前后的句柄集合找出新对象 → `0x100A GetThumb` 取缩略图。
+     *
+     * 为什么取缩略图而不是 [getObject] 全图：全尺寸 NEF 有十几 MB，传完再解要好几秒，
+     * 用来"看一眼曝光"太重；缩略图是机身内嵌的小 JPEG，通常几百 KB、几百毫秒就回来，
+     * 判断亮度与高光溢出足够（**但看不了细节、噪声、精确合焦**）。
+     *
+     * ⚠️ 这仍是**真实快门动作**：反光板/快门帘会走一遍，取景会被打断；
+     * 拍完机身常常自己结束取景（libgphoto2 的做法是再补一发 0x9201），续取景由调用方负责。
+     *
+     * ⚠️ 新句柄是靠"拍前/拍后集合做差"找的。若机身把 SDRAM 对象放在 [getStorageIds]
+     * 列举不到的地方、又不发 ObjectAdded，就会等不到 —— 真机若如此，需要改走事件通道。
+     *
+     * @param timeoutMs 等新对象出现的预算
+     * @return 缩略图；null = 没拍成 / 等不到新对象 / 取不到缩略图
+     */
+    fun captureToSdramPreview(timeoutMs: Int = 8000): Bitmap? {
+        val before = enumerateAllHandles()
+
+        val code = captureNoAf()
+        if (code != PtpConstants.RESP_OK) {
+            val hex = if (code < 0) "TIMEOUT" else "0x${Integer.toHexString(code).uppercase()}"
+            logger("曝光预览：快门没成（$hex）")
+            return null
+        }
+
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var waited = 0
+        while (System.currentTimeMillis() < deadline) {
+            if (abortRequested) return null
+            Thread.sleep(250)
+            waited += 250
+
+            val fresh = enumerateAllHandles() - before
+            if (fresh.isEmpty()) continue
+
+            // 句柄递增，多个新对象时最大的那个就是刚拍的
+            val handle = fresh.maxOrNull() ?: continue
+            logger("曝光预览：新对象 0x${Integer.toHexString(handle).uppercase()}（等待 ${waited}ms）")
+            val bmp = getThumb(handle)
+            if (bmp != null) return bmp
+            logger("曝光预览：0x100A 没取回缩略图")
+            return null
+        }
+        logger("曝光预览：${timeoutMs}ms 内没等到新对象句柄")
+        return null
+    }
+
     fun clearPipe() {
         inEndpoint?.let { connection.clearHalt(it) }
         outEndpoint?.let { connection.clearHalt(it) }

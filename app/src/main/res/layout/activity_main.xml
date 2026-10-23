@@ -195,6 +195,26 @@
                         android:textStyle="bold"
                         android:visibility="gone" />
 
+                    <!-- 曝光预览：拍一张**不落卡**的照片（0x90C0 → 机身内存），
+                         取回缩略图盖在取景画面上看曝光。比实时取景的画面更接近成片。
+                         注意它走真实快门，取景会被打断。 -->
+                    <TextView
+                        android:id="@+id/exposurePreviewButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="28dp"
+                        android:layout_gravity="top|start"
+                        android:layout_marginStart="12dp"
+                        android:layout_marginTop="84dp"
+                        android:background="@drawable/bg_overlay_chip"
+                        android:gravity="center"
+                        android:paddingStart="10dp"
+                        android:paddingEnd="10dp"
+                        android:text="曝光预览"
+                        android:textColor="@color/text_disabled"
+                        android:textSize="11sp"
+                        android:textStyle="bold"
+                        android:visibility="gone" />
+
                     <!-- 全屏：把取景画面铺满整块屏幕（视频软件那种全屏按钮）。
                          全屏时隐藏顶栏、曝光卡片、底部导航，只留画面和一个「退出」。 -->
                     <TextView

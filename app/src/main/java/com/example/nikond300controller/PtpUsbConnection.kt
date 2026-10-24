@@ -645,7 +645,17 @@ class PtpUsbConnection(
                     getObjectAsBitmap(handle)?.let { return it }
                 }
             }
-            logger("曝光预览：${timeoutMs}ms 内没有拿到机身内存里的画面")
+            // ★ 事件里一个句柄都没给 —— 别急着放弃，机身可能只是不肯把句柄交出来，
+            // 但缓存里那张图是存在的。0x9200 GetPreviewImage **不需要句柄**，
+            // 直接向机身要当前缓存里的预览图（真机 DeviceInfo 已确认支持）。
+            // 以前只在收到 0xC104 事件时才试它，等于把"机身不肯报事件"这种情况
+            // 整条判死 —— 这正是"点了没反应"的最后一环。
+            logger("曝光预览：${timeoutMs}ms 内没拿到句柄，最后直接向机身要一次预览图（0x9200）")
+            fetchPreviewImage()?.let {
+                logger("曝光预览：0x9200 拿到了画面")
+                return it
+            }
+            logger("曝光预览：机身内存这条路彻底没拿到画面")
             return null
         } finally {
             // ---- ④ 收尾：清机身 RAM + 媒介还原 ----
@@ -659,6 +669,100 @@ class PtpUsbConnection(
             }
         }
     }
+
+    /**
+     * ★ 通道 B：落卡拍一张 → 取缩略图 → **删掉它**。
+     *
+     * 通道 A（[captureToSdramPreview]）要求机身愿意把照片留在 SDRAM 里、并用
+     * 0xC101/0xC102/0xC104 事件告诉我们句柄 —— 这条链在不少机身状态下走不通
+     * （媒介切不动、事件里不给句柄、0x9200 缓冲区尺寸对不上），真机上就是"点了没反应"。
+     *
+     * 既然 **0x100B DeleteObject 在这台机身上实测可用**，那就有一条绕开全部不确定性的路：
+     * 老老实实拍一张进卡（0x100E，我们已经验证过稳定落卡），用 0x100A 把缩略图取回来
+     * 给用户看曝光，然后**把这张删掉** —— 卡上不留东西，只是文件编号往下走了一号。
+     *
+     * 走的每一步（0x100E / 0x100A / 0x100B）都是已经在真机上跑通的命令，
+     * 不依赖"记录媒介"和"SDRAM 事件"这两个一直在翻车的前提。
+     *
+     * @return Pair(预览图, 是否删掉了那张)；删不掉时 second=false，调用方要提醒用户
+     */
+    fun captureToCardPreview(timeoutMs: Int = 9000): Pair<Bitmap?, Boolean> {
+        // ① 落卡：把记录媒介明确写成存储卡，免得上一轮通道 A 把它留在 0 上
+        val mediaBefore = getDevicePropValue(PtpConstants.PROP_NIKON_RECORDING_MEDIA)
+        if (mediaBefore >= 0 && mediaBefore != PtpConstants.RECORDING_MEDIA_CARD) {
+            val ok = setDevicePropValue(
+                PtpConstants.PROP_NIKON_RECORDING_MEDIA,
+                PtpConstants.RECORDING_MEDIA_CARD, 1, "曝光预览：临时切回存储卡", 1
+            )
+            logger("曝光预览（通道B）：记录媒介 $mediaBefore → 1 " + if (ok) "成功" else "失败")
+        }
+
+        readEventQueue(notify = false)
+        lastNewObjectHandle = -1
+
+        // ② 拍一张（标准 0x100E，跟正常拍摄完全同一条路）
+        val code = capture(afAlreadyLocked = false)
+        if (code != PtpConstants.RESP_OK) {
+            val hex = if (code < 0) "TIMEOUT" else "0x${Integer.toHexString(code).uppercase()}"
+            logger("曝光预览（通道B）：快门没成（$hex）")
+            return null to false
+        }
+
+        // ③ 拿句柄：事件里的 0x4002/0x400D 优先，事件没给就列举卡上最后一个对象
+        var handle = -1
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline && handle < 0) {
+            if (abortRequested) return null to false
+            Thread.sleep(250)
+            val events = readEventQueue(notify = false)
+            for (ev in events) {
+                logger(
+                    "曝光预览（通道B）事件：0x${Integer.toHexString(ev.code).uppercase()} " +
+                        "param=0x${Integer.toHexString(ev.param).uppercase()}"
+                )
+            }
+            handle = events.lastOrNull {
+                it.code == PtpEvent.OBJECT_ADDED || it.code == PtpEvent.CAPTURE_COMPLETE
+            }?.param?.takeIf { it != 0 && it != 0xFFFFFFFF.toInt() } ?: -1
+        }
+
+        if (handle < 0) {
+            // 事件没给句柄：拍完卡上多出来的那个就是它（按句柄号取最大，新对象号最大）
+            logger("曝光预览（通道B）：事件没带句柄，改为列举卡上对象取最新那个")
+            val before = enumerateAllHandles()
+            handle = before.maxOrNull() ?: -1
+        }
+        if (handle < 0) {
+            logger("曝光预览（通道B）：找不到刚拍的那张")
+            return null to false
+        }
+
+        // ④ 取缩略图：0x100A 就够了（相册列表就是用它铺满的）
+        val bmp = getThumb(handle)
+        if (bmp == null) {
+            logger("曝光预览（通道B）：0x100A 没取到缩略图")
+        } else {
+            logger("曝光预览（通道B）：已取到 ${bmp.width}×${bmp.height} 缩略图")
+        }
+
+        // ⑤ 删掉：不删就在用户卡上留一张"他自己没拍过的照片"
+        // ★ 先问机身认不认 0x100B —— 不认就别发，发了机身不回应会把 usbLock 攥死
+        var deleted = false
+        val supported = supportsOperation(PtpConstants.OP_DELETE_OBJECT)
+        if (supported == false) {
+            logger("曝光预览（通道B）：机身不支持 0x100B，这张留在卡上了")
+        } else {
+            val (ok, why) = deleteObject(handle)
+            deleted = ok
+            logger("曝光预览（通道B）：删除刚拍的那张 " + if (ok) "已删除" else "失败（$why）")
+        }
+        return bmp to deleted
+    }
+
+    /** 上一次事件里报的新对象句柄（拍摄流程自己也要用） */
+    @Volatile
+    var lastNewObjectHandle: Int = -1
+        private set
 
     /**
      * `0x90C3 NikonDeleteImagesInSdram` —— 清空机身内存里"拍了但没落卡"的照片。

@@ -69,6 +69,19 @@ class MainActivity : AppCompatActivity(), SheetHost {
     private lateinit var peakingView: PeakingView
     private lateinit var peakButton: TextView
 
+    /**
+     * 触摸对焦开关：开着时，每改一次对焦点就自动跑一次对焦。
+     *
+     * 手持模式（51 点相位 AF）下「选点」只是把机身的对焦点挪过去，**机身并不会对焦** ——
+     * 以前必须再按一次「AF」。三脚架模式下 0x9205 之后机身自己会跑对比度 AF（还响提示音），
+     * 所以那条路不再叠加一次 0x90C1，免得跟机身自己那次打架。
+     */
+    private lateinit var touchAfButton: TextView
+    private var touchAfEnabled = false
+    /** 上一次自动对焦的发起时刻 —— 连按方向键时别把 AF 命令堆成一串 */
+    @Volatile
+    private var lastAutoAfMs = 0L
+
     /** 曝光预览：拍一张不落卡的照片，取缩略图盖在取景上看曝光（0x90C0 → 机身内存） */
     private lateinit var exposurePreviewButton: TextView
 
@@ -743,6 +756,12 @@ class MainActivity : AppCompatActivity(), SheetHost {
         peakingView = findViewById(R.id.peakingView)
         peakButton = findViewById(R.id.peakButton)
         peakButton.setOnClickListener { togglePeaking() }
+
+        touchAfButton = findViewById(R.id.touchAfButton)
+        touchAfEnabled = getSharedPreferences(AF_PREFS, Context.MODE_PRIVATE)
+            .getBoolean(AF_KEY_TOUCH_AF, false)
+        renderTouchAfButton()
+        touchAfButton.setOnClickListener { toggleTouchAf() }
 
         exposurePreviewButton = findViewById(R.id.exposurePreviewButton)
         exposurePreviewButton.setOnClickListener { runExposurePreview() }
@@ -3141,6 +3160,9 @@ class MainActivity : AppCompatActivity(), SheetHost {
                     currentAfPointId = id
                     focusBox.setAfPoints(currentAfPoints(), id)
                     log("对焦点已切到 id=$id（$finalVia）")
+                    // 手持模式下"切点"只是选中、机身不对焦 ——
+                    // 开着触摸对焦就在这里补一次，省掉"选完再按 AF"。
+                    autoFocusOnAfPointChange("0xD108 选点 id=$id")
                 } else {
                     log("对焦点切换失败 id=$id：$finalErr")
                     toast("机身拒绝了这个对焦点（取景中 / 非单点 AF 时会拒）")
@@ -3193,6 +3215,10 @@ class MainActivity : AppCompatActivity(), SheetHost {
                     // 对焦点变了，之前那次合焦先作废
                     lvAfLocked = false
                     log("AF 框移至 (${target.first}, ${target.second})")
+                    // 三脚架下机身自己会跑对比度 AF（下面那段就是等它锁焦），
+                    // 所以 autoFocusOnAfPointChange 在这里什么都不会发 ——
+                    // 调它是为了让"开着触摸对焦却没动作"这件事在日志里有一句解释。
+                    autoFocusOnAfPointChange("0x9205 移框 (${target.first},${target.second})")
                     // ★ 0x9205 之后**机身自己会跑对比度 AF**（还会响提示音），
                     // 这条路不经过我们的 afDrive()，所以过去完全没记账 ——
                     // 结果"机身已经合焦，按拍摄又用光学 AF 对了一遍"。
@@ -3698,6 +3724,69 @@ class MainActivity : AppCompatActivity(), SheetHost {
         log(if (on) "峰值对焦已开启：合焦处会泛红" else "峰值对焦已关闭")
     }
 
+    /**
+     * 触摸对焦开关。
+     *
+     * 开着之后，改对焦点的两条路都会顺带对一次焦：
+     * - 手持（51 点相位 AF）：点画面上的点阵 / 按方向键只是"选中"（写 0xD108），
+     *   机身**不会**因此去对焦 —— 这时补一发 0x90C1 AfDrive，省掉"选完再按 AF"这一步。
+     * - 三脚架：0x9205 之后机身自己会跑对比度 AF（还会响提示音），
+     *   这条路**不再叠加** 0x90C1 —— 两次对焦会打架，还把"机身自己合焦"那次的状态冲掉。
+     */
+    private fun toggleTouchAf() {
+        touchAfEnabled = !touchAfEnabled
+        getSharedPreferences(AF_PREFS, Context.MODE_PRIVATE).edit()
+            .putBoolean(AF_KEY_TOUCH_AF, touchAfEnabled).apply()
+        renderTouchAfButton()
+        log(
+            if (touchAfEnabled) "触摸对焦已开启：改对焦点后自动对焦（三脚架下机身自己会对，不再叠加）"
+            else "触摸对焦已关闭"
+        )
+    }
+
+    private fun renderTouchAfButton() {
+        touchAfButton.text = if (touchAfEnabled) "触摸对焦 ●" else "触摸对焦"
+        touchAfButton.setTextColor(
+            if (touchAfEnabled) getColor(R.color.accent_amber) else getColor(R.color.text_disabled)
+        )
+    }
+
+    /**
+     * 对焦点**刚改完**时按需补一次对焦。
+     *
+     * @param via 触发来源，只进日志（排查"为什么又对了一次焦"时一眼能看出来）
+     */
+    private fun autoFocusOnAfPointChange(via: String) {
+        if (!touchAfEnabled) return
+        // 三脚架模式：0x9205 之后机身自己会跑对比度 AF（moveAfAreaTo 里已经等它锁焦），
+        // 这里再发 0x90C1 会和机身那次抢反光板，还把状态标记冲掉。
+        if (currentLiveViewMode == PtpConstants.LIVE_VIEW_MODE_TRIPOD) {
+            log("触摸对焦：三脚架模式下机身已自行对焦，不再叠加（$via）")
+            return
+        }
+        if (!isConnected) return
+        // 节流：连按方向键时 AF 命令会堆成一串，机身消化不过来反而更慢
+        val now = System.currentTimeMillis()
+        if (now - lastAutoAfMs < 400) {
+            log("触摸对焦：距上一次太近，跳过（$via）")
+            return
+        }
+        lastAutoAfMs = now
+        thread {
+            val t0 = System.currentTimeMillis()
+            runOnUiThread { log("触摸对焦：$via 后自动对焦…") }
+            val ok = ptpConnection?.afDrive() ?: false
+            val cost = System.currentTimeMillis() - t0
+            runOnUiThread {
+                setFocusStatus(ok, cost)
+                log(
+                    if (ok) "触摸对焦：已合焦（$via 触发）耗时 ${formatDuration(cost)}"
+                    else "触摸对焦：未合焦（$via 触发）—— 太暗或没反差时正常，可手动对焦"
+                )
+            }
+        }
+    }
+
     // ------------------------------------------------------------------
     // 曝光预览：拍一张不落卡的照片来看曝光
     // ------------------------------------------------------------------
@@ -3733,15 +3822,41 @@ class MainActivity : AppCompatActivity(), SheetHost {
         // 读帧循环让路：0x90C0 要独占 USB，不能和每 70ms 一次的 0x9203 抢同一条管道
         lvFramesPaused = true
         Thread {
-            val bmp = try {
+            // ★ 两条通道，A 不成自动走 B。
+            //
+            // A：0x90C0 拍进机身内存（不落卡）—— 理想路径，但要求机身切得动记录媒介、
+            //    并在事件里把 SDRAM 对象的句柄交出来，真机上这两条一直在翻车。
+            // B：0x100E 老老实实拍进卡 → 0x100A 取缩略图 → 0x100B 删掉。
+            //    三步都是已经在真机跑通的命令（删除功能用户已确认可用），
+            //    代价只是文件编号往下走一号。
+            var viaCard = false
+            var deleted = true
+            var bmp = try {
                 Thread.sleep(150) // 让正在进行的那一帧收尾
                 p.captureToSdramPreview()
             } catch (e: Exception) {
-                android.util.Log.e("EXP_PREV", "曝光预览失败：${e.message}")
+                android.util.Log.e("EXP_PREV", "曝光预览（通道A）异常：${e.message}")
                 null
-            } finally {
-                lvFramesPaused = false
             }
+
+            if (bmp == null && !stopAllRequested) {
+                runOnUiThread {
+                    exposurePreviewButton.text = "换条路…"
+                    log("曝光预览：机身内存这条路没拿到画面，改走「拍进卡 → 取缩略图 → 删掉」")
+                }
+                try {
+                    val r = p.captureToCardPreview()
+                    bmp = r.first
+                    deleted = r.second
+                    viaCard = bmp != null
+                } catch (e: Exception) {
+                    android.util.Log.e("EXP_PREV", "曝光预览（通道B）异常：${e.message}")
+                }
+            }
+            lvFramesPaused = false
+
+            val finalDeleted = deleted
+            val finalViaCard = viaCard
             runOnUiThread {
                 isExposurePreviewRunning = false
                 exposurePreviewButton.text = "曝光预览"
@@ -3749,7 +3864,12 @@ class MainActivity : AppCompatActivity(), SheetHost {
 
                 if (bmp != null) {
                     showExposurePreview(bmp)
-                    log("曝光预览：已拍到（不落卡）")
+                    log(
+                        if (finalViaCard) {
+                            if (finalDeleted) "曝光预览：已拍到（走存储卡，那张已删除）"
+                            else "曝光预览：已拍到，但那张**没删掉** —— 请到相册里手动删"
+                        } else "曝光预览：已拍到（不落卡）"
+                    )
                 } else {
                     toast("曝光预览没取回画面，看日志")
                 }
@@ -3992,6 +4112,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
                         recButton.visibility = View.VISIBLE
                         // 峰值对焦同理：只对实时画面有意义，且开销是按帧算的
                         peakButton.visibility = View.VISIBLE
+                        touchAfButton.visibility = View.VISIBLE
                         exposurePreviewButton.visibility = View.VISIBLE
                         lvFullscreenButton.visibility = View.VISIBLE
                         renderRecState(recorder?.isRecording == true)
@@ -4092,6 +4213,8 @@ class MainActivity : AppCompatActivity(), SheetHost {
                         liveViewPlaceholder.visibility = View.GONE
                         recButton.visibility = View.GONE
                         peakButton.visibility = View.GONE
+            touchAfButton.visibility = View.GONE
+                        touchAfButton.visibility = View.GONE
                         exposurePreviewButton.visibility = View.GONE
                         dismissExposurePreview()
                         renderLiveViewMode(currentLiveViewMode)
@@ -6554,6 +6677,8 @@ class MainActivity : AppCompatActivity(), SheetHost {
 
         const val AF_PREFS = "af_prefs"
         const val AF_KEY_51 = "af_count_51"
+        /** 触摸对焦开关：开着时改对焦点会自动对焦 */
+        const val AF_KEY_TOUCH_AF = "touch_af"
         const val LV_MODE_KEY = "lv_mode"
         const val LV_GRID_KEY = "lv_grid"
 

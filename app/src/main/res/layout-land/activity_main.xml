@@ -202,6 +202,25 @@
                             android:textSize="11sp"
                             android:textStyle="bold"
                             android:visibility="gone" />
+
+                        <!-- 触摸对焦开关：开着时，每改一次对焦点就自动跑一次对焦。
+                             手持模式（51 点相位 AF）下选点本身只是"选中"、机身并不对焦，
+                             以前必须再按一次「AF」—— 开着这个就省掉那一步。
+                             三脚架模式下 0x9205 之后机身自己会跑对比度 AF，不再叠加（见代码注释）。 -->
+                        <TextView
+                            android:id="@+id/touchAfButton"
+                            android:layout_width="wrap_content"
+                            android:layout_height="28dp"
+                            android:layout_marginStart="8dp"
+                            android:background="@drawable/bg_overlay_chip"
+                            android:gravity="center"
+                            android:paddingStart="10dp"
+                            android:paddingEnd="10dp"
+                            android:text="触摸对焦"
+                            android:textColor="@color/text_disabled"
+                            android:textSize="11sp"
+                            android:textStyle="bold"
+                            android:visibility="gone" />
                     </LinearLayout>
 
                     <!-- 曝光预览：拍一张**不落卡**的照片（0x90C0 → 机身内存），

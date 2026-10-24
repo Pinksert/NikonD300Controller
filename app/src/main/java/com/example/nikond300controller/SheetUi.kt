@@ -10,6 +10,7 @@ package com.example.nikond300controller
  */
 import android.content.Context
 import android.content.res.ColorStateList
+import android.content.res.Resources
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
@@ -30,6 +31,8 @@ import android.widget.TextView
 import androidx.annotation.ColorRes
 import androidx.appcompat.widget.AppCompatButton
 import androidx.core.content.ContextCompat
+import androidx.core.widget.NestedScrollView
+import com.google.android.material.bottomsheet.BottomSheetBehavior
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.materialswitch.MaterialSwitch
 
@@ -96,6 +99,12 @@ fun Context.buildSheetPage(title: String, subtitle: String? = null): SheetPage {
 
     shell.addView(View(this).apply {
         setBackgroundResource(R.drawable.bg_sheet_handle)
+        // ★ 抽屉里除了内容区以外的东西一律不许嵌套滚动。
+        // BottomSheetBehavior 认孩子是按"谁 nestedScrollingEnabled = true"挑第一个的，
+        // 默认每个 View 都为 true —— 挑中把手/标题这种不会滚的 View，它就会认为
+        // "里面没人要滚"，于是往下一划直接被当成"拖抽屉收起"。
+        // 把手/标题/分割线关掉之后，唯一剩下的候选就是下面那个 NestedScrollView。
+        isNestedScrollingEnabled = false
         layoutParams = LinearLayout.LayoutParams(dp(36), dp(4)).apply {
             gravity = Gravity.CENTER_HORIZONTAL
             topMargin = dp(10)
@@ -109,6 +118,7 @@ fun Context.buildSheetPage(title: String, subtitle: String? = null): SheetPage {
         textSize = 17f
         setTypeface(null, Typeface.BOLD)
         gravity = Gravity.CENTER
+        isNestedScrollingEnabled = false
         layoutParams = LinearLayout.LayoutParams(matchParent, wrapContent).apply {
             bottomMargin = dp(6)
         }
@@ -120,6 +130,7 @@ fun Context.buildSheetPage(title: String, subtitle: String? = null): SheetPage {
             setTextColor(color(R.color.text_secondary))
             textSize = 12f
             gravity = Gravity.CENTER
+            isNestedScrollingEnabled = false
             layoutParams = LinearLayout.LayoutParams(matchParent, wrapContent).apply {
                 bottomMargin = dp(10)
             }
@@ -128,12 +139,17 @@ fun Context.buildSheetPage(title: String, subtitle: String? = null): SheetPage {
 
     shell.addView(View(this).apply {
         setBackgroundColor(color(R.color.stroke))
+        isNestedScrollingEnabled = false
         layoutParams = LinearLayout.LayoutParams(matchParent, dp(1)).apply {
             bottomMargin = if (subtitle.isNullOrEmpty()) dp(8) else 0
         }
     })
 
-    val scroll = ScrollView(this).apply { isFillViewport = false }
+    // ★ NestedScrollView 而不是 ScrollView：只有它会在滑动时把已滚动的距离
+    // 通过嵌套滚动协议报给 BottomSheetBehavior，Behavior 才知道"用户在滚内容、
+    // 不是在拖抽屉"。普通 ScrollView 也能嵌套，但不会在到顶/到底时把未消费的距离
+    // 交出来，手势就只剩"拖抽屉"一种解释。
+    val scroll = NestedScrollView(this).apply { isFillViewport = false }
     val content = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         setPadding(dp(16), dp(10), dp(16), dp(24))
@@ -146,8 +162,38 @@ fun Context.buildSheetPage(title: String, subtitle: String? = null): SheetPage {
     dialog.setOnShowListener {
         // 不换掉 Material 自带的底，圆角上沿会浮出一条白边
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-        dialog.findViewById<FrameLayout>(com.google.android.material.R.id.design_bottom_sheet)
-            ?.background = null
+        val bottomSheet = dialog.findViewById<FrameLayout>(
+            com.google.android.material.R.id.design_bottom_sheet
+        )
+        bottomSheet?.background = null
+
+        // ★ 内容超高时把高度收住，否则"划不到最上面"。
+        // 这个 NestedScrollView 是 wrap_content 的：内容比屏幕还高时它自己也跟着长到那么高，
+        // 抽屉整体被顶到屏幕上方之外，而它因为"高度 == 内容高度"认为没东西可滚。
+        // 于是最上面那几屏永远摸不到 —— 快门 50 多档（14 行）必踩，长列表二级页也一样。
+        // 限高之后才有真实的可滚区域，上下都能滑到。
+        val maxHeight = (Resources.getSystem().displayMetrics.heightPixels * 0.86f).toInt()
+        scroll.post {
+            if (scroll.isAttachedToWindow && scroll.height > maxHeight) {
+                scroll.layoutParams =
+                    (scroll.layoutParams as LinearLayout.LayoutParams).apply { height = maxHeight }
+            }
+        }
+
+        // ★ 兜底：内容没滚回最顶上之前，抽屉不许被拖走。
+        // 上面的嵌套滚动已经能挡住绝大多数情况，但只要有一次手势是竖直起步略快、
+        // 或者中间隔着 GridLayout（档位网格本身不会发嵌套滚动），
+        // Behavior 还是会当作"下拉关闭"。这里再补一道：当前不是顶部位置就锁掉拖拽，
+        // 滑到顶了才把收起手势还给用户。
+        bottomSheet?.let {
+            val behavior = BottomSheetBehavior.from(it)
+            scroll.setOnScrollChangeListener(
+                NestedScrollView.OnScrollChangeListener { _, _, scrollY, _, _ ->
+                    behavior.isDraggable = scrollY == 0
+                }
+            )
+            behavior.isDraggable = scroll.scrollY == 0
+        }
     }
     return SheetPage(dialog, content)
 }
@@ -348,22 +394,35 @@ data class SheetTileGrid(
 )
 
 /**
- * 把自己滚到所在 ScrollView 的垂直中间。
+ * 把自己滚到所在滚动区（[ScrollView] 或 [NestedScrollView]）的垂直中间。
  *
  * 拿屏幕坐标算位移（而不是 view.top —— 那是相对直接父容器的），
  * 所以无论中间隔了多少层容器都成立。
  */
 private fun View.centerInScrollView() {
-    var p: ViewParent = parent
-    while (p != null && p !is ScrollView) p = p.parent
-    val sv = p as? ScrollView ?: return
+    // 抽屉的内容区现在是 NestedScrollView，但它**不是** ScrollView 的子类
+    // （它继承 FrameLayout）—— 只认 ScrollView 的话这里会一路找到 null，
+    // 快门那种几十档的菜单就再也居中不了。两种都要认。
+    // 声明成可空：View.getParent() 到最外层就返回 null，
+    // 写成非空类型时编译器会认为下面的判空恒为真（还可能踩空指针）。
+    var p: ViewParent? = parent
+    while (p != null && p !is ScrollView && p !is NestedScrollView) p = p.parent
+    val sv = p as? View ?: return
     post {
+        if (!isAttachedToWindow) return@post
         val me = IntArray(2)
         val host = IntArray(2)
         getLocationOnScreen(me)
         sv.getLocationOnScreen(host)
-        val delta = (me[1] - host[1]) - (sv.height - height) / 2
-        sv.smoothScrollBy(0, delta)
+        // 目标 = 自己当前位置相对滚动区视口的偏移 + 已滚过的量 - 半个视口
+        val target = sv.scrollY + (me[1] - host[1]) - (sv.height - height) / 2
+        // 夹在可滚范围内：当前档靠表头/表尾时不会滚出可视区之外
+        val limit = (((sv as? ViewGroup)?.getChildAt(0)?.height ?: 0) - sv.height).coerceAtLeast(0)
+        val y = target.coerceIn(0, limit)
+        when (sv) {
+            is NestedScrollView -> sv.smoothScrollTo(0, y)
+            is ScrollView -> sv.smoothScrollTo(0, y)
+        }
     }
 }
 

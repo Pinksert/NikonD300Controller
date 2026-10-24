@@ -17,6 +17,20 @@ object PtpConstants {
     const val OP_GET_OBJECT_INFO = 0x1008
     const val OP_GET_OBJECT = 0x1009
     const val OP_GET_THUMB = 0x100A
+    /**
+     * 标准 PTP **DeleteObject = 0x100B**（不是 0x910B！）。
+     *
+     * ⚠️ 曾经写成 0x910B，于是"点删除 = 软件卡死"：机身没有那个操作码的处理函数，
+     * 请求挂住不回，usbLock 一直被占着，后面所有命令排队等待 —— 整个 App 看着像死了。
+     * 三条证据都指向标准码：
+     * 1. 固件里 tap 的操作调度表（`0x18A028` 起那 19 条标准操作）明明白白有 `100B DeleteObject`，
+     *    而厂商段（0x90C0–0x9206）里根本没有 0x910B；
+     * 2. libgphoto2 / remoteyourcam-usb 这两套开源实现里都是 `DeleteObject = 0x100B`；
+     * 3. 真机 DeviceInfo 的 OperationsSupported 里列的就是 DeleteObject(0x100b)。
+     *
+     * 参数 = 对象句柄，第二参数（格式码）可省略。**删了相机上就没了，不可恢复。**
+     */
+    const val OP_DELETE_OBJECT = 0x100B
 
     /**
      * SendObjectInfo（0x100C）/ SendObject（0x100D）—— **往机身上写文件**。
@@ -408,6 +422,39 @@ object PtpConstants {
     const val RESP_NIKON_MF_STEP_END = 0xA00C
     /** 0xA00E：这一步走不动（步数太大 / 镜头限位） */
     const val RESP_NIKON_MF_STEP_INSUFFICIENCY = 0xA00E
+    /**
+     * 0x90C3 NikonDeleteImagesInSdram —— 清空机身内存里那些"拍了但没落卡"的照片。
+     *
+     * 它是 [OP_NIKON_INITIATE_CAPTURE] 的收尾搭档：RecInSdram 拍完照片留在机身 RAM，
+     * 由客户端取走（或不要了）之后再来这一条把那份空间还回去，
+     * 否则连按几次「曝光预览」机身内存就会被占满。
+     * 参数 1 个（官方 MAID case 7），按上游口径传 1 = 全部删除。
+     */
+    const val OP_NIKON_DELETE_IMAGES_IN_SDRAM = 0x90C3
+
+    /**
+     * 0x9200 NikonGetPreviewImage —— 直接向机身要"现在缓存里的那张预览图"。
+     *
+     * 三个参数（`0x9200 | 3 | 数据阶段=1`），正是曝光预览那条路**官方**的用法：
+     * 0x90C0 拍进 SDRAM 之后由它取回，而不是等到对象出现在卡上。
+     * ⚠️ 固件对该命令强制校验缓冲区尺寸，只接受两种：
+     * - `0x46600` = 288,256 字节（大预览，按 0x20000 分块读）
+     * - `0x8000`  = 32,768  字节（小预览）
+     * 尺寸不符直接回错（见 `FUN_1800a7490` 的反编译）。
+     */
+    const val OP_NIKON_GET_PREVIEW_IMAGE = 0x9200
+
+    /** 0x9200 大预览图的缓冲区尺寸（固件强制值，改不得） */
+    const val PREVIEW_IMAGE_BUF_LARGE = 0x46600
+    /** 0x9200 小预览图的缓冲区尺寸（固件强制值） */
+    const val PREVIEW_IMAGE_BUF_SMALL = 0x8000
+
+    /**
+     * 0x90C4 NikonGetLargeThumb —— 大缩略图。
+     * SDRAM 里的对象给不出标准 0x100A 缩略图时，这条是另一条备选回读路径。
+     */
+    const val OP_NIKON_GET_LARGE_THUMB = 0x90C4
+
     const val OP_NIKON_GET_EVENT = 0x90C7
     const val OP_NIKON_DEVICE_READY = 0x90C8
     /** 取厂商属性码清单（remoteyourcam 在开会话时会先取这个） */

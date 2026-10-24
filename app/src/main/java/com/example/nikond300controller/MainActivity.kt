@@ -211,8 +211,9 @@ class MainActivity : AppCompatActivity(), SheetHost {
     // 默认 **51 点**（D300 的主力用法），并记住用户上次的选择（SharedPreferences `af_prefs`）。
     private var afPointCount51 = true
 
-    /** 取景区右上角那个 11/51 切换标签 */
-    private lateinit var afPointCountRow: SheetValueRow
+    /** 参数页「对焦点数量」：两个方框直接选（51 / 11 点） */
+    private var afPointCountGrid: SheetTileGrid? = null
+    private var afPointCountBox: View? = null
     private lateinit var lvGridRow: SheetValueRow
 
     // ---- 51 点标定结果（只读）----
@@ -253,18 +254,20 @@ class MainActivity : AppCompatActivity(), SheetHost {
     private lateinit var paramsSection: View
     private lateinit var navShoot: View
     private lateinit var navParams: View
-    private lateinit var navLog: View
     private lateinit var navShootIcon: ImageView
     private lateinit var navParamsIcon: ImageView
-    private lateinit var navLogIcon: ImageView
     private lateinit var navShootText: TextView
     private lateinit var navParamsText: TextView
-    private lateinit var navLogText: TextView
+    /** 第三格是「相册」入口（独立 Activity，不参与页面高亮） */
+    private lateinit var navGallery: View
+    private lateinit var navGalleryIcon: ImageView
+    private lateinit var navGalleryText: TextView
 
     private lateinit var connectButton: Button
     private lateinit var captureButton: ImageButton
     private lateinit var liveViewButton: ImageButton
-    private lateinit var galleryButton: TextView
+    /** 顶栏右上角的「日志」入口（2026-10-24 起，相册挪进了底部导航第三格） */
+    private lateinit var logButton: TextView
     private lateinit var isoButton: Button
     private lateinit var apertureButton: Button
     private lateinit var shutterButton: Button
@@ -304,7 +307,9 @@ class MainActivity : AppCompatActivity(), SheetHost {
     @Volatile private var storages: List<StorageInfo> = emptyList()
 
     // ---- 参数页 · 拍摄流程 ----
-    private lateinit var selfTimerRow: SheetValueRow
+    /** 自拍延时：参数页直接摆一排方框选，不再进二级页点下拉 */
+    private var selfTimerGrid: SheetTileGrid? = null
+    private var selfTimerBox: View? = null
     private lateinit var intervalRow: SheetValueRow
     private lateinit var autoDownloadRow: SheetValueRow
     /** 自拍延时（秒，0 = 关） */
@@ -315,6 +320,18 @@ class MainActivity : AppCompatActivity(), SheetHost {
     /** 拍完自动下载到手机相册；[autoDownloadRaw] 决定连 NEF 原片一起拉不拉 */
     private var autoDownload = false
     private var autoDownloadRaw = false
+
+    // ---- 反光板预升 ----
+    /** 是否走 Mup 两段式释放（抬起反光板 → 等待机震消散 → 释放曝光） */
+    private var mirrorUpEnabled = false
+    /**
+     * 反光板抬起后到真正释放之间等待的秒数。
+     *
+     * D300 说明书给的是「约 1 秒」，但那是机内 d9 曝光延迟模式；这里是我们自己按两次快门，
+     * 中间想等多久由用户定，默认 2 秒 —— 长曝/微距下 1 秒常常不够，机器还在抖。
+     */
+    private var mirrorUpDelaySec = 2
+    private lateinit var mirrorUpRow: SheetValueRow
     @Volatile
     private var isIntervalRunning = false
     private var intervalThread: Thread? = null
@@ -780,23 +797,23 @@ class MainActivity : AppCompatActivity(), SheetHost {
         paramsSection = findViewById(R.id.paramsSection)
         navShoot = findViewById(R.id.navShoot)
         navParams = findViewById(R.id.navParams)
-        navLog = findViewById(R.id.navLog)
+        navGallery = findViewById(R.id.navGallery)
         navShootIcon = findViewById(R.id.navShootIcon)
         navParamsIcon = findViewById(R.id.navParamsIcon)
-        navLogIcon = findViewById(R.id.navLogIcon)
+        navGalleryIcon = findViewById(R.id.navGalleryIcon)
         navShootText = findViewById(R.id.navShootText)
         navParamsText = findViewById(R.id.navParamsText)
-        navLogText = findViewById(R.id.navLogText)
+        navGalleryText = findViewById(R.id.navGalleryText)
 
         navShoot.setOnClickListener { switchTab(0) }
         navParams.setOnClickListener { switchTab(1) }
-        navLog.setOnClickListener { switchTab(2) }
+        navGallery.setOnClickListener { openGallery() }
         switchTab(0)
 
         connectButton = findViewById(R.id.connectButton)
         captureButton = findViewById(R.id.captureButton)
         liveViewButton = findViewById(R.id.liveViewButton)
-        galleryButton = findViewById(R.id.galleryButton)
+        logButton = findViewById(R.id.logButton)
         isoButton = findViewById(R.id.isoButton)
         apertureButton = findViewById(R.id.apertureButton)
         shutterButton = findViewById(R.id.shutterButton)
@@ -821,29 +838,8 @@ class MainActivity : AppCompatActivity(), SheetHost {
         // 断开连接挪到「相机信息」（点左上角机型名打开）里，避免误触。
         connectButton.setOnClickListener { findAndConnect() }
 
-        galleryButton.setOnClickListener {
-            if (!isConnected) {
-                Toast.makeText(this, "请先连接相机", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
-            // 打开相册前先停掉取景：两处都要独占 USB 通道，同时跑只会互相拖死。
-            // 必须等取景真正退出（机身确认）再跳过去，否则相册那边第一条命令就会撞上
-            // 还在跑的读帧线程。
-            //
-            // 另外把 2 秒一次的状态轮询也停掉 —— 它一直在发读属性命令，
-            // 会和相册的遍历抢同一条 USB 管道，两边一起变慢、机身还容易回 DeviceBusy。
-            isPollingPaused = true
-            pollingPausedForGallery = true
-            if (isLiveViewRunning) {
-                Toast.makeText(this, "正在停止取景…", Toast.LENGTH_SHORT).show()
-                thread {
-                    stopLiveViewBlocking()
-                    runOnUiThread { startActivity(Intent(this@MainActivity, GalleryActivity::class.java)) }
-                }
-                return@setOnClickListener
-            }
-            startActivity(Intent(this, GalleryActivity::class.java))
-        }
+        // 顶栏「日志」：本机自己的记录，跟机身连不连没关系，随时可看
+        logButton.setOnClickListener { switchTab(2) }
 
         captureButton.setOnClickListener { doCaptureOnce() }
 
@@ -990,6 +986,15 @@ class MainActivity : AppCompatActivity(), SheetHost {
 
         updateButtonStates()
 
+        // 第一次打开 App 主动把使用说明推到眼前 ——
+        // 这是个需要 OTG 线、机身 USB 模式、USB 授权三步才连得上的工具，
+        // 没有引导的话，用户装完只看到一排灰按钮，根本不知道要先做什么。
+        val guideSp = getSharedPreferences("guide", Context.MODE_PRIVATE)
+        if (!guideSp.getBoolean("helpShown", false)) {
+            guideSp.edit().putBoolean("helpShown", true).apply()
+            window.decorView.post { InfoActivity.open(this, InfoActivity.PAGE_HELP) }
+        }
+
         val filter = IntentFilter(ACTION_USB_PERMISSION)
         filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
         // 热插拔：运行中重新插上相机也要能自动连上，否则拔一次就得重启一次 App
@@ -1014,10 +1019,12 @@ class MainActivity : AppCompatActivity(), SheetHost {
         // 切回拍摄页补一次刷新：待在别的页面那段时间里，机身上的拨盘可能被动过
         if (onShootTab && isConnected) thread { updateProperties() }
 
+        // ★ 只有拍摄/参数两格里挑：第三格是相册入口（独立的 Activity），
+        // 日志页由顶栏「日志」按钮打开，它没有自己的导航格 —— 所以停在日志页时
+        // 这里不高亮任何一格，改由顶栏那颗按钮自己变成"选中态"表示你在哪儿。
         val items = listOf(
             Triple(navShoot, navShootIcon, navShootText),
-            Triple(navParams, navParamsIcon, navParamsText),
-            Triple(navLog, navLogIcon, navLogText)
+            Triple(navParams, navParamsIcon, navParamsText)
         )
         items.forEachIndexed { i, (container, icon, label) ->
             val selected = i == index
@@ -1029,6 +1036,44 @@ class MainActivity : AppCompatActivity(), SheetHost {
             label.setTextColor(tint)
             label.setTypeface(null, if (selected) Typeface.BOLD else Typeface.NORMAL)
         }
+        renderLogButtonActive(index == 2)
+    }
+
+    /** 顶栏「日志」按钮的选中态：日志页没有导航格，用它自己告诉用户"你现在在这儿" */
+    private fun renderLogButtonActive(active: Boolean) {
+        if (!::logButton.isInitialized) return
+        logButton.background = ContextCompat.getDrawable(
+            this, if (active) R.drawable.bg_nav_item_selected else R.drawable.bg_param_card
+        )
+        val tint = if (active) Color.parseColor("#0B0E13") else getColor(R.color.accent_amber)
+        logButton.setTextColor(tint)
+    }
+
+    /**
+     * 打开相册（底部导航第三格）。
+     *
+     * ⚠️ 两件必须做的事：
+     * 1. **先停轮询**：它一直在发读属性命令，会和相册那边的遍历抢同一条 USB 管道，
+     *    两边一起变慢，机身还容易回 DeviceBusy。
+     * 2. **先退取景**：两边都要独占 USB 通道，而且必须等机身确认退出之后再跳过去 ——
+     *    否则相册第一条命令会撞上还在跑的读帧线程。
+     */
+    private fun openGallery() {
+        if (!isConnected) {
+            Toast.makeText(this, "请先连接相机", Toast.LENGTH_SHORT).show()
+            return
+        }
+        isPollingPaused = true
+        pollingPausedForGallery = true
+        if (isLiveViewRunning) {
+            Toast.makeText(this, "正在停止取景…", Toast.LENGTH_SHORT).show()
+            thread {
+                stopLiveViewBlocking()
+                runOnUiThread { startActivity(Intent(this@MainActivity, GalleryActivity::class.java)) }
+            }
+            return
+        }
+        startActivity(Intent(this, GalleryActivity::class.java))
     }
 
     // ===================== 菜单打开期间让轮询停手 =====================
@@ -1326,6 +1371,42 @@ class MainActivity : AppCompatActivity(), SheetHost {
         runOnUiThread {
             isoButton.text = "${isos.getOrElse(currentIsoIndex) { 0 }}"
         }
+    }
+
+    /**
+     * 参数页里的"标题 + 一排方框"：直接点选，不再点开二级页 / 弹下拉列表。
+     *
+     * 用户明确要求这类只有两三个选项的设置别做成下拉：方框一眼能看全当前是哪项，
+     * 也能看到还有哪几项可选 —— 下拉里藏着的知识 Tree 被"当前值"那一行挤掉了。
+     *
+     * @return 外层容器（外面统一压暗用）和网格本身（改选中用）
+     */
+    private fun inlineTileField(
+        host: LinearLayout,
+        label: String,
+        labels: List<String>,
+        selectedIndex: Int,
+        columns: Int = labels.size,
+        onPick: (Int) -> Unit
+    ): Pair<View, SheetTileGrid> {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+        box.addView(TextView(this).apply {
+            text = label
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_secondary))
+            textSize = 11f
+            setTypeface(null, Typeface.BOLD)
+            letterSpacing = 0.08f
+            setPadding(dpx(6), dpx(2), 0, dpx(4))
+        })
+        val grid = sheetTileGrid(columns, labels, selectedIndex) { idx -> onPick(idx) }
+        box.addView(grid.view)
+        host.addView(box)
+        return box to grid
     }
 
     private fun showValueMenu(
@@ -3182,6 +3263,8 @@ class MainActivity : AppCompatActivity(), SheetHost {
                 } else {
                     log("AF 点数设置失败：0x${Integer.toHexString(ptpConnection?.lastSetPropError ?: 0).uppercase()}")
                     toast("AF 点数设置失败")
+                    // 方框已经点亮了没写进去的那档，这里按实际值收回来，别显示假状态
+                    renderAfPointRow()
                 }
             }
         }
@@ -3195,10 +3278,15 @@ class MainActivity : AppCompatActivity(), SheetHost {
      */
     private fun afPointCountText(): String = if (afPointCount51) "51 点" else "11 点"
 
+    /**
+     * 对焦点数量：true = 51 点（false = 11 点）。
+     *
+     * 参数页上是两个方框（51 / 11），点一下就写机身 0xD08D ——
+     * 原来是一行点开再弹下拉列表，两步操作换来<｜hy_place▁holder▁no▁813｜>同样两个选项，没必要。
+     */
     private fun renderAfPointRow() {
-        if (!::afPointCountRow.isInitialized) return
-        afPointCountRow.value.text = afPointCountText()
-        afPointCountRow.view.alpha = if (isConnected) 1f else 0.45f
+        afPointCountGrid?.select(if (afPointCount51) 0 else 1)
+        afPointCountBox?.alpha = if (isConnected) 1f else 0.45f
     }
 
     /** 当前点数模式下该画/该用的点阵；51 点用标定结果覆盖几何占位坐标 */
@@ -3547,9 +3635,9 @@ class MainActivity : AppCompatActivity(), SheetHost {
                 wbRow.view.alpha = if (isConnected) 1f else 0.45f
             }
             liveViewButton.isEnabled = isConnected
-            // 相册是 TextView 充当的入口，用透明度表达禁用，比 isEnabled 更直观
-            galleryButton.isEnabled = isConnected
-            galleryButton.alpha = if (isConnected) 1f else 0.35f
+            // 相册入口是底部导航第三格（由 switchTab 之外的 openGallery 处理）：
+            // 未连接时整格调暗，点了会提示先连接相机。
+            navGallery.alpha = if (isConnected) 1f else 0.35f
             apBracketingButton.isEnabled = isConnected
             expBracketingButton.isEnabled = isConnected
             
@@ -3581,8 +3669,11 @@ class MainActivity : AppCompatActivity(), SheetHost {
                 meteringRowView.alpha = alpha
                 listOf(
                     flashCompRow, imageQualityRow, mediaRow,
-                    storageRow, selfTimerRow, intervalRow, autoDownloadRow
+                    storageRow, intervalRow, autoDownloadRow
                 ).forEach { it.view.alpha = alpha }
+                // 方框那两组没有统一的 Row 外壳，单独压暗
+                selfTimerBox?.alpha = alpha
+                afPointCountBox?.alpha = alpha
             }
 
             // 断开时状态条要给出下一步该做什么，而不是干巴巴一句"未连接"
@@ -3639,12 +3730,17 @@ class MainActivity : AppCompatActivity(), SheetHost {
         exposurePreviewButton.text = "拍摄中…"
         exposurePreviewButton.isEnabled = false
 
+        // 读帧循环让路：0x90C0 要独占 USB，不能和每 70ms 一次的 0x9203 抢同一条管道
+        lvFramesPaused = true
         Thread {
             val bmp = try {
+                Thread.sleep(150) // 让正在进行的那一帧收尾
                 p.captureToSdramPreview()
             } catch (e: Exception) {
                 android.util.Log.e("EXP_PREV", "曝光预览失败：${e.message}")
                 null
+            } finally {
+                lvFramesPaused = false
             }
             runOnUiThread {
                 isExposurePreviewRunning = false
@@ -3655,8 +3751,38 @@ class MainActivity : AppCompatActivity(), SheetHost {
                     showExposurePreview(bmp)
                     log("曝光预览：已拍到（不落卡）")
                 } else {
-                    toast("曝光预览没拍成，看日志")
+                    toast("曝光预览没取回画面，看日志")
                 }
+            }
+
+            // 0x90C0 之后机身常常自己结束取景：画面冻在那里，左上角还挂着
+            // 录制/峰值/曝光预览几个按钮 —— 看着就像 App 卡死。
+            // 所以不管上面成没成，都探一次：确实死了就把 UI 收回"没在取景"的状态。
+            settleLiveViewAfterPreviewShot()
+        }.start()
+    }
+
+    /**
+     * 预览拍完之后，确认取景还活着不。
+     *
+     * 判据就是"还能不能取到帧"：机身退了取景以后各种状态位未必马上同步，
+     * 但取帧一定会失败。死了就走正常退出流程（自带超时上限），把按钮状态复位。
+     */
+    private fun settleLiveViewAfterPreviewShot() {
+        Thread {
+            try {
+                Thread.sleep(300)
+                val alive = try {
+                    ptpConnection?.getLiveViewFrame() != null
+                } catch (_: Exception) {
+                    false
+                }
+                if (alive) return@Thread
+                runOnUiThread {
+                    log("曝光预览：机身已结束实时取景（已复位界面，点 LV 可重开）")
+                }
+                stopLiveViewBlocking()
+            } catch (_: Exception) {
             }
         }.start()
     }
@@ -4443,6 +4569,9 @@ class MainActivity : AppCompatActivity(), SheetHost {
                     runOnUiThread { log("就绪") }
                     val deviceInfo = ptpConnection?.readDeviceInfo()
                     deviceInfoCache = deviceInfo
+                    // ★ 把机身自述支持的操作码打进日志：以后再遇到"这个按钮点了没反应"，
+                    //  先看它到底认不认这条命令，而不是猜固件实现。（日志/ABD 都能捞这段）
+                    ptpConnection?.logSupportedOperations { line -> runOnUiThread { log(line) } }
                     runOnUiThread {
                         if (deviceInfo != null && deviceInfo.model.isNotBlank()) {
                             // 走统一入口：机型名 + 尾部小箭头（点它开机身信息）
@@ -4823,13 +4952,41 @@ class MainActivity : AppCompatActivity(), SheetHost {
         // ★ 取景内已经拍完了，下面的"0x100E"整段就跳过。
         var responseCode = PtpConstants.RESP_OK
         if (!shotInLiveView) {
-            // 先把"新对象"清空：自动下载靠事件里的句柄定位刚拍的这张
-            lastNewObjectHandle = -1
-            log("释放快门…" + if (mfOriginal != null) "（MF 下直接释放，机身不再对焦）" else "")
-            // ★ 只发一次。拍不成就拍不成，不再等 1.5 秒重来一遍 ——
-            // 重试只会让"这一下没拍到"变成"卡十几秒还是没拍到"，
-            // 期间 USB 通道被占满，取景画面也跟着僵住。
-            responseCode = ptpConnection?.capture(afAlreadyLocked = afReady) ?: -1
+            if (mirrorUpEnabled) {
+                // ---- 反光板预升：连按两次快门 ----
+                // 前置条件（界面上已提示并要确认）：机身释放模式拨盘已转到 Mup。
+                // 若正在取景，反光板本就是抬起的，这里先落下来再走流程。
+                if (isLiveViewRunning) {
+                    runOnUiThread { log("反光板预升：先退出取景落下反光板…") }
+                    lvFramesPaused = true
+                    try {
+                        Thread.sleep(200)
+                    } finally {
+                        lvFramesPaused = false
+                    }
+                    stopLiveViewBlocking()
+                }
+                lastNewObjectHandle = -1
+                val res = mirrorUpCapture()
+                responseCode = if (res.exposed) PtpConstants.RESP_OK else res.secondCode
+                if (!res.raised) {
+                    runOnUiThread {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "反光板预升失败：请确认机身释放模式拨盘已转到 Mup",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
+            } else {
+                // 先把"新对象"清空：自动下载靠事件里的句柄定位刚拍的这张
+                lastNewObjectHandle = -1
+                log("释放快门…" + if (mfOriginal != null) "（MF 下直接释放，机身不再对焦）" else "")
+                // ★ 只发一次。拍不成就拍不成，不再等 1.5 秒重来一遍 ——
+                // 重试只会让"这一下没拍到"变成"卡十几秒还是没拍到"，
+                // 期间 USB 通道被占满，取景画面也跟着僵住。
+                responseCode = ptpConnection?.capture(afAlreadyLocked = afReady) ?: -1
+            }
         }
 
         // 不管拍成没拍成，对焦模式都必须切回用户原来的设定 ——
@@ -5105,14 +5262,24 @@ class MainActivity : AppCompatActivity(), SheetHost {
     // 拍摄流程（自拍延时 / 间隔拍摄 / 拍完自动下载）
     // =====================================================================
 
+    /** 自拍延时的可选秒数：0 = 关（整机几个常见档，不去身上一一对应也没意义） */
+    private val SELF_TIMER_OPTIONS = listOf(0, 2, 5, 10, 20)
+    private fun selfTimerLabel(sec: Int) = if (sec == 0) "关闭" else "$sec 秒"
+    /** 当前自拍延时在 [SELF_TIMER_OPTIONS] 里的位置（-1 = 没落在预设上） */
+    private fun selfTimerSecIndex() = SELF_TIMER_OPTIONS.indexOf(selfTimerSec)
+
     private fun refreshWorkflowRows() {
-        if (!::selfTimerRow.isInitialized) return
-        selfTimerRow.value.text = if (selfTimerSec == 0) "关闭" else "$selfTimerSec 秒"
+        // 这几行都是参数页建起来的（惰性 ← Preferences 恢复早于界面），没建成就别碰
+        if (!::intervalRow.isInitialized) return
+        selfTimerGrid?.select(selfTimerSecIndex())
         intervalRow.value.text = "$intervalCount 张 · 每 ${intervalSec} 秒"
         autoDownloadRow.value.text = when {
             !autoDownload -> "关闭"
             autoDownloadRaw -> "开 · JPEG + NEF"
             else -> "开 · 仅 JPEG"
+        }
+        if (::mirrorUpRow.isInitialized) {
+            mirrorUpRow.value.text = if (mirrorUpEnabled) "开 · 等 ${mirrorUpDelaySec} 秒" else "关闭"
         }
     }
 
@@ -5123,6 +5290,8 @@ class MainActivity : AppCompatActivity(), SheetHost {
             putInt("intervalSec", intervalSec)
             putBoolean("autoDownload", autoDownload)
             putBoolean("autoDownloadRaw", autoDownloadRaw)
+            putBoolean("mirrorUp", mirrorUpEnabled)
+            putInt("mirrorUpDelay", mirrorUpDelaySec)
             apply()
         }
     }
@@ -5263,37 +5432,11 @@ class MainActivity : AppCompatActivity(), SheetHost {
     }
 
     /**
-     * 拍摄流程的三个项目各自一个二级页：延时 / 间隔拍摄 / 拍完自动下载。
+     * 拍摄流程剩下两项各自一个二级页：间隔拍摄 / 拍完自动下载。
      *
      * 原来三组挤在同一个抽屉里：调张数要滑过延时，开关下载又要滑过前面两组。
-     * 拆开后每行点进去只有自己那几项；"开始间隔拍摄"这条执行链跟间隔页放一起 ——
-     * 它本来就是那个流程的开关，单独放一页反而要多跳一次。
+     * 自拍延时已经不在这儿了 —— 它只有五个选项，参数页直接摆一排方框更省事。
      */
-    private fun showSelfTimerSheet() {
-        val page = buildSheetPage("自拍延时", "按下快门后等多久才真正释放")
-
-        val card = sheetCard(page.content, "延时")
-        val entries = listOf(0, 2, 5, 10, 20)
-        fun text(sec: Int) = if (sec == 0) "关闭" else "$sec 秒"
-
-        var row: SheetValueRow? = null
-        row = sheetValueRow("自拍延时", text(selfTimerSec)) { anchor ->
-            showValueMenu(anchor, entries.map { text(it) }, entries.indexOf(selfTimerSec)) { idx ->
-                selfTimerSec = entries[idx]
-                row?.value?.text = text(selfTimerSec)
-                saveWorkflowSettings()
-                refreshWorkflowRows()
-            }
-        }
-        card.addView(row.view)
-        card.addView(sheetHint(
-            "按下快门后再等这么久才真正释放，用来避免手按快门带来的抖动。\n" +
-                "间隔拍摄时「只在第一张之前」生效 —— 每张都等的话，实际间隔会比设定值多出好几秒。"
-        ))
-
-        page.show()
-    }
-
     /** 间隔拍摄：张数 + 间隔时长 + 执行（开始/停止、进度、状态） */
     private fun showIntervalSheet() {
         val page = buildSheetPage("间隔拍摄", "张数 · 间隔时长 · 开始/停止")
@@ -5501,6 +5644,184 @@ class MainActivity : AppCompatActivity(), SheetHost {
         ))
 
         page.show()
+    }
+
+    // =====================================================================
+    // 反光板预升（Mup）
+    // =====================================================================
+
+    /**
+     * 反光板预升的**来龙去脉**（改这里之前先看一遍，别再去找那条不存在的指令）：
+     *
+     * 1. D300 **没有** "抬起反光板" 的私有 PTP 指令。
+     *    权威私有操作码表（`D300_PTP私有指令权威对照.md` 里的 20 条：
+     *    0x90C0–0x90CF / 0x9200–0x9207）里没有它；
+     *    libgphoto2 `ptp.h` 的 `0x941d NikonMirrorUpCancel` / `0xD1F6 MirrorUpStatus`
+     *    只出现在 **D780 / D6** 这类新机型的 DeviceInfo 里，D300 的
+     *    OperationsSupported 不含它们。
+     *    → 所以没法像改 ISO 那样"发一条命令就让反光板抬起来"。
+     *
+     * 2. 能走的是机身自己的 **Mup 释放模式**：把释放模式拨盘转到 Mup 后，
+     *    第一次按快门 = 抬起反光板，第二次按 = 释放曝光。
+     *    而 PTP 这边，一次 `0x100E InitiateCapture` 正好等于一次"按到底"，
+     *    于是"按两次"= 连发两次 0x100E，中间夹一段等待机震消散的时间 ——
+     *    这正是本函数干的事。
+     *
+     * 3. 顺带的好处：**第二次按时反光板已经抬起，相位 AF 不可用**，
+     *    机身不会在释放前再对一次焦。也就是说 Mup 天然绕开了
+     *    "合焦了又被相位 AF 顶掉 / 对不上就拍不成" 那个老问题，
+     *    不需要再临时切 MF。
+     *
+     * 4. ⚠️ 前提与代价：
+     *    · 用户必须**手动**把释放模式拨盘转到 Mup（PTP 改不了这个拨盘）；
+     *      没转就按，等于连拍两张，所以界面上要把这条说清楚并要求确认。
+     *    · 抬起后如果第二次命令没发出去，反光板会悬着 ——
+     *      机身约 30 秒不动会自己放下，这是机械保护，不用我们兜底。
+     *    · 抬起反光板后光学取景器全黑，属于 Mup 的正常现象。
+     */
+    private fun showMirrorUpSheet() {
+        val page = buildSheetPage(
+            "反光板预升",
+            "0x100E × 2 · 需要先把机身释放模式拨盘转到 Mup"
+        )
+
+        // ---- 开关 ----
+        val onCard = sheetCard(page.content, "开关")
+        val (swRow, mupSwitch) = sheetSwitchRow("启用反光板预升", mirrorUpEnabled) { checked ->
+            mirrorUpEnabled = checked
+            saveWorkflowSettings()
+            refreshWorkflowRows()
+            if (checked) {
+                log("反光板预升已开启 —— 请确认机身释放模式拨盘已转到 Mup")
+            }
+        }
+        onCard.addView(swRow)
+
+        // ---- 等待时长 ----
+        val delayCard = sheetCard(page.content, "抬板后等待")
+        val options = MIRROR_UP_DELAYS
+        val grid = sheetTileGrid(
+            options.size, options.map { "$it 秒" }, options.indexOf(mirrorUpDelaySec)
+        ) { idx ->
+            mirrorUpDelaySec = options[idx]
+            saveWorkflowSettings()
+            refreshWorkflowRows()
+            log("反光板预升：抬板后等待 ${mirrorUpDelaySec} 秒")
+        }
+        delayCard.addView(grid.view)
+
+        // ---- 说明 ----
+        val hintCard = sheetCard(page.content, "这条命令到底在干什么")
+        hintCard.addView(sheetHint(
+            "D300 没有专门的「抬起反光板」PTP 指令（私有操作码表里没有，" +
+                "libgphoto2 里的 MirrorUp 系列只挂在 D780 / D6 上）。\n\n" +
+                "所以走的是机身的 Mup 释放模式：把释放模式拨盘转到 Mup 之后，" +
+                "第一次按快门抬反光板、第二次按才真正曝光。" +
+                "PTP 里一次 0x100E 就等于按一次快门，于是这里连发两次、中间等一段时间。\n\n" +
+                "· 前置：手动把释放模式拨盘转到 Mup —— App 改不了这个拨盘\n" +
+                "· 等待：抬板后到释放之间的间隔，长曝 / 微距建议 3 秒以上\n" +
+                "· 反光板抬起后取景器全黑，是 Mup 的正常现象\n" +
+                "· 第二次命令没发出去时，机身约 30 秒会自己把反光板放下，不用手动救\n\n" +
+                "不想动拨盘的话，也可以用机身自定义设定 d9「曝光延迟模式」—— " +
+                "它与 Mup 效果相同，但延迟由机身固定（约 1 秒），且对所有拍摄生效。"
+        ))
+
+        // ---- 立刻试一张 ----
+        val actionCard = sheetCard(page.content, "验证")
+        val status = sheetStatusText("按一下走完整套 Mup 流程")
+        actionCard.addView(status)
+        val btn = sheetPrimaryButton("立刻试一张（Mup）")
+        btn.setOnClickListener {
+            if (!isConnected) {
+                status.text = "还没连上相机"
+                return@setOnClickListener
+            }
+            if (isLiveViewRunning) {
+                status.text = "正在取景中 —— Mup 需要先落反光板，请先退出取景"
+                return@setOnClickListener
+            }
+            btn.isEnabled = false
+            status.text = "抬起反光板…"
+            thread {
+                try {
+                    isPollingPaused = true
+                    val res = mirrorUpCapture()
+                    runOnUiThread {
+                        status.text = when {
+                            res.exposed -> "拍摄成功（抬板 ${res.firstCode.hex()} → 曝光 ${res.secondCode.hex()}）"
+                            res.raised -> "反光板已抬起，但第二次快门被拒（${res.secondCode.hex()}）—— " +
+                                "确认释放模式拨盘在 Mup，机身会自行落板"
+                            else -> "第一次快门就被拒（${res.firstCode.hex()}）—— " +
+                                "检查释放模式拨盘是否在 Mup"
+                        }
+                        log("反光板预升试拍：抬板 ${res.firstCode.hex()} · 曝光 ${res.secondCode.hex()}")
+                    }
+                } catch (e: Exception) {
+                    runOnUiThread { status.text = "出错：${e.message}" }
+                } finally {
+                    isPollingPaused = false
+                    runOnUiThread { btn.isEnabled = true }
+                }
+            }
+        }
+        actionCard.addView(btn)
+
+        page.show()
+    }
+
+    private fun Int.hex(): String = if (this < 0) "TIMEOUT" else "0x${Integer.toHexString(this).uppercase()}"
+
+    data class MirrorUpResult(
+        /** 第一次快门（抬反光板）的响应码 */
+        val firstCode: Int,
+        /** 第二次快门（释放曝光）的响应码；没发到就是 -1 */
+        val secondCode: Int
+    ) {
+        val raised: Boolean get() = firstCode == PtpConstants.RESP_OK
+        val exposed: Boolean get() = secondCode == PtpConstants.RESP_OK
+    }
+
+    /**
+     * 走一次完整的 Mup 释放：抬起反光板 → 等机震消散 → 释放曝光。
+     *
+     * 调用前必须**先退出取景**（反光板在取景时本就是抬起的，Mup 的第一按没意义，
+     * 而且取景状态下机身不接受普通快门释放）。
+     */
+    private fun mirrorUpCapture(): MirrorUpResult {
+        val conn = ptpConnection ?: return MirrorUpResult(-1, -1)
+
+        // 先落反光板 / 等就绪：刚做完别的事时机身常在忙
+        for (i in 1..8) {
+            if (stopAllRequested || conn.abortRequested) return MirrorUpResult(-1, -1)
+            if (conn.deviceReady() == true) break
+            Thread.sleep(250)
+        }
+
+        log("反光板预升：第 1 次快门（抬起反光板）")
+        val first = conn.capture(afAlreadyLocked = false)
+        if (first != PtpConstants.RESP_OK) {
+            log("反光板预升：抬板被拒（${first.hex()}）—— 确认释放模式拨盘已转到 Mup")
+            return MirrorUpResult(first, -1)
+        }
+
+        // 抬板后等机震消散。分段睡：中途点「停止」能立刻撤
+        val settle = mirrorUpDelaySec.coerceIn(1, 30) * 1000L
+        log("反光板预升：反光板已抬起，等 ${mirrorUpDelaySec} 秒让机震消散")
+        val step = 250L
+        var waited = 0L
+        while (waited < settle) {
+            if (stopAllRequested || conn.abortRequested) {
+                log("反光板预升：等待中被中止 —— 机身会自行放下反光板")
+                return MirrorUpResult(first, -1)
+            }
+            Thread.sleep(step.coerceAtMost(settle - waited))
+            waited += step
+        }
+
+        log("反光板预升：第 2 次快门（释放曝光）")
+        val second = conn.capture(afAlreadyLocked = true)
+        log("反光板预升：曝光 ${second.hex()}")
+        return MirrorUpResult(first, second)
     }
 
     // =====================================================================
@@ -6235,6 +6556,9 @@ class MainActivity : AppCompatActivity(), SheetHost {
         const val AF_KEY_51 = "af_count_51"
         const val LV_MODE_KEY = "lv_mode"
         const val LV_GRID_KEY = "lv_grid"
+
+        /** 反光板预升可选的等待时长（秒）。1 秒是机身 d9 的口径，长曝/微距往上加 */
+        val MIRROR_UP_DELAYS = listOf(1, 2, 3, 5, 10)
     }
 
     private fun setupParamExtraRows() {
@@ -6245,6 +6569,8 @@ class MainActivity : AppCompatActivity(), SheetHost {
         intervalSec = sp.getInt("intervalSec", 5)
         autoDownload = sp.getBoolean("autoDownload", false)
         autoDownloadRaw = sp.getBoolean("autoDownloadRaw", false)
+        mirrorUpEnabled = sp.getBoolean("mirrorUp", false)
+        mirrorUpDelaySec = sp.getInt("mirrorUpDelay", 2)
 
         // ---- 曝光与画质 ----
         val eqList = findViewById<LinearLayout>(R.id.exposureQualityList)
@@ -6298,16 +6624,18 @@ class MainActivity : AppCompatActivity(), SheetHost {
 
         // ---- 对焦点数量（原取景框右上角的 11/51 chip，已挪到参数页）----
         val afHost = findViewById<LinearLayout>(R.id.afCountList)
-        afPointCountRow = sheetValueRow("对焦点数量", afPointCountText()) { anchor ->
+        val (afBox, afGrid) = inlineTileField(
+            afHost, "对焦点数量", listOf("51 点", "11 点"), if (afPointCount51) 0 else 1, 2
+        ) { pos ->
             if (!isConnected) {
                 toast("请先连接相机")
+                renderAfPointRow()
             } else {
-                showValueMenu(anchor, listOf("51 点", "11 点"), if (afPointCount51) 0 else 1) { pos ->
-                    setAfPointCount(pos == 0)
-                }
+                setAfPointCount(pos == 0)
             }
         }
-        afHost.addView(afPointCountRow.view)
+        afPointCountBox = afBox
+        afPointCountGrid = afGrid
 
         // ---- 取景框显示（构图网格）----
         val gridHost = findViewById<LinearLayout>(R.id.lvGridList)
@@ -6354,17 +6682,45 @@ class MainActivity : AppCompatActivity(), SheetHost {
         }
         csmEntryHost.addView(ncpEntry.view)
 
+        // ---- 使用说明 / 关于 ----
+        // 放在参数页最底下：不依赖相机连接，也没人天天点，
+        // 但"第一次装上不知道干嘛"的时候必须能从主界面摸到，不能只藏在系统菜单里。
+        val helpEntry = sheetValueRow("使用说明", "连接 · 拍摄 · 相册") { _ ->
+            InfoActivity.open(this, InfoActivity.PAGE_HELP)
+        }
+        csmEntryHost.addView(helpEntry.view)
+
+        val aboutEntry = sheetValueRow("关于", "版本 · 适配机身 · 边界") { _ ->
+            InfoActivity.open(this, InfoActivity.PAGE_ABOUT)
+        }
+        csmEntryHost.addView(aboutEntry.view)
+
         // 重设个人设定不放在参数页：它属于个人设定菜单（机身菜单里也在那一页的末尾），
         // 现在是 showCsmSheet() 的最后一行 —— 见那里的说明。
 
         // ---- 拍摄流程（三行都进同一个二级页，入口好找）----
         val wfList = findViewById<LinearLayout>(R.id.workflowList)
-        selfTimerRow = sheetValueRow("自拍延时", "关闭") { _ -> showSelfTimerSheet() }
-        wfList.addView(selfTimerRow.view)
+        // 自拍延时：参数页直接一排方框选 —— 原来点进去还得再弹一次下拉，
+        // 五个选项没必要藏两层。
+        val (timerBox, timerGrid) = inlineTileField(
+            wfList, "自拍延时", SELF_TIMER_OPTIONS.map { selfTimerLabel(it) },
+            selfTimerSecIndex(),
+            columns = SELF_TIMER_OPTIONS.size
+        ) { pos ->
+            selfTimerSec = SELF_TIMER_OPTIONS[pos]
+            saveWorkflowSettings()
+            refreshWorkflowRows()
+        }
+        selfTimerBox = timerBox
+        selfTimerGrid = timerGrid
         intervalRow = sheetValueRow("间隔拍摄", "5 张 · 每 5 秒") { _ -> showIntervalSheet() }
         wfList.addView(intervalRow.view)
         autoDownloadRow = sheetValueRow("拍完自动下载", "关闭") { _ -> showAutoDownloadSheet() }
         wfList.addView(autoDownloadRow.view)
+
+        // 反光板预升：走机身的 Mup 释放模式，由 App 连按两次快门
+        mirrorUpRow = sheetValueRow("反光板预升", "关闭") { _ -> showMirrorUpSheet() }
+        wfList.addView(mirrorUpRow.view)
 
         refreshWorkflowRows()
     }
@@ -6959,8 +7315,8 @@ class MainActivity : AppCompatActivity(), SheetHost {
             stepValueRef?.text = "${targetList().size} 张"
         }
 
-        // ---- 分组：范围 ----
-        val cardRange = sheetCard(page.content, "范围")
+        // ---- 起始 / 结束光圈：不加标题，两格加中间那个箭头已经说清楚这是范围 ----
+        val cardRange = sheetCard(page.content)
         val density = resources.displayMetrics.density
         fun dp(v: Int) = (v * density).toInt()
 
@@ -7031,8 +7387,10 @@ class MainActivity : AppCompatActivity(), SheetHost {
             addView(endCell)
         })
 
-        // ---- 分组：拍摄 ----
-        val cardShoot = sheetCard(page.content, "拍摄")
+        // ---- 倒计时 / 执行：分开两张卡片 ----
+        // 倒计时这张**要写回「倒计时」标题**：删掉之后，四个格子上来就是 关/2 秒/5 秒/10 秒，
+        // 没抬头的情况下看不出这排格子是管什么的（会被当成张数或步进）。
+        val cardShoot = sheetCard(page.content, "倒计时")
 
         // 倒计时：按下「开始」之后先等几秒再拍第一张。
         // 没有它，人按完开始键手还搭在机身上，第一张最容易糊 —— 给一点离开机身的时间。
@@ -7043,16 +7401,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
             countdownSec = countdownEntries[idx].first
             cdGrid?.select(idx)
         }
-        cardShoot.addView(TextView(this).apply {
-            text = "倒计时"
-            setTextColor(getColor(R.color.text_secondary))
-            textSize = 11f
-            setTypeface(null, Typeface.BOLD)
-            letterSpacing = 0.08f
-            setPadding(dpx(6), dpx(6), 0, 0)
-        })
         cardShoot.addView(cdGrid.view)
-        cardShoot.addView(sheetHint("开始后先等这么久再拍第一张（只在第一张之前等）。"))
 
         // ---- 分组：执行 ----
         val cardRun = sheetCard(page.content, "执行")

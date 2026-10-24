@@ -33,6 +33,24 @@ class LiveViewFrame(
 )
 
 /**
+ * 快门类命令（0x100E / 0x90C0 / 0x9207）等回应的超时。
+ *
+ * 挑 1.5 秒的理由：机身收到快门命令通常几十毫秒就回，真正慢的是之后的写卡
+ * （那段由调用方单独等，不该算在这里）。超过 1.5 秒没回基本就是数据阶段出错的病态状态，
+ * 要赶紧放开 usbLock 让重试逻辑接管 —— 锁久了读帧、退出取景全堵住，App 看起来就是"卡死"。
+ */
+private const val CAPTURE_RESP_TIMEOUT_MS = 1500
+
+/**
+ * 删除对象（0x100B）的等回应超时。
+ *
+ * 比快门给得宽：删一张可能要擦一块 NAND，卡慢的时候几百毫秒不稀奇。
+ * 但也不能无限等 —— 这条命令是"能不能用"都成疑的那种（见 [supportsOperation]），
+ * 一旦机身不支持，它连失败回应都不给，锁着不放就会把整条 USB 通道拖死。
+ */
+private const val DELETE_RESP_TIMEOUT_MS = 2500
+
+/**
  * 开启实时取景的结果。
  * 之前只返回 Boolean，界面上只能显示"失败"两个字，用户（和我们）都看不出卡在哪一步。
  * 带上 reason 后，任何失败都能直接显示给用户看。
@@ -50,6 +68,25 @@ class PtpEvent(val code: Int, val param: Int) {
         const val OBJECT_ADDED = 0x4002
         const val PROP_CHANGED = 0x4006
         const val CAPTURE_COMPLETE = 0x400D
+        /**
+         * 机身内存里那张照片拍完了（RecInSdram 专用）。
+         *
+         * libgphoto2 里叫 PTP_EC_NIKON_CaptureCompleteRecInSdram，param 就是那张图的**对象句柄** ——
+         * 它只在机身内存中存在，**不会进存储卡的对象列表**，所以列举卡是找不到它的。
+         */
+        const val CAPTURE_COMPLETE_REC_IN_SDRAM = 0xC102
+
+        /**
+         * SDRAM 里多出来一个对象（`PTP_EC_NIKON_ObjectAddedInSdram`）。
+         * param = 那个对象的句柄 —— 它只活在机身内存里，卡的对象列表里找不到。
+         */
+        const val OBJECT_ADDED_IN_SDRAM = 0xC101
+
+        /**
+         * 机身准备好一张预览图了（`PTP_EC_NIKON_PreviewImageAdded`）。
+         * 收到它之后走 0x9200 GetPreviewImage 就能把那张图拉下来。
+         */
+        const val PREVIEW_IMAGE_ADDED = 0xC104
     }
 }
 
@@ -136,7 +173,15 @@ data class DeviceInfo(
     val manufacturer: String,
     val model: String,
     val version: String,
-    val serial: String
+    val serial: String,
+    /**
+     * 机身自报支持的操作码集合（GetDeviceInfo 的 OperationsSupported）。
+     *
+     * 要它只是为了**别硬发机身不支持的命令**：某些命令发下去机身不回任何东西，
+     * 而 usbLock 一直被占着，整条 USB 通道跟着锁死（0x9207 那次就是这么栽的）。
+     * 删除照片之前先问它，比事后扫地省心。
+     */
+    val operations: Set<Int> = emptySet()
 ) {
     /** 登录状态条那一行用：去掉 "NIKON Corporation" 里多余的 Corporation */
     val shortName: String get() = "${manufacturer.replace(" Corporation", "")} $model".trim()
@@ -371,7 +416,8 @@ class PtpUsbConnection(
             return -1
         }
 
-        val std = executeSingleCaptureAttempt(PtpConstants.OP_INITIATE_CAPTURE, sid, 0)
+        // 注意第二个实参是**超时**，storageId 必须排在它后面
+        val std = executeSingleCaptureAttempt(PtpConstants.OP_INITIATE_CAPTURE, CAPTURE_RESP_TIMEOUT_MS, sid, 0)
         if (std == PtpConstants.RESP_OK) return std
         val hex = if (std < 0) "TIMEOUT" else "0x${Integer.toHexString(std).uppercase()}"
         logger("0x100E 未成（$hex）—— 不再重试、不再换命令，直接结束这次拍摄")
@@ -476,14 +522,17 @@ class PtpUsbConnection(
         var code = -1
         for (attempt in 1..3) {
             code = executeSingleCaptureAttempt(
-                PtpConstants.OP_NIKON_INITIATE_CAPTURE, 0xFFFFFFFF.toInt()
+                PtpConstants.OP_NIKON_INITIATE_CAPTURE, CAPTURE_RESP_TIMEOUT_MS,
+                0xFFFFFFFF.toInt()          // ← 操作参数（不是超时！超时是它前面那个）
             )
             if (code == PtpConstants.RESP_OK) break
 
             // 参数不被接受（0x2006）就换成 0 再试一次 —— 别把它当成"这台机器不支持取景内拍摄"
             if (code == PtpConstants.RESP_PARAMETER_NOT_SUPPORTED) {
                 logger("0x90C0 不认 0xFFFFFFFF，改用参数 0 再发一次")
-                code = executeSingleCaptureAttempt(PtpConstants.OP_NIKON_INITIATE_CAPTURE, 0)
+                code = executeSingleCaptureAttempt(
+                    PtpConstants.OP_NIKON_INITIATE_CAPTURE, CAPTURE_RESP_TIMEOUT_MS, 0
+                )
                 if (code == PtpConstants.RESP_OK) break
             }
 
@@ -517,54 +566,206 @@ class PtpUsbConnection(
     }
 
     /**
-     * 拍一张**不落卡**的照片，取回它的缩略图 —— 用作「曝光预览」。
+     * 走 RecInSdram 拍一张**不落卡**的照片，把画面取回来（供「曝光预览」用）。
      *
-     * 链路：`0x90C0 InitiateCaptureRecInSdram` → 机身把照片放进自己的内存（**卡里不会有**）
-     * → 比对拍摄前后的句柄集合找出新对象 → `0x100A GetThumb` 取缩略图。
+     * ★ 为什么以前永远失败：三个环节里错了一个、缺了一个。
+     * 1. **记录媒介没切**：0x90C0 的落点在 [PtpConstants.PROP_NIKON_RECORDING_MEDIA]（0xD10B）手里。
+     *    它停在 1（存储卡）时，0x90C0 也不过和 0x100E 一样把照片写进卡 —— 那当然等不到
+     *    "机身内存里的对象"事件。要的是「RAM 里的那张」，就得先把它切到 0（机身缓存），
+     *    拍完再切回来。
+     * 2. **新句柄不是靠列举找的**：RecInSdram 的照片**不在任何 storage 的对象列表里**，
+     *    只有机身发的事件带着它的句柄 —— `0xC101 ObjectAddedInSdram` / `0xC102 CaptureCompleteRecInSdram`
+     *    （param 即句柄），另有 `0xC104 PreviewImageAdded` 提示可以直接要预览图。
+     *    ⚠️ 事件只走 **0x90C7 NikonGetEvent**（连同 0x4002 那些标准事件也是它一次性带出来的），
+     *    别指望 USB 中断端点 —— 这也是以前只看到 0x4006 的部分原因。
+     * 3. **取图不再靠猜**：拿到句柄走 `0x100A GetThumb`，取不到退 `0x1009 GetObject`；
+     *    要是机身只发了 0xC104 没给句柄，就用 `0x9200 GetPreviewImage` 直接要预览图。
      *
-     * 为什么取缩略图而不是 [getObject] 全图：全尺寸 NEF 有十几 MB，传完再解要好几秒，
-     * 用来"看一眼曝光"太重；缩略图是机身内嵌的小 JPEG，通常几百 KB、几百毫秒就回来，
-     * 判断亮度与高光溢出足够（**但看不了细节、噪声、精确合焦**）。
+     * 收尾很重要：RAM 里那张不等着自己消失。拍完必须 `0x90C3 DeleteImagesInSdram`
+     * 把空间还回去，否则按几十次「曝光预览」机身内存就满了。
      *
-     * ⚠️ 这仍是**真实快门动作**：反光板/快门帘会走一遍，取景会被打断；
-     * 拍完机身常常自己结束取景（libgphoto2 的做法是再补一发 0x9201），续取景由调用方负责。
+     * ⚠️ 这是**真实快门动作**：反光板/快门帘走一遍，取景会被打断。
      *
-     * ⚠️ 新句柄是靠"拍前/拍后集合做差"找的。若机身把 SDRAM 对象放在 [getStorageIds]
-     * 列举不到的地方、又不发 ObjectAdded，就会等不到 —— 真机若如此，需要改走事件通道。
-     *
-     * @param timeoutMs 等新对象出现的预算
-     * @return 缩略图；null = 没拍成 / 等不到新对象 / 取不到缩略图
+     * @return 预览图；null = 没拍成 / 等不到对象 / 都取不到图（失败原因逐条写进 [logger]）
      */
     fun captureToSdramPreview(timeoutMs: Int = 8000): Bitmap? {
-        val before = enumerateAllHandles()
+        // 先把旧事件清空：里面可能压着上一次操作的残余，否则会被当成这次的成果
+        readEventQueue(notify = false)
 
-        val code = captureNoAf()
-        if (code != PtpConstants.RESP_OK) {
-            val hex = if (code < 0) "TIMEOUT" else "0x${Integer.toHexString(code).uppercase()}"
-            logger("曝光预览：快门没成（$hex）")
-            return null
+        // ---- ① 记录媒介切到机身缓存 ----
+        val mediaBefore = getDevicePropValue(PtpConstants.PROP_NIKON_RECORDING_MEDIA)
+        val mediaSwitched = when {
+            mediaBefore == PtpConstants.RECORDING_MEDIA_SDRAM -> true
+            mediaBefore < 0 -> false
+            else -> setDevicePropValue(
+                PtpConstants.PROP_NIKON_RECORDING_MEDIA,
+                PtpConstants.RECORDING_MEDIA_SDRAM, 1, "", 1
+            )
         }
+        logger(
+            "曝光预览：记录媒介 原=$mediaBefore → ${PtpConstants.RECORDING_MEDIA_SDRAM}" +
+                if (mediaSwitched) "（切换成功）" else "（切换失败，仍继续尝试）"
+        )
 
-        val deadline = System.currentTimeMillis() + timeoutMs
-        var waited = 0
-        while (System.currentTimeMillis() < deadline) {
-            if (abortRequested) return null
-            Thread.sleep(250)
-            waited += 250
+        try {
+            // ---- ② 发快门 ----
+            val code = captureNoAf()
+            if (code != PtpConstants.RESP_OK) {
+                val hex = if (code < 0) "TIMEOUT" else "0x${Integer.toHexString(code).uppercase()}"
+                logger("曝光预览：快门没成（$hex）")
+                return null
+            }
 
-            val fresh = enumerateAllHandles() - before
-            if (fresh.isEmpty()) continue
+            // ---- ③ 等机身告诉我们"图在哪" ----
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (System.currentTimeMillis() < deadline) {
+                if (abortRequested) return null
+                Thread.sleep(200)
 
-            // 句柄递增，多个新对象时最大的那个就是刚拍的
-            val handle = fresh.maxOrNull() ?: continue
-            logger("曝光预览：新对象 0x${Integer.toHexString(handle).uppercase()}（等待 ${waited}ms）")
-            val bmp = getThumb(handle)
-            if (bmp != null) return bmp
-            logger("曝光预览：0x100A 没取回缩略图")
+                // notify=false：这张图不落卡，别让界面上的拍摄计数虚增
+                val events = readEventQueue(notify = false)
+                for (ev in events) {
+                    logger(
+                        "曝光预览事件：0x${Integer.toHexString(ev.code).uppercase()} " +
+                            "param=0x${Integer.toHexString(ev.param).uppercase()}"
+                    )
+                }
+                if (events.isEmpty()) continue
+
+                // 只要机身说"预览图好了"，先试试直接要预览图这条官方路
+                if (events.any { it.code == PtpEvent.PREVIEW_IMAGE_ADDED }) {
+                    logger("曝光预览：机身报 PreviewImageAdded，走 0x9200 取预览图")
+                    fetchPreviewImage()?.let { return it }
+                }
+
+                pickSdramHandle(events)?.let { handle ->
+                    logger("曝光预览：机身内存对象 0x${Integer.toHexString(handle).uppercase()}")
+                    getThumb(handle)?.let { return it }
+                    logger("曝光预览：0x100A 没拿到缩略图，改取整张对象")
+                    getObjectAsBitmap(handle)?.let { return it }
+                }
+            }
+            logger("曝光预览：${timeoutMs}ms 内没有拿到机身内存里的画面")
             return null
+        } finally {
+            // ---- ④ 收尾：清机身 RAM + 媒介还原 ----
+            runCatching { deleteImagesInSdram() }
+            if (mediaSwitched) {
+                setDevicePropValue(
+                    PtpConstants.PROP_NIKON_RECORDING_MEDIA, mediaBefore, 1, "", 1
+                ).let { ok ->
+                    logger("曝光预览：记录媒介还原=${if (ok) "成功" else "失败"}（→ $mediaBefore）")
+                }
+            }
         }
-        logger("曝光预览：${timeoutMs}ms 内没等到新对象句柄")
+    }
+
+    /**
+     * `0x90C3 NikonDeleteImagesInSdram` —— 清空机身内存里"拍了但没落卡"的照片。
+     * 参数 1 个，传 1 = 全部删除（官方 MAID case 7）。
+     */
+    fun deleteImagesInSdram(): Boolean = synchronized(usbLock) {
+        drain()
+        val packet = createCommandPacket(PtpConstants.OP_NIKON_DELETE_IMAGES_IN_SDRAM, 1)
+        if (!sendPacket(packet)) return false
+        val resp = receiveResponseWithRetry(1)
+        val ok = resp?.responseCode == PtpConstants.RESP_OK
+        logger(
+            "清空机身内存照片（0x90C3）：" +
+                if (ok) "已清空" else "失败（0x${Integer.toHexString(resp?.responseCode ?: 0).uppercase()}）"
+        )
+        return ok
+    }
+
+    /**
+     * `0x9200 NikonGetPreviewImage` —— 直接向机身要当前缓存里的那张预览图。
+     *
+     * 固件强制校验缓冲区尺寸，只认 [PtpConstants.PREVIEW_IMAGE_BUF_LARGE]（0x46600）
+     * 和 [PtpConstants.PREVIEW_IMAGE_BUF_SMALL]（0x8000）两种，尺寸不对直接回错。
+     * 三个参数的确切含义没有公开文档，这里按"第一个参数 = 尺寸、其余 0"先试，
+     * 两个尺寸都试一遍 —— 每一种组合的返回码都会写进日志，跑一次就知道机身认哪一套。
+     */
+    private fun fetchPreviewImage(): Bitmap? {
+        for (size in intArrayOf(
+            PtpConstants.PREVIEW_IMAGE_BUF_LARGE,
+            PtpConstants.PREVIEW_IMAGE_BUF_SMALL
+        )) {
+            val bytes = try {
+                synchronized(usbLock) {
+                    drain()
+                    val packet = createCommandPacket(
+                        PtpConstants.OP_NIKON_GET_PREVIEW_IMAGE, size, 0, 0
+                    )
+                    if (!sendPacket(packet)) return null
+                    val data = receiveData(size + 4096)
+                    val resp = receiveResponseWithRetry(1)
+                    if (resp?.responseCode != PtpConstants.RESP_OK) {
+                        logger(
+                            "0x9200 取预览图：size=0x${Integer.toHexString(size).uppercase()} " +
+                                "被拒（0x${Integer.toHexString(resp?.responseCode ?: 0).uppercase()}）"
+                        )
+                        return@synchronized null
+                    }
+                    if (data == null || data.limit() <= 12) {
+                        logger("0x9200：size=0x${Integer.toHexString(size).uppercase()} 无数据")
+                        return@synchronized null
+                    }
+                    val len = data.limit() - 12
+                    ByteArray(len).also { data.get(it) }
+                }
+            } catch (e: Exception) {
+                logger("0x9200 异常：${e.message}")
+                null
+            } ?: continue
+
+            val bmp = decodePossiblyJpeg(bytes)
+            if (bmp != null) {
+                logger("0x9200 取预览图：size=0x${Integer.toHexString(size).uppercase()} 成功（${bytes.size}B）")
+                return bmp
+            }
+            logger("0x9200：size=0x${Integer.toHexString(size).uppercase()} 取到 ${bytes.size}B 但解不出 JPEG")
+        }
         return null
+    }
+
+    /** 有的帧前面会被机身塞一段头，这里按帧惯例：先整体解，失败再从 FFD8 处解 */
+    private fun decodePossiblyJpeg(bytes: ByteArray): Bitmap? {
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.let { return it }
+        for (i in 0 until minOf(bytes.size - 1, 4096)) {
+            if (bytes[i] == 0xFF.toByte() && bytes[i + 1] == 0xD8.toByte()) {
+                BitmapFactory.decodeByteArray(bytes, i, bytes.size - i)?.let { return it }
+            }
+        }
+        return null
+    }
+
+    /** 从事件里挑出"刚拍那张"的对象句柄：优先 RecInSdram 专用事件，其次 ObjectAdded */
+    private fun pickSdramHandle(events: List<PtpEvent>): Int? {
+        val prefer = listOf(
+            PtpEvent.OBJECT_ADDED_IN_SDRAM,
+            PtpEvent.CAPTURE_COMPLETE_REC_IN_SDRAM,
+            PtpEvent.OBJECT_ADDED,
+            PtpEvent.CAPTURE_COMPLETE
+        )
+        for (code in prefer) {
+            val h = events.lastOrNull { it.code == code }?.param
+            if (h != null && h != 0 && h != 0xFFFFFFFF.toInt()) return h
+        }
+        return null
+    }
+
+    /** 整张对象取回并解码（RecInSdram 给的是 JPEG 时可用，作 GetThumb 的兜底） */
+    private fun getObjectAsBitmap(handle: Int): Bitmap? {
+        val bytes = getObject(handle) ?: run {
+            logger("曝光预览：0x1009 也没取回对象")
+            return null
+        }
+        return try {
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        } catch (e: Exception) {
+            android.util.Log.e("EXP_PREV", "曝光预览：解码失败 ${e.message}")
+            null
+        }
     }
 
     fun clearPipe() {
@@ -584,6 +785,17 @@ class PtpUsbConnection(
         ) >= 0
     }
 
+    /**
+     * 发一次快门命令并等回应。
+     *
+     * ⚠️ 签名是 `(opCode, respTimeoutMs = 2000, vararg params)` —— **超时在第二个位置，参数在 vararg**。
+     * 曾经有调用写成 `executeSingleCaptureAttempt(OP_NIKON_INITIATE_CAPTURE, 0xFFFFFFFF.toInt())`：
+     * Kotlin 把 0xFFFFFFFF 当成**超时**（约 49 天），而 vararg 变成空数组 ——
+     * 命令本体被丢了参数，超时也彻底失控。改参数一律显式写出超时。
+     *
+     * 保险起见这里再把超时夹到 [300, 3000]：一次快门回应不该超过 3 秒，
+     * 超限就让调用方的重试逻辑接管，而不是死等把 usbLock 占住拖垮整条 USB 通道。
+     */
     private fun executeSingleCaptureAttempt(
         opCode: Int,
         respTimeoutMs: Int = 2000,
@@ -595,7 +807,7 @@ class PtpUsbConnection(
         val packet = createCommandPacket(opCode, *params)
         if (!sendPacket(packet)) return -1
 
-        val response = receiveResponseWithRetry(5, timeoutMs = respTimeoutMs)
+        val response = receiveResponseWithRetry(5, timeoutMs = respTimeoutMs.coerceIn(300, 3000))
         
         if (response == null || response.responseCode == 0xA002 || response.responseCode == 0xA008) {
             val codeHex = if (response != null) "0x${Integer.toHexString(response.responseCode).uppercase()}" else "TIMEOUT"
@@ -1910,6 +2122,48 @@ class PtpUsbConnection(
         data.array().copyOfRange(12, limit)
     }
 
+    /**
+     * 删除卡上的一个对象（标准 PTP `0x100B DeleteObject`）。
+     *
+     * ⚠️ 这台机身不一定真的支持这条命令 —— 见 [supportsOperation]：
+     * 不支持的命令发下去可能**连失败回应都没有**，而 usbLock 一直被占着，
+     * 表现为"按钮点了没反应、之后所有命令也发不出去"。
+     * 所以调用方要先用 [supportsOperation] 问一次，别盲目发。
+     *
+     * @return Pair(是否成功, 说明) —— 说明直接给界面显示，别再让人去翻日志
+     */
+    fun deleteObject(handle: Int): Pair<Boolean, String> = synchronized(usbLock) {
+        drain()
+        val packet = createCommandPacket(PtpConstants.OP_DELETE_OBJECT, handle)
+        if (!sendPacket(packet)) return false to "命令没发出去"
+        val resp = receiveResponseWithRetry(3, timeoutMs = DELETE_RESP_TIMEOUT_MS)
+        val code = resp?.responseCode
+        val ok = code == PtpConstants.RESP_OK
+        val mark = if (code == null) {
+            // 没回应基本就是机身不认这条命令：端点很可能已经被拖到异常状态，先 clearing halt 救一把
+            clearPipe()
+            "机身没有任何回应（多半是不支持这条命令）"
+        } else {
+            describeResponse(code)
+        }
+        logger(
+            if (ok) "已删除对象 0x${Integer.toHexString(handle).uppercase()}"
+            else "删除对象 0x${Integer.toHexString(handle).uppercase()} 失败：$mark"
+        )
+        ok to mark
+    }
+
+    /** 把删除失败的那几个常见响应码说成人话（直接给界面显示） */
+    private fun describeResponse(code: Int): String = when (code) {
+        PtpConstants.RESP_OK -> "OK"
+        PtpConstants.RESP_DEVICE_BUSY -> "机身正忙"
+        0x200F -> "这张被机身保护了（先在机身上解除保护）"
+        0x2011 -> "句柄不存在（列表可能过期了，退回相册再试）"
+        0x2005, PtpConstants.RESP_PARAMETER_NOT_SUPPORTED -> "机身不接受这条命令"
+        0x2001 -> "机身拒绝执行"
+        else -> "0x${Integer.toHexString(code).uppercase()}"
+    }
+
     // ------------------------------------------------------------------
     // 写文件到机身（SendObjectInfo + SendObject）
     //
@@ -2511,6 +2765,62 @@ class PtpUsbConnection(
     fun getDeviceInfo(): String? = readDeviceInfo()?.shortName
 
     /**
+     * 机身自报支不支持某个操作码。
+     *
+     * 依据 GetDeviceInfo 里的 OperationsSupported —— 那是机身自己交出来的清单，
+     * 比"发了看它回不回"可靠得多：不支持的命令很可能**连回应都没有**，
+     * 而 usbLock 一直被占着，App 就是那个"点了没反应，之后什么都发不出去"的状态。
+     *
+     * @return true/false = 机身明确说了支不支持；**null = 问不到**（连机型信息都没读出来），
+     * 这时调用方按"可以试，但要自己兜住超时"处理。
+     */
+    fun supportsOperation(opCode: Int): Boolean? {
+        supportedOperations?.let { return opCode in it }
+        val ops = readDeviceInfo()?.operations
+        if (!ops.isNullOrEmpty()) supportedOperations = ops
+        return ops?.contains(opCode)
+    }
+
+    /** GetDeviceInfo 那份清单只问一次，之后都用缓存 */
+    @Volatile
+    private var supportedOperations: Set<Int>? = null
+
+    /**
+     * 把机身自述支持的操作码整份打进日志，并顺手标几条我们最关心的。
+     *
+     * 用途：以后再遇到"这个按钮点了没反应"，先看机身到底认不认这条命令
+     * （它的处理函数是否在固件调度表里），而不是去猜固件实现了什么。
+     * —— 删除对象那条命令就是靠这一看才发现的：我们一直发的码机身根本不认。
+     */
+    fun logSupportedOperations(sink: (String) -> Unit) {
+        val ops = readDeviceInfo()?.operations ?: run {
+            sink("机身支持的操作码：没读到 DeviceInfo")
+            return
+        }
+        if (!ops.isNullOrEmpty()) supportedOperations = ops
+
+        val interesting = linkedMapOf(
+            PtpConstants.OP_DELETE_OBJECT to "删除对象",
+            PtpConstants.OP_NIKON_INITIATE_CAPTURE to "RecInSdram 拍摄",
+            PtpConstants.OP_NIKON_DELETE_IMAGES_IN_SDRAM to "清空机身内存照片",
+            PtpConstants.OP_NIKON_GET_PREVIEW_IMAGE to "取预览图",
+            PtpConstants.OP_NIKON_GET_LARGE_THUMB to "大缩略图",
+            PtpConstants.OP_GET_THUMB to "缩略图",
+            PtpConstants.OP_GET_PARTIAL_OBJECT to "分段读取"
+        )
+        for ((code, name) in interesting) {
+            sink(
+                "机身操作能力：$name 0x${Integer.toHexString(code).uppercase()} = " +
+                    (if (ops.contains(code)) "支持" else "**不支持**")
+            )
+        }
+        sink(
+            "机身操作能力（共 ${ops.size} 条）：" +
+                ops.sorted().joinToString(" ") { "0x${Integer.toHexString(it).uppercase()}" }
+        )
+    }
+
+    /**
      * 完整读一遍 DeviceInfo（0x1001）：厂商 / 型号 / 固件版本 / 序列号。
      *
      * 界面上的"机身信息"页要固件和序列号，而登录状态条只要型号 ——
@@ -2535,8 +2845,11 @@ class PtpUsbConnection(
             buffer.short
             skipString(buffer)
             buffer.short
-            skipArray(buffer, 2)
-            skipArray(buffer, 2)
+            // 第一个数组就是 OperationsSupported —— 读下来而不是跳过（用途见 DeviceInfo.operations）
+            val ops = mutableSetOf<Int>()
+            val opCount = buffer.getInt()
+            for (i in 0 until opCount) ops.add(buffer.short.toInt() and 0xFFFF)
+            skipArray(buffer, 2)   // EventsSupported
             skipArray(buffer, 2)
             skipArray(buffer, 2)
             skipArray(buffer, 2)
@@ -2545,7 +2858,7 @@ class PtpUsbConnection(
             // DeviceVersion / SerialNumber 紧跟 Model —— 老机型也按规范给，读失败就当空
             val version = runCatching { readString(buffer) }.getOrDefault("")
             val serial = runCatching { readString(buffer) }.getOrDefault("")
-            return DeviceInfo(manufacturer, model, version, serial)
+            return DeviceInfo(manufacturer, model, version, serial, ops)
         } catch (e: Exception) { return null }
     }
 
@@ -2697,6 +3010,11 @@ class PtpUsbConnection(
     }
 
     private fun receiveResponse(timeoutMs: Int = 2000): PtpResponse? {
+        // ⚠️ bulkTransfer 的 timeout 传 0 = **无限等待**（不是"立即返回"）。
+        // 上层曾经误把 0 当操作参数传进来（位置参数/vararg 错位），结果是整条
+        // USB 通道卡死十几秒，usbLock 被一直占着，读帧、退出取景全堵住。
+        // 这里兜底：超时小于 50ms 一律抬到 50ms，宁可多轮询一次也不能让端口永久阻塞。
+        val wait = if (timeoutMs < 50) 50 else timeoutMs
         if (lastResponse != null) {
             val res = lastResponse
             lastResponse = null
@@ -2711,7 +3029,7 @@ class PtpUsbConnection(
             Arrays.fill(buffer.array(), 0.toByte())
             buffer.clear()
 
-            val result = connection.bulkTransfer(ep, buffer.array(), 512, timeoutMs)
+            val result = connection.bulkTransfer(ep, buffer.array(), 512, wait)
             val elapsed = System.currentTimeMillis() - start
             
             if (result < 12) {
@@ -2915,6 +3233,18 @@ class PtpUsbConnection(
 
     /** 读取事件队列并解析，逐个交给 eventHandler（拍照完成 / 属性变更 / 对象新增） */
     fun pollEvents() {
+        readEventQueue(notify = true)
+    }
+
+    /**
+     * 读空机身的事件队列，返回这次读到的全部事件。
+     *
+     * @param notify 是否把 OBJECT_ADDED / 属性变更 / 拍摄完成 交给 [eventHandler]。
+     * 一般要 true；曝光预览这类"自己会处理事件"的调用传 false ——
+     * 否则机身内存里那张（不落卡的）照片要是报了 OBJECT_ADDED，界面上的拍摄计数会白加一张。
+     */
+    private fun readEventQueue(notify: Boolean): List<PtpEvent> {
+        val collected = ArrayList<PtpEvent>()
         for (i in 0 until 10) {
             val packet = createCommandPacket(PtpConstants.OP_NIKON_GET_EVENT)
             if (!sendPacket(packet)) break
@@ -2931,14 +3261,18 @@ class PtpUsbConnection(
                     val code = buf.short.toInt() and 0xFFFF
                     val param = buf.int
                     val ev = PtpEvent(code, param)
-                    when (code) {
-                        PtpEvent.OBJECT_ADDED, PtpEvent.PROP_CHANGED, PtpEvent.CAPTURE_COMPLETE ->
-                            eventHandler?.invoke(ev)
+                    collected.add(ev)
+                    if (notify) {
+                        when (code) {
+                            PtpEvent.OBJECT_ADDED, PtpEvent.PROP_CHANGED, PtpEvent.CAPTURE_COMPLETE ->
+                                eventHandler?.invoke(ev)
+                        }
                     }
                 }
                 if (parsed < count) break // 数据不足，队列异常
             } catch (e: Exception) { break }
         }
+        return collected
     }
 
     fun clearEventsThoroughly() {

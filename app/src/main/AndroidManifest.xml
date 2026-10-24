@@ -31,6 +31,11 @@
             android:name=".GalleryActivity"
             android:exported="false"
             android:label="相机相册" />
+
+        <!-- 使用说明 / 关于：同一个 Activity，用 EXTRA_PAGE 区分内容 -->
+        <activity
+            android:name=".InfoActivity"
+            android:exported="false" />
     </application>
 
 </manifest>

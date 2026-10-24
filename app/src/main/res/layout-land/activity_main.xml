@@ -67,8 +67,11 @@
                 android:src="@drawable/ic_battery"
                 tools:ignore="ContentDescription" />
 
+            <!-- 日志入口：以前这个位置是「相册」，相册挪进了底部导航第三格。
+                 日志是排查用的，放回顶栏右上角这条"不太容易误触"的位置正合适；
+                 未连接时也能看（它只是本机自己的记录，不依赖相机）。 -->
             <TextView
-                android:id="@+id/galleryButton"
+                android:id="@+id/logButton"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="12dp"
@@ -77,7 +80,7 @@
                 android:paddingTop="5dp"
                 android:paddingEnd="10dp"
                 android:paddingBottom="5dp"
-                android:text="相册"
+                android:text="日志"
                 android:textColor="@color/accent_amber"
                 android:textSize="13sp"
                 android:textStyle="bold" />
@@ -154,57 +157,64 @@
                         android:textSize="12sp"
                         android:visibility="gone" />
 
-                    <!-- 录制按钮：D300 机身没有录像功能，动态画面只能靠手机把
-                         0x9203 取景帧编码成 MP4，所以这个按钮只在取景中可用。
-                         点一下开始（红底走时），再点一下停止并存盘。
-                         位置放在左上角（原来「● LIVE」角标那儿）——
-                         LIVE 只是"正在取景"的冗余提示，录制才是这里真正要按的按钮。 -->
-                    <TextView
-                        android:id="@+id/recButton"
+                    <!-- 左上角取景工具条：录制与峰值**同一行**（改动说明见 layout/activity_main.xml）。
+                         包成横向 LinearLayout，隐藏的那个自动让出位置，排布始终紧凑。 -->
+                    <LinearLayout
                         android:layout_width="wrap_content"
                         android:layout_height="28dp"
                         android:layout_gravity="top|start"
                         android:layout_marginStart="12dp"
                         android:layout_marginTop="12dp"
-                        android:background="@drawable/bg_overlay_chip"
-                        android:gravity="center"
-                        android:paddingStart="10dp"
-                        android:paddingEnd="10dp"
-                        android:text="● 录制"
-                        android:textColor="@color/accent_red"
-                        android:textSize="11sp"
-                        android:textStyle="bold"
-                        android:visibility="gone" />
+                        android:orientation="horizontal">
 
-                    <!-- 峰值对焦开关：只在取景中出现，压在录制按钮下方（48dp 避让）。
-                         手动对焦时靠它判断合焦，开着会有额外的计算开销，不需要就关掉。 -->
-                    <TextView
-                        android:id="@+id/peakButton"
-                        android:layout_width="wrap_content"
-                        android:layout_height="28dp"
-                        android:layout_gravity="top|start"
-                        android:layout_marginStart="12dp"
-                        android:layout_marginTop="48dp"
-                        android:background="@drawable/bg_overlay_chip"
-                        android:gravity="center"
-                        android:paddingStart="10dp"
-                        android:paddingEnd="10dp"
-                        android:text="峰值"
-                        android:textColor="@color/text_disabled"
-                        android:textSize="11sp"
-                        android:textStyle="bold"
-                        android:visibility="gone" />
+                        <!-- 录制按钮：D300 机身没有录像功能，动态画面只能靠手机把
+                             0x9203 取景帧编码成 MP4，所以这个按钮只在取景中可用。
+                             点一下开始（红底走时），再点一下停止并存盘。
+                             位置放在左上角（原来「● LIVE」角标那儿）——
+                             LIVE 只是"正在取景"的冗余提示，录制才是这里真正要按的按钮。 -->
+                        <TextView
+                            android:id="@+id/recButton"
+                            android:layout_width="wrap_content"
+                            android:layout_height="28dp"
+                            android:background="@drawable/bg_overlay_chip"
+                            android:gravity="center"
+                            android:paddingStart="10dp"
+                            android:paddingEnd="10dp"
+                            android:text="● 录制"
+                            android:textColor="@color/accent_red"
+                            android:textSize="11sp"
+                            android:textStyle="bold"
+                            android:visibility="gone" />
+
+                        <!-- 峰值对焦开关：只在取景中出现，紧跟在录制按钮右侧。
+                             手动对焦时靠它判断合焦，开着会有额外的计算开销，不需要就关掉。 -->
+                        <TextView
+                            android:id="@+id/peakButton"
+                            android:layout_width="wrap_content"
+                            android:layout_height="28dp"
+                            android:layout_marginStart="8dp"
+                            android:background="@drawable/bg_overlay_chip"
+                            android:gravity="center"
+                            android:paddingStart="10dp"
+                            android:paddingEnd="10dp"
+                            android:text="峰值"
+                            android:textColor="@color/text_disabled"
+                            android:textSize="11sp"
+                            android:textStyle="bold"
+                            android:visibility="gone" />
+                    </LinearLayout>
 
                     <!-- 曝光预览：拍一张**不落卡**的照片（0x90C0 → 机身内存），
                          取回缩略图盖在取景画面上看曝光。比实时取景的画面更接近成片。
-                         注意它走真实快门，取景会被打断。 -->
+                         注意它走真实快门，取景会被打断。
+                         排在工具条下一行（48dp = 12dp 上边距 + 28dp 工具条高 + 8dp 间距）。 -->
                     <TextView
                         android:id="@+id/exposurePreviewButton"
                         android:layout_width="wrap_content"
                         android:layout_height="28dp"
                         android:layout_gravity="top|start"
                         android:layout_marginStart="12dp"
-                        android:layout_marginTop="84dp"
+                        android:layout_marginTop="48dp"
                         android:background="@drawable/bg_overlay_chip"
                         android:gravity="center"
                         android:paddingStart="10dp"
@@ -376,22 +386,31 @@
                 <!-- 机身参数行：对焦模式 + 焦距 / 曝光补偿 / 曝光模式。
                      放在取景区外面、曝光参数上面 —— 压在实拍画面上会挡构图，
                      而且这一行是常显信息，不该跟着取景框一起缩放。 -->
-                <HorizontalScrollView
+                <!-- 机身参数行（横屏版）：对焦模式 / 焦距 / 曝光补偿 / 曝光模式。
+                     竖屏这行是横向滚动的；横屏它落在 252dp 宽的操作列里，
+                     横着滚等于"再划一下才看全"，而常显信息不该藏一半 ——
+                     改成两列网格，四块一屏铺满，顺手省掉一条横向滚动条。 -->
+                <!-- 机身参数行（横屏版）：对焦模式 / 焦距 / 曝光补偿 / 曝光模式。
+                     竖屏这行是横向滚动的；横屏它落在 252dp 宽的操作列里，
+                     横着滚等于"再划一下才看全"，而常显信息不该藏一半 ——
+                     改成两列网格，四块一屏铺满，顺手省掉一条横向滚动条。 -->
+                <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="10dp"
-                    android:scrollbars="none">
+                    android:orientation="vertical">
 
                     <LinearLayout
-                        android:layout_width="wrap_content"
+                        android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:gravity="center_vertical"
                         android:orientation="horizontal">
 
                         <TextView
                             android:id="@+id/focusChip"
-                            android:layout_width="wrap_content"
+                            android:layout_width="0dp"
                             android:layout_height="28dp"
+                            android:layout_marginEnd="3dp"
+                            android:layout_weight="1"
                             android:background="@drawable/bg_param_card"
                             android:gravity="center"
                             android:paddingStart="10dp"
@@ -403,9 +422,10 @@
 
                         <TextView
                             android:id="@+id/focalChip"
-                            android:layout_width="wrap_content"
+                            android:layout_width="0dp"
                             android:layout_height="28dp"
-                            android:layout_marginStart="6dp"
+                            android:layout_marginStart="3dp"
+                            android:layout_weight="1"
                             android:background="@drawable/bg_param_card"
                             android:drawablePadding="6dp"
                             android:drawableTint="@color/text_secondary"
@@ -416,12 +436,20 @@
                             android:textColor="@color/text_secondary"
                             android:textSize="11sp"
                             app:drawableStartCompat="@drawable/ic_focal" />
+                    </LinearLayout>
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:orientation="horizontal">
 
                         <TextView
                             android:id="@+id/evChip"
-                            android:layout_width="wrap_content"
+                            android:layout_width="0dp"
                             android:layout_height="28dp"
-                            android:layout_marginStart="6dp"
+                            android:layout_marginEnd="3dp"
+                            android:layout_weight="1"
                             android:background="@drawable/bg_param_card"
                             android:drawablePadding="4dp"
                             android:gravity="center"
@@ -436,9 +464,10 @@
 
                         <TextView
                             android:id="@+id/modeChip"
-                            android:layout_width="wrap_content"
+                            android:layout_width="0dp"
                             android:layout_height="28dp"
-                            android:layout_marginStart="6dp"
+                            android:layout_marginStart="3dp"
+                            android:layout_weight="1"
                             android:background="@drawable/bg_param_card"
                             android:drawablePadding="4dp"
                             android:gravity="center"
@@ -451,7 +480,7 @@
                             app:drawableStartCompat="@drawable/ic_mode"
                             app:drawableTint="@color/text_secondary" />
                     </LinearLayout>
-                </HorizontalScrollView>
+                </LinearLayout>
 
                 <!-- 取景框现在恒定 weight=1 吃掉剩余空间，这个占位不再需要承重
                      （留着但不参与布局：weight 会和取景框打架，所以直接 gone）。 -->
@@ -704,7 +733,13 @@
                 </ScrollView>
             </LinearLayout>
 
-            <!-- 页2：参数（按设计稿 S2 的分组列表形态） -->
+            <!-- 页2：参数
+
+                 横屏改成**双列**：屏幕宽而矮，单列五组要滚很久、右边还空一大片。
+                 左列放决定画面的三组（曝光与画质 / 实时取景 / 包围曝光），
+                 右列放流程与机身（自拍延时那一组 / 存储卡与机身菜单）。
+                 分组口径、每张卡的行 id 与竖屏完全一致 —— 代码只 findViewById，
+                 不关心某一行落在哪一列。 -->
             <ScrollView
                 android:id="@+id/paramsSection"
                 android:layout_width="match_parent"
@@ -714,210 +749,213 @@
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:orientation="vertical">
+                    android:orientation="horizontal"
+                    android:paddingBottom="8dp">
 
-                    <!-- 分组·机身 -->
+                    <!-- 左列 -->
                     <LinearLayout
-                        android:layout_width="match_parent"
+                        android:layout_width="0dp"
                         android:layout_height="wrap_content"
-                        android:background="@drawable/bg_card"
-                        android:orientation="vertical"
-                        android:padding="8dp">
-
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:letterSpacing="0.08"
-                            android:paddingStart="6dp"
-                            android:paddingBottom="4dp"
-                            android:text="存储"
-                            android:textColor="@color/text_secondary"
-                            android:textSize="11sp"
-                            android:textStyle="bold" />
-
-                        <!-- 白平衡已挪进「曝光与画质」（它属于曝光，不该和储存卡同组），
-                             行在代码里建（同一套 sheetValueRow 构件，右侧显示当前模式）。
-                             机身信息 / 存储卡 / 格式化：行同样在代码里建。 -->
+                        android:layout_marginEnd="6dp"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+                        <!-- 分组·曝光与画质：白平衡 / 测光 / 闪光补偿 / 画质 / 记录媒介，
+                             行在代码里建（见 setupParamExtraRows），档位一律按机身描述符动态生成 -->
                         <LinearLayout
-                            android:id="@+id/deviceMgmtList"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:orientation="vertical" />
+                            android:background="@drawable/bg_card"
+                            android:orientation="vertical"
+                            android:padding="8dp">
+
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:letterSpacing="0.08"
+                                android:paddingStart="6dp"
+                                android:paddingEnd="6dp"
+                                android:paddingBottom="6dp"
+                                android:text="曝光与画质"
+                                android:textColor="@color/text_secondary"
+                                android:textSize="11sp"
+                                android:textStyle="bold" />
+
+                            <LinearLayout
+                                android:id="@+id/exposureQualityList"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:orientation="vertical" />
+                        </LinearLayout>
+
+
+                        <!-- 分组·实时取景：对焦点数量 + 构图网格。
+                             手持 / 三脚架的分段选择器已从参数页删掉：拍摄页长按取景键就能切，
+                             这里再放一个是重复入口。 -->
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="12dp"
+                            android:background="@drawable/bg_card"
+                            android:orientation="vertical"
+                            android:padding="8dp">
+
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:letterSpacing="0.08"
+                                android:paddingStart="6dp"
+                                android:paddingEnd="6dp"
+                                android:paddingBottom="6dp"
+                                android:text="实时取景"
+                                android:textColor="@color/text_secondary"
+                                android:textSize="11sp"
+                                android:textStyle="bold" />
+
+                            <!-- 对焦点数量（51 / 11 点，写 0xD08D）：行在代码里建成一列方框 -->
+                            <LinearLayout
+                                android:id="@+id/afCountList"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:orientation="vertical" />
+
+                            <!-- 取景框显示（构图网格）：App 侧叠加在实时取景画面上的辅助线 -->
+                            <LinearLayout
+                                android:id="@+id/lvGridList"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:orientation="vertical" />
+                        </LinearLayout>
+
+
+                        <!-- 分组·包围曝光：两种"一次性拍一组"的流程，各占一行入口 -->
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="12dp"
+                            android:background="@drawable/bg_card"
+                            android:orientation="vertical"
+                            android:padding="8dp">
+
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:letterSpacing="0.08"
+                                android:paddingStart="6dp"
+                                android:paddingEnd="6dp"
+                                android:paddingBottom="6dp"
+                                android:text="包围曝光"
+                                android:textColor="@color/text_secondary"
+                                android:textSize="11sp"
+                                android:textStyle="bold" />
+
+                            <androidx.appcompat.widget.AppCompatButton
+                                android:id="@+id/apBracketingButton"
+                                android:layout_width="match_parent"
+                                android:layout_height="48dp"
+                                android:background="@drawable/bg_setting_row"
+                                android:drawableEnd="@drawable/ic_chevron_right"
+                                android:gravity="start|center_vertical"
+                                android:paddingStart="14dp"
+                                android:paddingEnd="12dp"
+                                android:stateListAnimator="@null"
+                                android:text="光圈包围"
+                                android:textAllCaps="false"
+                                android:textColor="@color/text_primary"
+                                android:textSize="14sp" />
+
+                            <androidx.appcompat.widget.AppCompatButton
+                                android:id="@+id/expBracketingButton"
+                                android:layout_width="match_parent"
+                                android:layout_height="48dp"
+                                android:layout_marginTop="2dp"
+                                android:background="@drawable/bg_setting_row"
+                                android:drawableEnd="@drawable/ic_chevron_right"
+                                android:gravity="start|center_vertical"
+                                android:paddingStart="14dp"
+                                android:paddingEnd="12dp"
+                                android:stateListAnimator="@null"
+                                android:text="快门包围"
+                                android:textAllCaps="false"
+                                android:textColor="@color/text_primary"
+                                android:textSize="14sp" />
+                        </LinearLayout>
+
                     </LinearLayout>
 
-                    <!-- 分组·曝光与画质：测光 / 闪光 / 画质三行，档位一律按机身描述符动态生成 -->
+                    <!-- 右列 -->
                     <LinearLayout
-                        android:layout_width="match_parent"
+                        android:layout_width="0dp"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="12dp"
-                        android:background="@drawable/bg_card"
-                        android:orientation="vertical"
-                        android:padding="8dp">
-
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:letterSpacing="0.08"
-                            android:paddingStart="6dp"
-                            android:paddingBottom="4dp"
-                            android:text="曝光与画质"
-                            android:textColor="@color/text_secondary"
-                            android:textSize="11sp"
-                            android:textStyle="bold" />
-
+                        android:layout_marginStart="6dp"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+                        <!-- 分组·拍摄流程：自拍延时是页内的方框直选，另两项进二级页 -->
                         <LinearLayout
-                            android:id="@+id/exposureQualityList"
+                            android:id="@+id/workflowCard"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:orientation="vertical" />
-                    </LinearLayout>
+                            android:background="@drawable/bg_card"
+                            android:orientation="vertical"
+                            android:padding="8dp">
 
-                    <!-- 分组·包围曝光 -->
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="12dp"
-                        android:background="@drawable/bg_card"
-                        android:orientation="vertical"
-                        android:padding="8dp">
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:letterSpacing="0.08"
+                                android:paddingStart="6dp"
+                                android:paddingEnd="6dp"
+                                android:paddingBottom="6dp"
+                                android:text="拍摄流程"
+                                android:textColor="@color/text_secondary"
+                                android:textSize="11sp"
+                                android:textStyle="bold" />
 
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:letterSpacing="0.08"
-                            android:paddingStart="6dp"
-                            android:paddingBottom="4dp"
-                            android:text="包围曝光"
-                            android:textColor="@color/text_secondary"
-                            android:textSize="11sp"
-                            android:textStyle="bold" />
+                            <LinearLayout
+                                android:id="@+id/workflowList"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:orientation="vertical" />
+                        </LinearLayout>
 
-                        <androidx.appcompat.widget.AppCompatButton
-                            android:id="@+id/apBracketingButton"
-                            android:layout_width="match_parent"
-                            android:layout_height="48dp"
-                            android:background="@drawable/bg_setting_row"
-                            android:drawableEnd="@drawable/ic_chevron_right"
-                            android:gravity="start|center_vertical"
-                            android:paddingStart="14dp"
-                            android:paddingEnd="12dp"
-                            android:stateListAnimator="@null"
-                            android:text="光圈包围"
-                            android:textAllCaps="false"
-                            android:textColor="@color/text_primary"
-                            android:textSize="14sp" />
 
-                        <androidx.appcompat.widget.AppCompatButton
-                            android:id="@+id/expBracketingButton"
-                            android:layout_width="match_parent"
-                            android:layout_height="48dp"
-                            android:layout_marginTop="2dp"
-                            android:background="@drawable/bg_setting_row"
-                            android:drawableEnd="@drawable/ic_chevron_right"
-                            android:gravity="start|center_vertical"
-                            android:paddingStart="14dp"
-                            android:paddingEnd="12dp"
-                            android:stateListAnimator="@null"
-                            android:text="快门包围"
-                            android:textAllCaps="false"
-                            android:textColor="@color/text_primary"
-                            android:textSize="14sp" />
-                    </LinearLayout>
-
-                    <!-- 分组·拍摄流程：自拍延时 / 间隔拍摄 / 拍完自动下载 -->
-                    <LinearLayout
-                        android:id="@+id/workflowCard"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="12dp"
-                        android:background="@drawable/bg_card"
-                        android:orientation="vertical"
-                        android:padding="8dp">
-
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:letterSpacing="0.08"
-                            android:paddingStart="6dp"
-                            android:paddingBottom="4dp"
-                            android:text="拍摄流程"
-                            android:textColor="@color/text_secondary"
-                            android:textSize="11sp"
-                            android:textStyle="bold" />
-
+                        <!-- 分组·机身：卡怎么办 + 机身菜单的入口。
+                             个人设定（a–f 共 50 项）和拍摄菜单都收进各自的二级页 ——
+                             50 行铺在参数页会有两千多 dp 的滚动条，这里只留一行。
+                             格式化也不单独占一行：它属于"针对某张卡"的操作，
+                             在「存储卡」二级页每张卡下面，不会对错的卡下手。 -->
                         <LinearLayout
-                            android:id="@+id/workflowList"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:orientation="vertical" />
-                    </LinearLayout>
+                            android:layout_marginTop="12dp"
+                            android:background="@drawable/bg_card"
+                            android:orientation="vertical"
+                            android:padding="8dp">
 
-                    <!-- 分组·相机设定：机身个人设定（CSM）a–f 共 50 项全部收进二级页，
-                         参数页只留一个入口 —— 50 行铺在这里会有两千多 dp 的滚动条。
-                         抬头按用户口径叫「相机设定」（里面仍是机身的 a–f 六组）。 -->
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="12dp"
-                        android:background="@drawable/bg_card"
-                        android:orientation="vertical"
-                        android:padding="8dp">
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:letterSpacing="0.08"
+                                android:paddingStart="6dp"
+                                android:paddingEnd="6dp"
+                                android:paddingBottom="6dp"
+                                android:text="机身"
+                                android:textColor="@color/text_secondary"
+                                android:textSize="11sp"
+                                android:textStyle="bold" />
 
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:letterSpacing="0.08"
-                            android:paddingStart="6dp"
-                            android:paddingBottom="4dp"
-                            android:text="相机设定"
-                            android:textColor="@color/text_secondary"
-                            android:textSize="11sp"
-                            android:textStyle="bold" />
+                            <LinearLayout
+                                android:id="@+id/deviceMgmtList"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:orientation="vertical" />
 
-                        <LinearLayout
-                            android:id="@+id/csmEntryList"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:orientation="vertical" />
-                    </LinearLayout>
+                            <LinearLayout
+                                android:id="@+id/csmEntryList"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:orientation="vertical" />
+                        </LinearLayout>
 
-                    <!-- 分组·实时取景。
-                         手持 / 三脚架的分段选择器已从参数页删掉：拍摄页长按取景键就能切，
-                         这里再放一个是重复入口（改了还容易和拍摄页的状态对不上）。 -->
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="12dp"
-                        android:background="@drawable/bg_card"
-                        android:orientation="vertical"
-                        android:padding="8dp">
-
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:letterSpacing="0.08"
-                            android:paddingStart="6dp"
-                            android:paddingBottom="4dp"
-                            android:text="实时取景"
-                            android:textColor="@color/text_secondary"
-                            android:textSize="11sp"
-                            android:textStyle="bold" />
-
-                        <!-- 对焦点数量（51 / 11 点，写 0xD08D）：从取景框右上角挪到这里，
-                             主页不再放切换按钮 —— 它属于设置项，不是每次都要点的操作。 -->
-                        <LinearLayout
-                            android:id="@+id/afCountList"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:orientation="vertical" />
-
-                        <!-- 取景框显示（构图网格）：App 侧叠加在实时取景画面上的辅助线。
-                             行本身在代码里建（和 afCountList 同一套构件）。 -->
-                        <LinearLayout
-                            android:id="@+id/lvGridList"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:orientation="vertical" />
                     </LinearLayout>
 
                 </LinearLayout>
@@ -998,11 +1036,14 @@
         </FrameLayout>
 
         <!-- ===== 底部导航胶囊 ===== -->
+        <!-- ===== 底部导航胶囊 =====
+             横屏竖向紧张：三项改成图标与文字**同一行**，胶囊高度 62dp → 46dp，
+             省下来的高度还给取景画面（画面才是这一页的主角）。 -->
         <LinearLayout
             android:id="@+id/navCapsule"
             android:layout_width="match_parent"
-            android:layout_height="62dp"
-            android:layout_marginTop="12dp"
+            android:layout_height="46dp"
+            android:layout_marginTop="8dp"
             android:background="@drawable/bg_nav_capsule"
             android:orientation="horizontal"
             android:padding="4dp">
@@ -1014,7 +1055,9 @@
                 android:layout_weight="1"
                 android:background="@drawable/bg_nav_item_selected"
                 android:gravity="center"
-                android:orientation="vertical">
+                android:orientation="horizontal"
+                android:paddingStart="10dp"
+                android:paddingEnd="10dp">
 
                 <ImageView
                     android:id="@+id/navShootIcon"
@@ -1027,10 +1070,10 @@
                     android:id="@+id/navShootText"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
+                    android:layout_marginStart="6dp"
                     android:text="拍摄"
                     android:textColor="@color/bg_base"
-                    android:textSize="10sp"
+                    android:textSize="12sp"
                     android:textStyle="bold" />
             </LinearLayout>
 
@@ -1041,7 +1084,9 @@
                 android:layout_marginStart="4dp"
                 android:layout_weight="1"
                 android:gravity="center"
-                android:orientation="vertical">
+                android:orientation="horizontal"
+                android:paddingStart="10dp"
+                android:paddingEnd="10dp">
 
                 <ImageView
                     android:id="@+id/navParamsIcon"
@@ -1054,36 +1099,38 @@
                     android:id="@+id/navParamsText"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
+                    android:layout_marginStart="6dp"
                     android:text="参数"
                     android:textColor="@color/text_secondary"
-                    android:textSize="10sp" />
+                    android:textSize="12sp" />
             </LinearLayout>
 
             <LinearLayout
-                android:id="@+id/navLog"
+                android:id="@+id/navGallery"
                 android:layout_width="0dp"
                 android:layout_height="match_parent"
                 android:layout_marginStart="4dp"
                 android:layout_weight="1"
                 android:gravity="center"
-                android:orientation="vertical">
+                android:orientation="horizontal"
+                android:paddingStart="10dp"
+                android:paddingEnd="10dp">
 
                 <ImageView
-                    android:id="@+id/navLogIcon"
+                    android:id="@+id/navGalleryIcon"
                     android:layout_width="18dp"
                     android:layout_height="18dp"
-                    android:src="@drawable/ic_nav_log"
+                    android:src="@drawable/ic_nav_gallery"
                     tools:ignore="ContentDescription" />
 
                 <TextView
-                    android:id="@+id/navLogText"
+                    android:id="@+id/navGalleryText"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:text="日志"
+                    android:layout_marginStart="6dp"
+                    android:text="相册"
                     android:textColor="@color/text_secondary"
-                    android:textSize="10sp" />
+                    android:textSize="12sp" />
             </LinearLayout>
         </LinearLayout>
 

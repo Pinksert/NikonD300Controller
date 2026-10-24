@@ -149,11 +149,38 @@ object NefPreview {
      *
      * 拼不出元数据段时原样返回 [jpg]，宁可少一段 EXIF，也不能把图弄坏。
      */
+    /**
+     * 把 NEF 的 EXIF 原样搬到一张 JPEG 上（[jpg] 可以是 LibRaw 解出来的成品，
+     * 不再限于机身内嵌的预览）。
+     *
+     * 拼不出元数据段时原样返回 [jpg]，宁可少一段 EXIF，也不能把图弄坏。
+     *
+     * ⚠️ 曾经这里**静默失败**：导出的 JPG 一个 EXIF 字节都没有，界面上却显示"导出成功"。
+     * 现在每一条退路都往 logcat 打一句（tag = `EXIF`），现场拿 `adb logcat -s EXIF`
+     * 就能知道是"没找到预览位置"还是"元数据段算出来太大塞不进 APP1"。
+     */
     fun attachExif(jpg: ByteArray, nef: ByteArray): ByteArray {
-        if (hasExif(jpg)) return jpg
-        val loc = runCatching { locate(nef) }.getOrNull() ?: return jpg
-        val imageStart = loc?.offset ?: nef.size.toLong()
-        val app1 = runCatching { buildExifApp1(nef, jpg, imageStart) }.getOrNull() ?: return jpg
+        if (hasExif(jpg)) {
+            android.util.Log.i("EXIF", "预览 JPEG 自带 APP1，不另插")
+            return jpg
+        }
+        val loc = runCatching { locate(nef) }.getOrNull()
+        if (loc == null) {
+            android.util.Log.w("EXIF", "没定位到 NEF 里的预览位置（NEF ${nef.size}B），放弃搬 EXIF")
+            return jpg
+        }
+        val imageStart = loc.offset
+        val app1 = runCatching { buildExifApp1(nef, jpg, imageStart) }.getOrNull()
+        if (app1 == null) {
+            android.util.Log.w("EXIF", "切不出元数据段（预览起点 $imageStart / 文件 ${nef.size}B）")
+            return jpg
+        }
+        if (app1.size + 2 > 0xFFFF) {
+            // APP1 的长度字段只有 16 位，塞不下就只能在"完整"和"能写进 JPEG"里二选一
+            android.util.Log.w("EXIF", "元数据段 ${app1.size + 2}B 超过 APP1 上限 65535，只能不搬")
+            return jpg
+        }
+        android.util.Log.i("EXIF", "已搬 EXIF：${app1.size}B")
         return insertApp1(jpg, app1)
     }
 
@@ -217,7 +244,10 @@ object NefPreview {
         if (u16(nef, 2, little) != 0x2A) return null
 
         val ifd0 = (u32(nef, 4, little) and 0xFFFFFFFFL).toInt()
-        if (ifd0 <= 8 || ifd0 + 6 > nef.size) return null
+        // ⚠️ 别写成 `ifd0 <= 8`：TIFF 头正好占 8 字节，**IFD0 绝大多数就落在偏移 8**，
+        // 那样写会把全部正常文件挡在门外（表现为"导出 JPG 一点 EXIF 都没有"，
+        // 而且因为是在数据装箱前返回，日志什么都不留下）。
+        if (ifd0 < 8 || ifd0 + 6 > nef.size) return null
         val count = u16(nef, ifd0, little)
         if (count == 0 || count > 512) return null
 
@@ -238,10 +268,17 @@ object NefPreview {
             val tag = u16(tiff, e, little)
             if (tag in DROP_IFD0) continue
             for (k in 0 until 12) tiff[p + k] = tiff[e + k]
+            val type = u16(tiff, e + 2, little)
+            // ⚠️ TIFF 的 count 字段是 **4 字节**（LONG），不是 2 字节 ——
+            // 用 u16 读会拿到高半截（大端文件里恒为 0），条件永远不成立。
             if (size != null && (tag == TAG_IMAGE_WIDTH || tag == TAG_IMAGE_LENGTH) &&
-                u16(tiff, e + 2, little) == 4   // LONG：值就在这 4 个字节里，直接改写
+                (u32(tiff, e + 4, little) and 0xFFFFFFFFL) == 1L     // count == 1：值就在这 4 个字节里
             ) {
-                put32(tiff, p + 8, if (tag == TAG_IMAGE_WIDTH) size.first else size.second, little)
+                val want = if (tag == TAG_IMAGE_WIDTH) size.first else size.second
+                when (type) {
+                    3 -> put16(tiff, p + 8, want, little)          // SHORT
+                    4 -> put32(tiff, p + 8, want, little)          // LONG（D300 就是这种）
+                }
             }
             p += 12
             kept++

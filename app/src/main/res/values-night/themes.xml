@@ -1,7 +1,12 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
     <!-- Base application theme. -->
     <style name="Base.Theme.NikonD300Controller" parent="Theme.Material3.DayNight.NoActionBar">
-        <!-- Customize your dark theme here. -->
-        <!-- <item name="colorPrimary">@color/my_dark_primary</item> -->
+        <!-- ★ 夜间资源限定符会整份覆盖 values/themes.xml 里的同名 style，
+             所以系统栏配色必须在这里再写一遍，否则相册页（GalleryActivity）
+             会顶回 Material3 默认的紫色系统栏。本 App 界面是自绘暗色，
+             跟系统深浅色无关，两个限定符下的配色一致。 -->
+        <item name="android:statusBarColor">@color/bg_base</item>
+        <item name="android:navigationBarColor">@color/bg_base</item>
+        <item name="android:windowBackground">@color/bg_base</item>
     </style>
 </resources>

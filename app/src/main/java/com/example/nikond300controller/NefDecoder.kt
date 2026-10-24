@@ -32,15 +32,19 @@ object NefDecoder {
     /** 把 [convertToPpm] 的错误码翻成一句中文/英文说明（LibRaw 自带文案） */
     external fun errorText(code: Int): String
 
-    /** 输出 JPEG 质量。92 是"肉眼无损但体积还能接受"的常用档 */
-    private const val JPEG_QUALITY = 92
+    /** JPEG 质量的档位（界面给的选项，按这个表压缩） */
+    val QUALITY_STEPS = intArrayOf(60, 75, 85, 92, 95, 100)
+
+    /** 默认质量。92 是"肉眼无损但体积还能接受"的常用档 */
+    const val QUALITY_DEFAULT = 92
 
     /**
      * @param nef NEF 原文件字节
      * @param cacheDir 临时目录中转（native 只吃文件路径）
+     * @param quality JPEG 质量 1..100（见 [QUALITY_STEPS]）
      * @return 转好的 JPEG 字节（带 EXIF）；失败返回 null，调用方退回存原文件
      */
-    fun toJpeg(nef: ByteArray, cacheDir: File): ByteArray? {
+    fun toJpeg(nef: ByteArray, cacheDir: File, quality: Int = QUALITY_DEFAULT): ByteArray? {
         // ★ 文件名必须按线程区分：批量导出是多个解码线程并发调这里，
         //   写死名字的话两个线程会抢同一个 nef_in.tmp —— 一个写一半被另一个覆盖，
         //   解出来就是花屏或者"文件不存在"。
@@ -57,7 +61,7 @@ object NefDecoder {
             val bmp = readPpm(outFile) ?: return null
             try {
                 val jpeg = ByteArrayOutputStream()
-                bmp.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, jpeg)
+                bmp.compress(Bitmap.CompressFormat.JPEG, quality.coerceIn(1, 100), jpeg)
                 // 解码出来的画面是"图像"，EXIF 得从原 NEF 搬过去 —— 不然导出去的照片
                 // 没有拍摄日期/曝光参数，在手机相册里按时间排也排不进正确位置。
                 NefPreview.attachExif(jpeg.toByteArray(), nef)

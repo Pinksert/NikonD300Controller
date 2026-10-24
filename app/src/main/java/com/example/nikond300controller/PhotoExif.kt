@@ -23,29 +23,38 @@ object PhotoExif {
         val focalLength: String? = null,
         val exposureBias: String? = null,
         val whiteBalance: String? = null,
-        val meteringMode: String? = null
+        val meteringMode: String? = null,
+        /** 曝光档位（曝光模式）：拍摄那一刻模式转盘在哪一档，中文短名 */
+        val exposureProgram: String? = null,
+        /** 曝光档位的机内字母代号（P / S / A / M），非 D300 转盘档位时为空 */
+        val exposureProgramCode: String? = null
     ) {
         /** 是否什么都没读到 */
         val isEmpty: Boolean
             get() = dateTime == null && exposureTime == null && fNumber == null &&
                 iso == null && focalLength == null && exposureBias == null &&
-                whiteBalance == null && meteringMode == null
+                whiteBalance == null && meteringMode == null && exposureProgram == null
 
         /**
          * 给查看器按行分组（仿机内「总体数据」页的图标风格）：
-         * 第一行日期 / 第二行 ISO·快门·光圈·焦距 / 第三行 补偿·白平衡·测光。
+         * 第一行日期 / 第二行 ISO·快门·光圈·焦距 / 第三行 曝光档位·补偿·白平衡·测光。
          * 缺哪项就跳过哪项，不会出现 "null" 或 "—"；整行都缺则该行不渲染。
          */
         fun rows(): List<List<Chip>> {
             val date = ArrayList<Chip>(1)
             val exposure = ArrayList<Chip>(4)
-            val extra = ArrayList<Chip>(3)
+            // 曝光档位放第一位：它是"这张片是怎么曝的"的总纲，后面的补偿/测光挂在它下面
+            val extra = ArrayList<Chip>(4)
             dateTime?.let { date.add(Chip(it, iconRes = R.drawable.ic_date)) }
             iso?.let { exposure.add(Chip(it, symbol = "ISO")) }
             exposureTime?.let { exposure.add(Chip(it, symbol = "⏱")) }
             // 光圈用机内写法 F + 数值（F5.6）；补偿值自身已带 +/- 号，前面不再加 "±"
             fNumber?.let { exposure.add(Chip(it, symbol = "F")) }
             focalLength?.let { exposure.add(Chip(it)) }
+            exposureProgram?.let {
+                // 以前这里挂的是 ◑ —— 脱离机身界面没人猜得出那是曝光模式。
+                extra.add(Chip(it, symbol = exposureProgramCode.orEmpty(), symbolBold = true))
+            }
             exposureBias?.let { extra.add(Chip(it, signOrange = true)) }
             whiteBalance?.let { extra.add(Chip(it, symbol = "WB")) }
             meteringMode?.let { extra.add(Chip(it, symbol = "⊙")) }
@@ -61,7 +70,9 @@ object PhotoExif {
         /** 矢量图标资源，0 表示不带 */
         val iconRes: Int = 0,
         /** 数值首位的 +/- 是否染橙色（曝光补偿） */
-        val signOrange: Boolean = false
+        val signOrange: Boolean = false,
+        /** 文本符号要不要加粗（曝光档位的 P / S / A / M） */
+        val symbolBold: Boolean = false
     )
 
     fun parse(data: ByteArray): Summary = runCatching { parseInner(data) }.getOrDefault(Summary())
@@ -84,6 +95,7 @@ object PhotoExif {
         val bias = exifIfd?.let { signedRational(data, tiff, it, TAG_EXPOSURE_BIAS, little) }
         val wb = exifIfd?.let { entryNumber(data, tiff, it, TAG_WHITE_BALANCE, little) }
         val metering = exifIfd?.let { entryNumber(data, tiff, it, TAG_METERING_MODE, little) }
+        val program = exifIfd?.let { entryNumber(data, tiff, it, TAG_EXPOSURE_PROGRAM, little) }
 
         return Summary(
             dateTime = formatDateTime(dateTimeOriginal),
@@ -106,9 +118,29 @@ object PhotoExif {
                 5 -> "矩阵测光"
                 6 -> "局部测光"
                 else -> null
-            }
+            },
+            exposureProgram = EXPOSURE_PROGRAMS[program?.toInt()]?.second,
+            exposureProgramCode = EXPOSURE_PROGRAMS[program?.toInt()]?.first?.takeIf { it.isNotEmpty() }
         )
     }
+
+    /**
+     * 曝光档位（EXIF ExposureProgram 0x8822）：机内字母代号 + 中文短名。
+     *
+     * D300 转盘上只有 P / S / A / M 四档，机内「总体数据」页就是拿这几个字母标的，
+     * 查看详情时也照这个口径 —— 字母比 4 个字的中文名更好扫，旁边留短名兜住可读性。
+     * 5–8 那几档是其它厂的场景程序，这台机器写不出来，只留中文名、不带字母。
+     */
+    private val EXPOSURE_PROGRAMS = mapOf(
+        1 to ("M" to "手动"),
+        2 to ("P" to "程序自动"),
+        3 to ("A" to "光圈优先"),
+        4 to ("S" to "快门优先"),
+        5 to ("" to "创意程序"),
+        6 to ("" to "运动模式"),
+        7 to ("" to "人像模式"),
+        8 to ("" to "风景模式")
+    )
 
     // ---------------- 格式化 ----------------
 
@@ -156,6 +188,7 @@ object PhotoExif {
     private const val TAG_EXPOSURE_BIAS = 0x9204
     private const val TAG_WHITE_BALANCE = 0xA403
     private const val TAG_METERING_MODE = 0x9207
+    private const val TAG_EXPOSURE_PROGRAM = 0x8822
 
     /** NEF 就是 TIFF（从 0 开始）；JPEG 要先跳过 APP1 里的 "Exif\0\0" */
     private fun findTiffBase(data: ByteArray): Int? {

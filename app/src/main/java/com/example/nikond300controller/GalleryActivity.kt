@@ -1,6 +1,7 @@
 package com.example.nikond300controller
 
 import android.content.ContentValues
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Bundle
@@ -134,6 +135,8 @@ class GalleryActivity : AppCompatActivity() {
     private lateinit var viewerInfo: TextView
     private lateinit var exifBar: LinearLayout
     private lateinit var saveButton: Button
+    private lateinit var viewerJpgButton: Button
+    private lateinit var viewerDeleteButton: Button
 
     // ---- 多选导出 ----
     private lateinit var selectionBar: LinearLayout
@@ -142,9 +145,12 @@ class GalleryActivity : AppCompatActivity() {
     private lateinit var selStatus: TextView
     private lateinit var selJpgButton: Button
     private lateinit var selExportButton: Button
+    private lateinit var selQualityButton: Button
 
-    /** 导出时把 NEF 用内嵌预览转成 JPG（JPEG 原文件不受影响，直接拷字节） */
+    /** 导出时把 NEF 用 LibRaw 真解成 JPG（JPEG 原文件不受影响，直接拷字节） */
     private var exportAsJpg = false
+    /** NEF → JPG 的压缩质量（只对转档生效；JPEG 原件是原样拷贝） */
+    private var jpegQuality = NefDecoder.QUALITY_DEFAULT
     /** 正在导出时锁住操作条，避免重复点 */
     @Volatile
     private var exporting = false
@@ -370,6 +376,18 @@ class GalleryActivity : AppCompatActivity() {
         }
         selExportButton = findViewById(R.id.selExportButton)
         selExportButton.setOnClickListener { exportSelected() }
+
+        selQualityButton = findViewById(R.id.selQualityButton)
+        selQualityButton.setOnClickListener { showQualityPicker() }
+        updateQualityButtonText()
+
+        // ---- 单张查看器：导出 JPG / 从相机删除 ----
+        viewerJpgButton = findViewById(R.id.viewerJpgButton)
+        // 先挑品质再导出：默认那一档（92）已经预选上，直接点就走默认，
+        // 想换档也不用先去别处设 —— 和"导出"这件事在同一屏里完成。
+        viewerJpgButton.setOnClickListener { exportCurrentAsJpgWithQuality() }
+        viewerDeleteButton = findViewById(R.id.viewerDeleteButton)
+        viewerDeleteButton.setOnClickListener { confirmDeleteCurrent() }
 
         // 全屏查看时，返回键先关查看层而不是直接退出相册
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
@@ -763,7 +781,7 @@ class GalleryActivity : AppCompatActivity() {
 
     /**
      * EXIF chip 条：仿机内「总体数据」页 —— 图标/符号+数值的小块，不再写"快门/光圈"这类词。
-     * 三行：日期 / ISO·快门·光圈·焦距 / 补偿·白平衡·测光（分组由 [PhotoExif.Summary.rows] 定）。
+     * 三行：日期 / ISO·快门·光圈·焦距 / 曝光档位·补偿·白平衡·测光（分组由 [PhotoExif.Summary.rows] 定）。
      * EXIF 还没解析完时整块隐藏，不留空档。
      */
     private fun renderExifBar() {
@@ -804,6 +822,14 @@ class GalleryActivity : AppCompatActivity() {
                     android.text.style.ForegroundColorSpan(amber),
                     0, c.symbol.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
                 )
+                // 曝光档位的 P / S / A / M：单字母要挑得出来，
+                // 加粗之后和后面的中文短名拉开主次，一眼就能扫到是哪一档
+                if (c.symbolBold) {
+                    body.setSpan(
+                        android.text.style.StyleSpan(android.graphics.Typeface.BOLD),
+                        0, c.symbol.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                    )
+                }
             }
             // 曝光补偿：值首位的符号（+ / - / 归零时的 ±）也染强调色，
             // 和上面图标/符号同一套高亮 —— 0 EV 时写成 "±0.0"，那个 ± 同样要亮
@@ -821,11 +847,89 @@ class GalleryActivity : AppCompatActivity() {
         }
 
         rows.forEach { rowChips ->
-            exifBar.addView(LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
+            // 自己折行，不用横向 LinearLayout：第三行加了「曝光档位」之后有四项，
+            // 窄屏一行放不下，LinearLayout 会把最后那一块压扁而不是换行。
+            exifBar.addView(WrapRow(this).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+                )
                 rowChips.forEach { addView(chip(it)) }
             })
         }
+    }
+
+    /**
+     * 让 chip 自动折行的容器：横向铺不下就往下一行排。
+     *
+     * 没引 Flexbox 那类库 —— 只为这一个地方加一条依赖不划算；
+     * 逻辑就是"按顺序摆，放不下就换行"，几十行够用。
+     */
+    private class WrapRow(context: Context) : ViewGroup(context) {
+        private var childX = IntArray(0)
+        private var childY = IntArray(0)
+        private val gap: Int = (6 * context.resources.displayMetrics.density).toInt()
+
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            val avail = if (MeasureSpec.getMode(widthMeasureSpec) == MeasureSpec.UNSPECIFIED) {
+                Int.MAX_VALUE
+            } else {
+                (MeasureSpec.getSize(widthMeasureSpec) - paddingLeft - paddingRight).coerceAtLeast(0)
+            }
+            childX = IntArray(childCount)
+            childY = IntArray(childCount)
+            val heights = IntArray(childCount)
+
+            var x = 0
+            var y = 0
+            var lineH = 0
+            var widest = 0
+            for (i in 0 until childCount) {
+                val c = getChildAt(i)
+                measureChild(
+                    c,
+                    MeasureSpec.makeMeasureSpec(avail, MeasureSpec.AT_MOST),
+                    heightMeasureSpec
+                )
+                val lp = c.layoutParams as? MarginLayoutParams
+                val need = c.measuredWidth + (lp?.leftMargin ?: 0) + (lp?.rightMargin ?: 0) + gap
+                if (x > 0 && x + need - gap > avail) {
+                    y += lineH
+                    lineH = 0
+                    x = 0
+                }
+                childX[i] = x + (lp?.leftMargin ?: 0)
+                childY[i] = y + (lp?.topMargin ?: 0)
+                heights[i] = c.measuredHeight
+                x += need
+                widest = maxOf(widest, x - gap)
+                lineH = maxOf(lineH, c.measuredHeight + (lp?.topMargin ?: 0) + (lp?.bottomMargin ?: 0))
+            }
+
+            setMeasuredDimension(
+                resolveSize(widest + paddingLeft + paddingRight, widthMeasureSpec),
+                resolveSize(y + lineH + paddingTop + paddingBottom, heightMeasureSpec)
+            )
+        }
+
+        override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
+            for (i in 0 until childCount) {
+                val c = getChildAt(i)
+                if (c.visibility == GONE) continue
+                c.layout(
+                    paddingLeft + childX[i],
+                    paddingTop + childY[i],
+                    paddingLeft + childX[i] + c.measuredWidth,
+                    paddingTop + childY[i] + c.measuredHeight
+                )
+            }
+        }
+
+        override fun checkLayoutParams(p: LayoutParams?): Boolean = p is MarginLayoutParams
+        override fun generateDefaultLayoutParams(): LayoutParams =
+            MarginLayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT)
+        override fun generateLayoutParams(attrs: android.util.AttributeSet?): LayoutParams =
+            MarginLayoutParams(context, attrs)
+        override fun generateLayoutParams(p: LayoutParams?): LayoutParams = MarginLayoutParams(p)
     }
 
     /**
@@ -1040,6 +1144,35 @@ class GalleryActivity : AppCompatActivity() {
             viewerProgress.visibility = View.GONE
             renderViewerInfo("未连接相机")
             return
+        }
+
+        // ---- 删除按钮：先问机身认不认 0x100B，认不了就当场禁掉 ----
+        //
+        // 标准 PTP 的删除对象是 **0x100B**（不是 0x910B —— 那个码在 D300 固件
+        // 的操作调度表里根本不存在，发过去机身一声不吭，usbLock 一直攥着，
+        // 整条 USB 通道就全堵死了，表现就是"点了没反应 + 之后什么都发不出去"）。
+        // 但"码对"≠"这台机器支持"：D300 的 OperationsSupported 未必列它，
+        // 所以打开查看器时查一次，不支持就把按钮禁用并写明原因，
+        // 而不是让用户按完删除才弹一句"做不到"。
+        viewerDeleteButton.isEnabled = true
+        viewerDeleteButton.alpha = 1f
+        viewerDeleteButton.text = "从相机删除"
+        bg {
+            val canDelete = ptp.supportsOperation(PtpConstants.OP_DELETE_OBJECT)
+            if (!pageAlive || token != viewerToken) return@bg
+            runOnUiThread {
+                if (!pageAlive || token != viewerToken) return@runOnUiThread
+                if (canDelete == false) {
+                    viewerDeleteButton.isEnabled = false
+                    viewerDeleteButton.alpha = 0.35f
+                    viewerDeleteButton.text = "删除（机身不支持）"
+                    android.util.Log.i("GALLERY", "机身 OperationsSupported 不含 0x100B，已禁用删除")
+                } else {
+                    viewerDeleteButton.isEnabled = true
+                    viewerDeleteButton.alpha = 1f
+                    viewerDeleteButton.text = "从相机删除"
+                }
+            }
         }
 
         // 字节已经在缓存里（刚看过 / 刚导出过）：不用再走 USB，图 + EXIF 立刻到位
@@ -1309,7 +1442,7 @@ class GalleryActivity : AppCompatActivity() {
                     // NEF 转 JPG：**真解 RAW**（LibRaw），不再抠机身内嵌的那张预览 ——
                     // 那张预览只有 239 KB，画质和体积都不像一张正常照片。
                     // 解出来的图没有 EXIF，NefDecoder 内部会把原 NEF 的元数据搬进 APP1。
-                    val jpg = NefDecoder.toJpeg(bytes, cacheDir)
+                    val jpg = NefDecoder.toJpeg(bytes, cacheDir, jpegQuality)
                     if (jpg == null) {
                         // 解不出来就退回存原文件，别把这张丢了
                         if (writeToPhone(e.info.filename, "image/x-nikon-nef", bytes)) ok.incrementAndGet()
@@ -1393,6 +1526,179 @@ class GalleryActivity : AppCompatActivity() {
 
     /** 流水线里传的一张活；entry 为 null 是收工哨兵 */
     private data class ExportJob(val entry: Entry?, val bytes: ByteArray?)
+
+    // ---------------- JPG 品质 ----------------
+
+    private fun updateQualityButtonText() {
+        selQualityButton.text = "JPG 品质 $jpegQuality"
+        selQualityButton.setTextColor(
+            ContextCompat.getColor(
+                this,
+                // 低于 85 画质差别开始看得出，标一下让用户意识到自己选了"小文件"
+                if (jpegQuality < 85) R.color.accent_amber else R.color.text_secondary
+            )
+        )
+    }
+
+    /**
+     * 挑导出 JPG 的压缩质量。只对 NEF 转档生效 —— JPEG 原件是整份拷贝，改不了也改不好。
+     *
+     * @param onPicked 给了回调就"选完顺手执行"（单张导出按钮走这条路）；
+     *                 没给就只是把选出那档记住（多选操作条上的品质按钮走这条路）。
+     */
+    private fun showQualityPicker(onPicked: ((Int) -> Unit)? = null) {
+        val steps = NefDecoder.QUALITY_STEPS
+        val labels = steps.map { q ->
+            when {
+                q == NefDecoder.QUALITY_DEFAULT -> "$q（默认，肉眼无损）"
+                q >= 100 -> "$q（几乎无损，体积最大）"
+                q >= 92 -> "$q（推荐，肉眼无损）"
+                q >= 85 -> "$q（平衡体积与画质）"
+                else -> "$q（体积小，放大能看到压缩痕迹）"
+            }
+        }.toTypedArray()
+        val current = steps.indexOf(jpegQuality)
+        android.app.AlertDialog.Builder(this)
+            .setTitle("导出 JPG 的品质")
+            .setSingleChoiceItems(labels, current) { d, which ->
+                val q = steps[which]
+                jpegQuality = q
+                updateQualityButtonText()
+                d.dismiss()
+                onPicked?.invoke(q)
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    // ---------------- 单张：导出 JPG / 删除 ----------------
+
+    /** 单张「导出为 JPG」：弹出品质选择，选完立即导出 */
+    private fun exportCurrentAsJpgWithQuality() {
+        val entry = currentEntry ?: return
+        PtpUsbConnection.activeInstance
+            ?: run {
+                Toast.makeText(this, "未连接相机", Toast.LENGTH_SHORT).show()
+                return
+            }
+        // JPEG 原件是整份拷贝、不经 LibRaw 重编码，品质选了也没用 —— 别拿假选项糊弄人
+        if (entry.info.isJpeg) {
+            exportCurrentAsJpg()
+            return
+        }
+        showQualityPicker { exportCurrentAsJpg() }
+    }
+
+    /** 把当前这张导出成 JPG 到手机：NEF 走 LibRaw 真解 + 搬 EXIF，JPEG 原件直接拷 */
+    private fun exportCurrentAsJpg() {
+        val entry = currentEntry ?: return
+        val ptp = PtpUsbConnection.activeInstance
+        if (ptp == null) {
+            Toast.makeText(this, "未连接相机", Toast.LENGTH_SHORT).show()
+            return
+        }
+        viewerJpgButton.isEnabled = false
+        viewerProgress.visibility = View.VISIBLE
+
+        // 已有整份字节就直接用（查看大图已经拉过一次了，别再传第二遍）
+        val cached = currentBytes
+        thread {
+            val bytes = cached ?: fetchFull(ptp, entry.info)
+            if (bytes == null) {
+                runOnUiThread {
+                    Toast.makeText(this, "取原图失败", Toast.LENGTH_SHORT).show()
+                    afterCurrentExport()
+                }
+                return@thread
+            }
+            val (outBytes, name) = if (entry.info.isJpeg) {
+                bytes to entry.info.filename
+            } else {
+                val jpg = NefDecoder.toJpeg(bytes, cacheDir, jpegQuality)
+                if (jpg == null) {
+                    runOnUiThread { Toast.makeText(this, "这张 NEF 解不出来", Toast.LENGTH_SHORT).show() }
+                    afterCurrentExport()
+                    return@thread
+                }
+                jpg to (entry.info.filename.substringBeforeLast('.') + ".jpg")
+            }
+            val ok = writeToPhone(name, "image/jpeg", outBytes)
+            runOnUiThread {
+                Toast.makeText(
+                    this,
+                    if (ok) "已导出 $name（${formatSize(outBytes.size.toLong())}）" else "导出失败",
+                    Toast.LENGTH_LONG
+                ).show()
+                afterCurrentExport()
+            }
+        }
+    }
+
+    private fun afterCurrentExport() {
+        viewerProgress.visibility = View.GONE
+        viewerJpgButton.isEnabled = true
+    }
+
+    /**
+     * 删除当前这张（不可恢复）。
+     *
+     * 二次确认是必须的：PTP 删除没有回收站，而且这是在删用户相机里的原始素材，
+     * 手机上的副本并不能代表这个动作可以撤销。
+     */
+    private fun confirmDeleteCurrent() {
+        val entry = currentEntry ?: return
+        val ptp = PtpUsbConnection.activeInstance
+        if (ptp == null) {
+            Toast.makeText(this, "未连接相机", Toast.LENGTH_SHORT).show()
+            return
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("从相机删除这张？")
+            .setMessage("${entry.info.filename}\n\n卡上的原文件会被删掉，不可恢复。")
+            .setNegativeButton("取消", null)
+            .setPositiveButton("删除") { _, _ ->
+                viewerDeleteButton.isEnabled = false
+                viewerProgress.visibility = View.VISIBLE
+                thread {
+                    // ★ 先问机身认不认这条命令，别硬发：
+                    // 不支持的命令发出去后机身可能一声不吭，usbLock 一直攥着，
+                    // 整条 USB 通道就全堵死了（"点了没反应 + 之后什么都发不出去"）。
+                    val supported = ptp.supportsOperation(PtpConstants.OP_DELETE_OBJECT)
+                    android.util.Log.i("GALLERY", "机身支持 0x100B DeleteObject？ $supported")
+                    if (supported == false) {
+                        runOnUiThread {
+                            finishDelete(false, "机身不支持 USB 删除，请用机身上的删除键")
+                        }
+                        return@thread
+                    }
+                    val (ok, why) = ptp.deleteObject(entry.info.handle)
+                    runOnUiThread { finishDelete(ok, why, entry) }
+                }
+            }
+            .show()
+    }
+
+    /** 删除的收尾：结果提示 + 成功才从列表摘掉 */
+    private fun finishDelete(ok: Boolean, why: String, entry: Entry? = null) {
+        viewerProgress.visibility = View.GONE
+        viewerDeleteButton.isEnabled = true
+        if (!ok) {
+            Toast.makeText(this, "删除失败：$why", Toast.LENGTH_LONG).show()
+            return
+        }
+        val name = entry?.info?.filename
+        if (entry != null) {
+            Toast.makeText(this, "已删除 $name", Toast.LENGTH_SHORT).show()
+            // 从列表里摘掉，别让它还挂在网格上显示（点开只会再报一遍错）
+            val idx = entries.indexOfFirst { it.info.handle == entry.info.handle }
+            if (idx >= 0) {
+                entries.removeAt(idx)
+                adapter.notifyItemRemoved(idx)
+                updateCountText()
+            }
+        }
+        if (entry != null) closeViewer()
+    }
 
     private fun saveCurrent() {
         val entry = currentEntry ?: return

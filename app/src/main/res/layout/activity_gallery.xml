@@ -175,29 +175,18 @@
                 android:layout_marginTop="10dp"
                 android:orientation="horizontal">
 
-                <!-- JPG 品质：只对 NEF 转档有意义（JPEG 原件是直接拷字节，动不了画质）。
-                     点一下给出几档可选，省的可以按 60/75 压小——同传异地能用一半流量。 -->
-                <androidx.appcompat.widget.AppCompatButton
-                    android:id="@+id/selQualityButton"
-                    android:layout_width="0dp"
-                    android:layout_height="42dp"
-                    android:layout_weight="1"
-                    android:background="@drawable/bg_btn_dark"
-                    android:stateListAnimator="@null"
-                    android:text="JPG 品质 92"
-                    android:textAllCaps="false"
-                    android:textColor="@color/text_secondary"
-                    android:textSize="13sp" />
-
+                <!-- 两个按钮都直接导出，区别只在"要不要把 NEF 转成 JPG"：
+                     原图导出 = 相机里是什么字节就存什么字节（NEF 原片一张十几 MB）；
+                     JPG 导出 = NEF 用 LibRaw 真解再压 JPG，JPEG 原件仍原样拷贝。
+                     JPG 导出那颗**长按**改压缩品质（按钮第二行写着当前档位）。 -->
                 <androidx.appcompat.widget.AppCompatButton
                     android:id="@+id/selJpgButton"
                     android:layout_width="0dp"
-                    android:layout_height="42dp"
-                    android:layout_marginStart="8dp"
+                    android:layout_height="48dp"
                     android:layout_weight="1"
                     android:background="@drawable/bg_btn_dark"
                     android:stateListAnimator="@null"
-                    android:text="转为 JPG"
+                    android:text="JPG 导出"
                     android:textAllCaps="false"
                     android:textColor="@color/text_secondary"
                     android:textSize="13sp" />
@@ -205,12 +194,12 @@
                 <androidx.appcompat.widget.AppCompatButton
                     android:id="@+id/selExportButton"
                     android:layout_width="0dp"
-                    android:layout_height="42dp"
+                    android:layout_height="48dp"
                     android:layout_marginStart="8dp"
                     android:layout_weight="1"
                     android:background="@drawable/bg_btn_amber"
                     android:stateListAnimator="@null"
-                    android:text="导出到手机"
+                    android:text="原图导出"
                     android:textAllCaps="false"
                     android:textColor="#0B0E13"
                     android:textSize="13sp"
@@ -300,7 +289,7 @@
                     android:layout_weight="1"
                     android:background="@drawable/bg_btn_dark"
                     android:stateListAnimator="@null"
-                    android:text="保存到手机"
+                    android:text="原图导出"
                     android:textAllCaps="false"
                     android:textColor="@color/text_primary"
                     android:textSize="13sp" />
@@ -313,7 +302,7 @@
                     android:layout_weight="1"
                     android:background="@drawable/bg_btn_amber"
                     android:stateListAnimator="@null"
-                    android:text="导出为 JPG"
+                    android:text="JPG 导出"
                     android:textAllCaps="false"
                     android:textColor="#0B0E13"
                     android:textSize="13sp"

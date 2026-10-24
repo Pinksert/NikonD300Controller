@@ -162,6 +162,7 @@
                          一旦录制按钮隐藏，峰值就孤零零留在第二行的位置上。
                          包成横向LinearLayout后，隐藏的那个自动让出位置，排布始终紧凑。 -->
                     <LinearLayout
+                        android:id="@+id/lvTopTools"
                         android:layout_width="wrap_content"
                         android:layout_height="28dp"
                         android:layout_gravity="top|start"
@@ -370,7 +371,7 @@
                             android:gravity="center"
                             android:paddingStart="14dp"
                             android:paddingEnd="14dp"
-                            android:text="AF"
+                            android:text="对焦"
                             android:textColor="@color/text_primary"
                             android:textSize="13sp"
                             android:textStyle="bold" />

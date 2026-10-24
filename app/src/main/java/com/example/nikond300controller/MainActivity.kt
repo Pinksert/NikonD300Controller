@@ -13,6 +13,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
 import android.widget.Button
+import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.TextView
@@ -110,9 +111,11 @@ class MainActivity : AppCompatActivity(), SheetHost {
     private lateinit var topStatusBar: LinearLayout
     /** 顶栏那一行（机身状态 + 相册 + 电量）—— 全屏时收起它，而不是收整块 topStatusBar */
     private lateinit var topBarRow: LinearLayout
-    /** 全屏操作条：放大 / 缩小 / AF / 拍摄（只在全屏时出现） */
+    /** 全屏操作条：放大 / 缩小 / 对焦 / 拍摄（只在全屏时出现） */
     private lateinit var lvFullControls: LinearLayout
     private lateinit var lvZoomText: TextView
+    /** 左上角取景工具条（录制 / 峰值 / 触摸对焦）—— 全屏时整条跟着画面上沿走 */
+    private lateinit var lvTopTools: LinearLayout
 
     /**
      * 机身取景放大（0xD1A3）当前档位：0 = 全画面，往上逐级放大。
@@ -613,22 +616,39 @@ class MainActivity : AppCompatActivity(), SheetHost {
                     }
                 }
             } else if (UsbManager.ACTION_USB_DEVICE_DETACHED == intent.action) {
-                log("相机已断开（USB 拔出）")
-                disconnect()
+                // ★ 收到广播**不要**立刻断开。
+                // OTG 线被碰一下、或手机给 USB 口断电再上电（锁屏/切后台时很常见），
+                // 系统都会先发 DETACHED 再发 ATTACHED —— 立刻 disconnect() 的话，
+                // 每一次抖动都会变成一次完整的"断开 + 重连"，界面跟着闪一轮。
+                // 这里先挂 1.2 秒，到点再确认设备是不是真没了（见 confirmUsbGone）。
+                statusHandler.removeCallbacks(usbGoneRunnable)
+                usbGoneAt = System.currentTimeMillis()
+                log("收到 USB 拔出广播，等 1.2 秒确认是不是抖动…")
+                statusHandler.postDelayed(usbGoneRunnable, 1200)
             } else if (UsbManager.ACTION_USB_DEVICE_ATTACHED == intent.action) {
                 // 运行中重新插上相机：以前只有冷启动（onCreate 里的 intent）会连，
                 // 热插拔全靠用户手动点按钮，拔一次就得重启 App 一次。
-                log("检测到 USB 设备插入")
-                if (isConnected) { log("已有连接，忽略") ; return }
                 val device: UsbDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
                 } else {
                     @Suppress("DEPRECATION")
                     intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
                 }
-                if (device != null && device.vendorId == PtpConstants.USB_VENDOR_NIKON) {
-                    log("检测到相机，正在自动连接…")
-                    requestPermissionOrConnect(device)
+                if (device == null || device.vendorId != PtpConstants.USB_VENDOR_NIKON) return
+
+                statusHandler.removeCallbacks(usbGoneRunnable)
+                val flapped = usbGoneAt != 0L && System.currentTimeMillis() - usbGoneAt < 5000
+                usbGoneAt = 0
+                when {
+                    flapped -> {
+                        log("USB 抖了一下又回来了，静默重建会话（不打断当前操作）")
+                        reconnectAfterFlap(device)
+                    }
+                    isConnected -> log("检测到 USB 设备插入，已有连接，忽略")
+                    else -> {
+                        log("检测到相机，正在自动连接…")
+                        requestPermissionOrConnect(device)
+                    }
                 }
             }
         }
@@ -771,8 +791,9 @@ class MainActivity : AppCompatActivity(), SheetHost {
         lvFullscreenButton = findViewById(R.id.lvFullscreenButton)
         lvFullscreenButton.setOnClickListener { toggleLiveViewFullscreen() }
 
-        // ---- 全屏操作条（放大/缩小 · AF · 拍摄）----
+        // ---- 全屏操作条（放大/缩小 · 对焦 · 拍摄）----
         lvFullControls = findViewById(R.id.lvFullControls)
+        lvTopTools = findViewById(R.id.lvTopTools)
         lvZoomText = findViewById(R.id.lvZoomText)
         findViewById<View>(R.id.lvZoomOutButton).setOnClickListener { stepLvZoom(false) }
         findViewById<View>(R.id.lvZoomInButton).setOnClickListener { stepLvZoom(true) }
@@ -801,6 +822,10 @@ class MainActivity : AppCompatActivity(), SheetHost {
 
         statusDot = findViewById(R.id.statusDot)
         viewfinder = findViewById(R.id.viewfinder)
+        // 转屏 / 折叠屏展开这类尺寸变化：全屏时按钮位置得跟着新的画面矩形重算
+        viewfinder.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            if (isLvFullscreen) applyFullscreenControlOffsets()
+        }
         shootSpacer = findViewById(R.id.shootSpacer)
         setViewfinderExpanded(false)
         logContainer = findViewById(R.id.logContainer)
@@ -3607,6 +3632,102 @@ class MainActivity : AppCompatActivity(), SheetHost {
             } else {
                 ctl.show(WindowInsetsCompat.Type.systemBars())
             }
+        }
+
+        // 全屏后取景框尺寸才最终确定（顶栏 padding 刚被清零），
+        // 所以要等一帧布局结束再按真实画面算按钮位置；退出全屏走同一函数还原。
+        viewfinder.post { applyFullscreenControlOffsets() }
+    }
+
+    // =====================================================================
+    // 全屏：把上/下两组按钮贴到画面上下沿
+    // =====================================================================
+
+    /**
+     * 竖屏手机上 3:2 的取景画面只占屏幕中间一条，上下各留一大块黑边；
+     * 而按钮是按**整个取景框**贴边排的（上 12dp / 下 52dp），
+     * 于是"画面在中间、按钮在两头"，眼睛要在画面和按钮之间来回跳。
+     *
+     * 这里按画面真正画到哪（[lvImageBounds]，跟着 imageMatrix 走，放大时也准）
+     * 重新给上下两组按钮定边距，让它们贴着画面内缩 8dp。
+     * 退出全屏时把记下来的原始边距还原，非全屏下的排布一点不变。
+     */
+    private var lvSavedControlMargins: IntArray? = null
+
+    private fun applyFullscreenControlOffsets() {
+        if (!::lvTopTools.isInitialized) return
+
+        if (!isLvFullscreen) {
+            lvSavedControlMargins?.let { m ->
+                setTopMargin(lvTopTools, m[0])
+                setTopMargin(exposurePreviewButton, m[1])
+                setTopMargin(lvFullscreenButton, m[2])
+                setBottomMargin(lvFullControls, m[3])
+            }
+            return
+        }
+        if (lvSavedControlMargins == null) {
+            lvSavedControlMargins = intArrayOf(
+                topMarginOf(lvTopTools),
+                topMarginOf(exposurePreviewButton),
+                topMarginOf(lvFullscreenButton),
+                bottomMarginOf(lvFullControls)
+            )
+        }
+
+        val frameH = viewfinder.height
+        if (frameH <= 0) return
+        val d = resources.displayMetrics.density
+        val pad = (8 * d).toInt()
+        val toolsH = (28 * d).toInt()      // 顶部工具条固定 28dp
+        val gap = (8 * d).toInt()          // 工具条与曝光预览之间的间距
+
+        val (imgTop, imgBottom) = lvImageBounds()
+        setTopMargin(lvTopTools, imgTop + pad)
+        setTopMargin(exposurePreviewButton, imgTop + pad + toolsH + gap)
+        setTopMargin(lvFullscreenButton, imgTop + pad)
+        // 控件是 bottom 对齐的：底边距 = 画面下沿到取景框底边的距离 + 内缩量
+        setBottomMargin(lvFullControls, (frameH - imgBottom + pad).coerceAtLeast(0))
+    }
+
+    /** 取景画面在取景框里的上下沿；取不到（还没开取景）就按整块算 */
+    private fun lvImageBounds(): Pair<Int, Int> {
+        val iv = liveViewImage
+        val dr = iv.drawable
+        if (dr != null && dr.intrinsicWidth > 0 && dr.intrinsicHeight > 0 && iv.height > 0) {
+            val r = android.graphics.RectF(
+                0f, 0f, dr.intrinsicWidth.toFloat(), dr.intrinsicHeight.toFloat()
+            )
+            iv.imageMatrix.mapRect(r)   // drawable 像素坐标 → 控件坐标
+            val inside = r.bottom <= iv.height + 2f
+            if (r.height() > 1 && inside) {
+                return (iv.top + r.top.toInt()).coerceAtLeast(0) to
+                    (iv.top + r.bottom.toInt()).coerceAtMost(viewfinder.height)
+            }
+        }
+        return 0 to viewfinder.height
+    }
+
+    private fun lpOf(v: View): FrameLayout.LayoutParams? =
+        v.layoutParams as? FrameLayout.LayoutParams
+
+    private fun topMarginOf(v: View): Int = lpOf(v)?.topMargin ?: 0
+
+    private fun bottomMarginOf(v: View): Int = lpOf(v)?.bottomMargin ?: 0
+
+    private fun setTopMargin(v: View, value: Int) {
+        lpOf(v)?.let { lp ->
+            if (lp.topMargin == value) return
+            lp.topMargin = value
+            v.layoutParams = lp
+        }
+    }
+
+    private fun setBottomMargin(v: View, value: Int) {
+        lpOf(v)?.let { lp ->
+            if (lp.bottomMargin == value) return
+            lp.bottomMargin = value
+            v.layoutParams = lp
         }
     }
 
@@ -6859,6 +6980,71 @@ class MainActivity : AppCompatActivity(), SheetHost {
     @Volatile
     private var isReconnecting = false
 
+    // ------------------------------------------------------------------
+    // USB 抖动（"自己断一下又自己连上"）
+    //
+    // 症状：用着用着状态条跳成"已断开连接"，一两秒后又自己连回来，反复发生。
+    //
+    // 原因不是 PTP 协议，是 **Android 的 USB 广播太急**：OTG 线被碰一下、
+    // 或者手机给 USB 口断电再上电（锁屏 / 切后台 / 省电策略都会做），
+    // 系统会先发 ACTION_USB_DEVICE_DETACHED，紧接着再发 ATTACHED。
+    // 旧代码收到 DETACHED 就立刻 disconnect() —— 于是每一次抖动都变成
+    // 一次完整的"断开 + 重新连接"，界面跟着闪一轮。
+    //
+    // 现在改成：拔出广播先挂 1.2 秒，到点再确认设备是不是真的没了；
+    // 期间收到插入广播就取消，并按"抖动"处理 —— 悄悄重建会话，不走断开流程。
+    // ------------------------------------------------------------------
+    /** 轮询连续失败次数：只有**连续**两次以上才认定链路真断了 */
+    private var pollFailStreak = 0
+    /** 上次发起自动重连的时间，用来防止短时间内反复重连 */
+    private var lastReconnectAt = 0L
+
+    private val usbGoneRunnable = Runnable { confirmUsbGone() }
+    /** 最近一次收到拔出广播的时间；0 = 近期没有 */
+    private var usbGoneAt = 0L
+
+    /** 拔出广播后**延迟**确认：设备还在就是抖动，别断开 */
+    private fun confirmUsbGone() {
+        val back = usbManager.deviceList.values.firstOrNull {
+            it.vendorId == PtpConstants.USB_VENDOR_NIKON
+        }
+        if (back != null) {
+            log("USB 抖动已自愈（设备仍在列表里），不断开")
+            return
+        }
+        log("相机已断开（USB 拔出）")
+        disconnect()
+    }
+
+    /**
+     * 抖动恢复：设备重新枚举过，旧的 UsbDeviceConnection 已经作废，
+     * 必须整个丢掉重开，否则后面的命令全打在死连接上（表现为"什么都发不出去"）。
+     * 全程不弹"连接中断"，也不让界面回到未连接态 —— 对用户来说这只是一次抖动。
+     */
+    private fun reconnectAfterFlap(device: UsbDevice) {
+        if (isReconnecting) return
+        isReconnecting = true
+        thread {
+            try {
+                runCatching { ptpConnection?.close() }
+                ptpConnection = null
+                PtpUsbConnection.activeInstance = null
+                isConnected = false
+                // 抖动之后机身多半已经自己退出取景了，标志跟着清掉，
+                // 否则界面还显示"取景中"、按钮也还按取景那套走
+                isLiveViewRunning = false
+                isLiveViewStarting = false
+                Thread.sleep(300)
+                runOnUiThread {
+                    if (usbManager.hasPermission(device)) connectToDevice(device)
+                    else requestPermissionOrConnect(device)
+                }
+            } finally {
+                isReconnecting = false
+            }
+        }
+    }
+
     /**
      * 顶部状态条临时提示（红色表示出错），5 秒后自动回到"已连接/未连接"。
      *
@@ -7018,10 +7204,26 @@ class MainActivity : AppCompatActivity(), SheetHost {
                 } catch (e: Exception) {
                     // 以前这里直接 disconnect()：OTG 松一下就得用户自己再点一次连接。
                     // 现在先尝试自动重连（退避 3 次），失败了才让用户手动点。
-                    log("USB 通信异常：${e.message}")
+                    //
+                    // ★ 但要**连续两次**才算真断线。单次异常太常见了：
+                    //   机身正在写卡、刚拍完还在忙、OTG 抖了一下，
+                    //   都可能让这一轮读属性失败，下一轮就正常了。
+                    //   一次失败就走完整重连流程，就是"用着用着自己断一下又自己连上"。
+                    pollFailStreak++
+                    log("USB 通信异常（连续第 $pollFailStreak 次）：${e.message}")
+                    val tooSoon = System.currentTimeMillis() - lastReconnectAt < 20_000
+                    if (pollFailStreak < 2 || isReconnecting || tooSoon) {
+                        if (tooSoon && pollFailStreak >= 2) log("距上次重连不到 20 秒，先观察，不重复重连")
+                        Thread.sleep(2000)
+                        continue
+                    }
+                    pollFailStreak = 0
+                    lastReconnectAt = System.currentTimeMillis()
                     attemptAutoReconnect(e.message ?: "通信异常")
                     break
                 }
+                // 这一轮走通了，失败计数归零（连续才算数）
+                pollFailStreak = 0
                 // 空闲轮询间隔：2 秒 → 5 秒。
                 // 9 条属性 × 每 2 秒 = 相机一直在被问话，机身自然停在 PC 忙碌态；
                 // 5 秒足够跟上机身拨盘的变化，命令量直接降到原来的 40%。

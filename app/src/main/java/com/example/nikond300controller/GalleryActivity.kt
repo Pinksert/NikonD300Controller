@@ -145,11 +145,14 @@ class GalleryActivity : AppCompatActivity() {
     private lateinit var selStatus: TextView
     private lateinit var selJpgButton: Button
     private lateinit var selExportButton: Button
-    private lateinit var selQualityButton: Button
 
-    /** 导出时把 NEF 用 LibRaw 真解成 JPG（JPEG 原文件不受影响，直接拷字节） */
-    private var exportAsJpg = false
-    /** NEF → JPG 的压缩质量（只对转档生效；JPEG 原件是原样拷贝） */
+    /**
+     * NEF → JPG 的压缩质量（只对转档生效；JPEG 原件是原样拷贝）。
+     *
+     * 以前底栏上专门摆一颗「JPG 品质」按钮，它跟「转为 JPG」是分不开的两半
+     * （选了品质还得记得去开转换开关），现在合成一颗「JPG 导出」：
+     * 点 = 直接导出，长按 = 改品质，当前档位就写在按钮第二行。
+     */
     private var jpegQuality = NefDecoder.QUALITY_DEFAULT
     /** 正在导出时锁住操作条，避免重复点 */
     @Volatile
@@ -369,17 +372,18 @@ class GalleryActivity : AppCompatActivity() {
             updateSelectionUi()
         }
         findViewById<Button>(R.id.selExitButton).setOnClickListener { setSelectMode(false) }
+        // 两颗按钮都直接导出，区别只在"NEF 要不要转成 JPG"：
+        // 「JPG 导出」转档（长按改品质，按钮第二行写着当前档位），
+        // 「原图导出」相机里是什么字节就存什么字节。
+        // 以前是「JPG 品质」+「转为 JPG」开关 +「导出到手机」三颗，
+        // 选了品质还得记得开开关 —— 两件事拆两处，漏一步就白选。
+        jpegQuality = getSharedPreferences("gallery", MODE_PRIVATE)
+            .getInt("jpeg_quality", NefDecoder.QUALITY_DEFAULT)
         selJpgButton = findViewById(R.id.selJpgButton)
-        selJpgButton.setOnClickListener {
-            exportAsJpg = !exportAsJpg
-            updateSelectionUi()
-        }
+        selJpgButton.setOnClickListener { exportSelected(asJpg = true) }
+        selJpgButton.setOnLongClickListener { showQualitySheet(); true }
         selExportButton = findViewById(R.id.selExportButton)
-        selExportButton.setOnClickListener { exportSelected() }
-
-        selQualityButton = findViewById(R.id.selQualityButton)
-        selQualityButton.setOnClickListener { showQualityPicker() }
-        updateQualityButtonText()
+        selExportButton.setOnClickListener { exportSelected(asJpg = false) }
 
         // ---- 单张查看器：导出 JPG / 从相机删除 ----
         viewerJpgButton = findViewById(R.id.viewerJpgButton)
@@ -414,6 +418,9 @@ class GalleryActivity : AppCompatActivity() {
         setupViewerSwipe()
         recycler.layoutManager = GridLayoutManager(this, 3)
         recycler.adapter = adapter
+        // 底栏上那两颗按钮的第二行/可用态要按 adapter 的选中集合初始化，
+        // 所以必须等 adapter 建好之后再刷一次
+        updateSelectionUi()
         // 关掉默认条目动画。
         // 默认 ItemAnimator 会给每次插入/移动做位移与淡入：加载时每来一张就插一次，
         // 后面所有格子都要被推着挪一回 —— 几百张连着来就是满屏乱跳（"动画乱"的来源）。
@@ -1362,11 +1369,10 @@ class GalleryActivity : AppCompatActivity() {
     private fun updateSelectionUi() {
         val n = adapter.selected.size
         selCount.text = if (n == 0) "已选 0 张（点照片勾选）" else "已选 $n 张"
-        selJpgButton.text = if (exportAsJpg) "转为 JPG ✓" else "转为 JPG"
-        selJpgButton.setTextColor(
-            ContextCompat.getColor(this, if (exportAsJpg) R.color.accent_amber else R.color.text_secondary)
-        )
+        // 第二行把当前品质写出来：一是让人知道会压到几，二是"长按能改"才有被发现的机会
+        selJpgButton.text = "JPG 导出\n品质 $jpegQuality"
         selExportButton.isEnabled = n > 0 && !exporting
+        selJpgButton.isEnabled = n > 0 && !exporting
     }
 
     /** 把字节写进手机相册（Pictures/D300），成功返回文件名 */
@@ -1391,8 +1397,13 @@ class GalleryActivity : AppCompatActivity() {
         }
     }
 
-    /** 导出勾选的那批照片（可选把 NEF 转成 JPG） */
-    private fun exportSelected() {
+    /**
+     * 导出勾选的那批照片。
+     *
+     * @param asJpg true = NEF 用 LibRaw 真解成 JPG（JPEG 原件仍原样拷贝）；
+     *              false = 原图导出，相机里是什么字节就存什么字节。
+     */
+    private fun exportSelected(asJpg: Boolean) {
         val ptp = PtpUsbConnection.activeInstance
         if (ptp == null) { Toast.makeText(this, "未连接相机", Toast.LENGTH_SHORT).show(); return }
         if (exporting) return
@@ -1400,7 +1411,6 @@ class GalleryActivity : AppCompatActivity() {
         if (targets.isEmpty()) { Toast.makeText(this, "还没勾选照片", Toast.LENGTH_SHORT).show(); return }
 
         exporting = true
-        val asJpg = exportAsJpg
         selProgress.visibility = View.VISIBLE
         selProgress.isIndeterminate = false
         selProgress.max = targets.size
@@ -1529,46 +1539,68 @@ class GalleryActivity : AppCompatActivity() {
 
     // ---------------- JPG 品质 ----------------
 
-    private fun updateQualityButtonText() {
-        selQualityButton.text = "JPG 品质 $jpegQuality"
-        selQualityButton.setTextColor(
-            ContextCompat.getColor(
-                this,
-                // 低于 85 画质差别开始看得出，标一下让用户意识到自己选了"小文件"
-                if (jpegQuality < 85) R.color.accent_amber else R.color.text_secondary
-            )
-        )
+    /** 档位下面那行小字：光看数字不知道差别，得说清代价 */
+    private fun qualityNote(q: Int): String = when {
+        q >= 100 -> "几乎无损"
+        q >= 95 -> "肉眼无损"
+        q >= 92 -> "推荐"
+        q >= 85 -> "更省空间"
+        q >= 75 -> "压缩可见"
+        else -> "体积最小"
     }
 
     /**
-     * 挑导出 JPG 的压缩质量。只对 NEF 转档生效 —— JPEG 原件是整份拷贝，改不了也改不好。
+     * 挑导出 JPG 的压缩质量（底部抽屉，跟参数页那套二级页同款）。
      *
-     * @param onPicked 给了回调就"选完顺手执行"（单张导出按钮走这条路）；
-     *                 没给就只是把选出那档记住（多选操作条上的品质按钮走这条路）。
+     * 只对 NEF 转档生效 —— JPEG 原件是整份拷贝，改不了也改不好。
+     *
+     * 以前这里用系统 `AlertDialog.setSingleChoiceItems`：白底蓝字的系统弹窗
+     * 在这块深色盘面上很跳，一行还挤不下"档位 + 说明"。
+     * 换成 [buildSheetPage] 之后：方块格子选档，下面一行小字说清代价，
+     * 当前档高亮并在打开时就滚到视野里。
+     *
+     * @param onPicked 给了回调就"选完顺手执行"（单张导出走这条路）；
+     *                 没给就只是把选出那档记住（多选底栏走这条路）。
      */
-    private fun showQualityPicker(onPicked: ((Int) -> Unit)? = null) {
+    private fun showQualitySheet(onPicked: ((Int) -> Unit)? = null) {
         val steps = NefDecoder.QUALITY_STEPS
-        val labels = steps.map { q ->
-            when {
-                q == NefDecoder.QUALITY_DEFAULT -> "$q（默认，肉眼无损）"
-                q >= 100 -> "$q（几乎无损，体积最大）"
-                q >= 92 -> "$q（推荐，肉眼无损）"
-                q >= 85 -> "$q（平衡体积与画质）"
-                else -> "$q（体积小，放大能看到压缩痕迹）"
-            }
-        }.toTypedArray()
-        val current = steps.indexOf(jpegQuality)
-        android.app.AlertDialog.Builder(this)
-            .setTitle("导出 JPG 的品质")
-            .setSingleChoiceItems(labels, current) { d, which ->
-                val q = steps[which]
-                jpegQuality = q
-                updateQualityButtonText()
-                d.dismiss()
-                onPicked?.invoke(q)
-            }
-            .setNegativeButton("取消", null)
-            .show()
+        val current = steps.indexOf(jpegQuality).coerceAtLeast(0)
+
+        val page = buildSheetPage("JPG 品质", "只对 NEF 转档生效 · JPEG 原件原样拷贝")
+
+        val card = sheetCard(page.content, "压缩档位")
+        // 回调里要把刚点的那格点亮，得先有变量 —— 点击一定发生在赋值之后，lateinit 安全
+        lateinit var grid: SheetTileGrid
+        grid = sheetTileGrid(
+            columns = 3,
+            labels = steps.map { q -> "$q\n${qualityNote(q)}" },
+            initialSelected = current
+        ) { which ->
+            val q = steps[which]
+            jpegQuality = q
+            getSharedPreferences("gallery", MODE_PRIVATE).edit()
+                .putInt("jpeg_quality", q).apply()
+            grid.select(which)
+            updateSelectionUi()
+            page.dialog.dismiss()
+            onPicked?.invoke(q)
+        }
+        card.addView(grid.view)
+        page.onDismiss { grid.centerOn(steps.indexOf(jpegQuality).coerceAtLeast(0)) }
+
+        val card2 = sheetCard(page.content, "怎么选")
+        card2.addView(
+            sheetHint(
+                "92 是默认档：肉眼看不出和有损压缩的区别，体积也还能接受。\n" +
+                    "要拿去后期就往上选 95 / 100；只是发朋友圈或同传异地，\n" +
+                    "75 / 85 能把一张 8 MB 的图压到一半以下。\n\n" +
+                    "相机里的 JPEG 是机身自己压好的，导出时**原样拷贝**，\n" +
+                    "这里选什么都改不动它 —— 想改只能从 NEF 重新解。"
+            )
+        )
+
+        page.show()
+        grid.centerOn(current)
     }
 
     // ---------------- 单张：导出 JPG / 删除 ----------------
@@ -1586,7 +1618,7 @@ class GalleryActivity : AppCompatActivity() {
             exportCurrentAsJpg()
             return
         }
-        showQualityPicker { exportCurrentAsJpg() }
+        showQualitySheet { exportCurrentAsJpg() }
     }
 
     /** 把当前这张导出成 JPG 到手机：NEF 走 LibRaw 真解 + 搬 EXIF，JPEG 原件直接拷 */

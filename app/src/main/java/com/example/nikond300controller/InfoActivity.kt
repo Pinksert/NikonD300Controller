@@ -177,10 +177,11 @@ class InfoActivity : AppCompatActivity() {
 
         root.addView(sectionTitle("5 · 相册"))
         root.addView(paragraph(
-            "底部导航第三格进去。点一张看大图，左右滑切换；长按任意一张进多选，" +
-                "底栏可全选 / 导出到手机 / 转为 JPG。\n" +
-                "NEF 用 LibRaw 真解 RAW 再压 JPG，并把原图 EXIF 原样搬到输出的 JPG 上 —— " +
-                "所以转出来的图在电脑上看仍然带光圈快门 ISO。"
+            "底部导航第三格进去。点一张看大图，左右滑切换；长按任意一张进多选，\n" +
+                "底栏「原图导出」= 相机里是什么字节就存什么字节；\n" +
+                "「JPG 导出」= NEF 用 LibRaw 真解 RAW 再压 JPG（长按这颗改压缩品质，\n" +
+                "按钮第二行写着当前档位）。JPEG 原件两种方式都是原样拷贝。\n" +
+                "转出来的图会把原图 EXIF 原样搬过去 —— 所以在电脑上看仍然带光圈快门 ISO。"
         ))
 
         root.addView(sectionTitle("6 · 看不懂的提示"))

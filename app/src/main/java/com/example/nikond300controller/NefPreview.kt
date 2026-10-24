@@ -213,7 +213,7 @@ object NefPreview {
     }
 
     /** 把 APP1 段插到 SOI 之后（JPEG 的 EXIF 必须紧跟 SOI） */
-    private fun insertApp1(jpg: ByteArray, app1: ByteArray): ByteArray {
+    internal fun insertApp1(jpg: ByteArray, app1: ByteArray): ByteArray {
         // APP1 长度字段只有 16 位，塞不下就放弃插（元数据段超过 64KB 的 NEF 极少）
         if (app1.size + 2 > 0xFFFF) return jpg
         val out = ByteArray(jpg.size + app1.size + 4)
@@ -252,7 +252,7 @@ object NefPreview {
      *
      * @param imageStart 预览 JPEG 的起点，只用来判断"外置值有没有越过图像区"，可传 -1
      */
-    private fun buildExifApp1(nef: ByteArray, jpg: ByteArray, imageStart: Long): ByteArray? {
+    internal fun buildExifApp1(nef: ByteArray, jpg: ByteArray, imageStart: Long): ByteArray? {
         if (nef.size < 16) return null
         val little = when {
             nef[0] == 'I'.code.toByte() && nef[1] == 'I'.code.toByte() -> true

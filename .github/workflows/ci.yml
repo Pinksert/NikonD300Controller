@@ -1,0 +1,46 @@
+name: 校验
+
+# 每次 push / PR 都跑一遍，挡住两类"不报错但会静默出问题"的改动：
+#   1. 纯函数回归（快门档位排序与显示、EXIF 重建、快门数解析）
+#   2. 竖屏与横屏布局改了一个漏一个（横屏那份是整份复制，漏改不报错、
+#      只在用户真的把手机横过来那一刻炸）
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: 装 Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 装 NDK 与 CMake（NEF 解码要用）
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install "ndk;28.2.13676358" "cmake;3.22.1"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: 单元测试
+        run: ./gradlew testDebugUnitTest --no-daemon
+
+      - name: 归档测试报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: ignore
+
+      - name: 横屏 / 竖屏布局一致性
+        run: python3 tools/check_layout_parity.py

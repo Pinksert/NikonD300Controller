@@ -66,6 +66,19 @@
             <!-- 多选不再占顶栏按钮：长按任一张照片直接进入多选（勾中的就是长按那张）。
                  顶栏只留返回 / 相册名 / 张数 / 刷新。 -->
 
+            <!-- 更多：按日期/按文件夹分组、把勾选的照片合成延时视频。
+                 这两件事都不是天天用，塞进顶栏会挤掉相册名，收在这里更合适。 -->
+            <ImageButton
+                android:id="@+id/moreButton"
+                android:layout_width="36dp"
+                android:layout_height="40dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="更多"
+                android:src="@drawable/ic_chevron_right"
+                android:rotation="90"
+                android:tint="@color/text_secondary"
+                android:visibility="gone" />
+
             <ImageButton
                 android:id="@+id/refreshButton"
                 android:layout_width="40dp"
@@ -233,13 +246,40 @@
                 android:progressTint="@color/accent_amber"
                 android:visibility="gone" />
 
-            <TextView
-                android:id="@+id/selStatus"
+            <!-- 状态行：左边是进度文案，右边那颗「取消」只在真的有活儿在跑时出现。
+                 导出几十张 NEF 要好几分钟，以前中途想停只能干等 —— 现在能随时掐断，
+                 已经导出去的那几张照旧留在手机里。 -->
+            <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:textColor="@color/text_secondary"
-                android:textSize="12sp"
-                android:visibility="gone" />
+                android:layout_marginTop="6dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/selStatus"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="12sp" />
+
+                <androidx.appcompat.widget.AppCompatButton
+                    android:id="@+id/selCancelButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="32dp"
+                    android:layout_marginStart="8dp"
+                    android:background="@drawable/bg_btn_dark"
+                    android:minWidth="0dp"
+                    android:paddingStart="14dp"
+                    android:paddingEnd="14dp"
+                    android:stateListAnimator="@null"
+                    android:text="取消"
+                    android:textAllCaps="false"
+                    android:textColor="@color/accent_red"
+                    android:textSize="12sp"
+                    android:visibility="gone" />
+            </LinearLayout>
         </LinearLayout>
     </LinearLayout>
 

@@ -1,0 +1,85 @@
+name: 打包签名并发布
+
+# push 一个 v 开头的 tag 就自动出正式签名包并挂到 Release 上：
+#   git tag v1.2 && git push origin v1.2
+#
+# 为什么必须有这条：签名密钥只在开发机上，且**被 .gitignore 挡在仓库外**。
+# 手工发版时一旦那台机器没了，就再也发不出能被覆盖安装的升级包
+# （换 keystore = 换签名 = 用户必须先卸载，数据全丢）。
+# 密钥以 base64 存在仓库 Secrets 里，构建时还原成 jks，本地那份只是副本。
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 装 JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: 装 Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 装 NDK 与 CMake（NEF 解码要用）
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install "ndk;28.2.13676358" "cmake;3.22.1"
+
+      - name: 配置 Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: 构建 release（未签名）
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: 对齐并签名
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+          KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.KEY_PASS }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE_B64:-}" ]; then
+            echo "::error::没有配置 KEYSTORE_B64 secret，无法签名"
+            exit 1
+          fi
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/d300-release.jks"
+
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          echo "用 $BT"
+          UNSIGNED=app/build/outputs/apk/release/app-release-unsigned.apk
+          ALIGNED="$RUNNER_TEMP/aligned.apk"
+          SIGNED="$RUNNER_TEMP/NikonD300Controller-${GITHUB_REF_NAME}.apk"
+
+          "$BT/zipalign" -f -p 4 "$UNSIGNED" "$ALIGNED"
+          "$BT/apksigner" sign \
+            --ks "$RUNNER_TEMP/d300-release.jks" \
+            --ks-key-alias "${KEY_ALIAS:-d300}" \
+            --ks-pass "pass:${KEYSTORE_PASS}" \
+            --key-pass "pass:${KEY_PASS}" \
+            --out "$SIGNED" "$ALIGNED"
+          "$BT/apksigner" verify --print-certs "$SIGNED" | head -5
+          mkdir -p out && cp "$SIGNED" out/
+          rm -f "$RUNNER_TEMP/d300-release.jks"
+
+      - name: 发布到 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*.apk
+          generate_release_notes: true
+          name: "D300 Controller ${{ github.ref_name }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

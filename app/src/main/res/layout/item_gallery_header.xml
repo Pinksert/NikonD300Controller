@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 网格里的日期抬头（按拍摄日期分组时用）。
+
+     它占满整行：网格是 3 列，抬头在 GridLayoutManager 的 SpanSizeLookup 里
+     声明占 3 格，所以这里只要管好自己这一行的样子就行。 -->
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/dateHeader"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:paddingStart="2dp"
+    android:paddingTop="10dp"
+    android:paddingBottom="6dp"
+    android:textColor="@color/text_secondary"
+    android:textSize="13sp"
+    android:textStyle="bold" />

@@ -338,6 +338,20 @@ class MainActivity : AppCompatActivity(), SheetHost {
      */
     private var mirrorUpDelaySec = 2
     private lateinit var mirrorUpRow: SheetValueRow
+
+    // ---- 焦点包围（对焦堆叠）----
+    /** 总共拍几张 */
+    private var focusStackCount = 5
+    /** 每站跨过几个对焦点：跨得越多，两张之间的焦点差越大 */
+    private var focusStackStep = 2
+    /** true = 由近到远（从画面下方往上走） */
+    private var focusStackNearFirst = true
+    /** 两站之间等几秒（等机身写完卡、机震散掉） */
+    private var focusStackWaitSec = 2
+    @Volatile
+    private var isFocusStackRunning = false
+    private var focusStackThread: Thread? = null
+    private lateinit var focusStackRow: SheetValueRow
     @Volatile
     private var isIntervalRunning = false
     private var intervalThread: Thread? = null
@@ -424,16 +438,16 @@ class MainActivity : AppCompatActivity(), SheetHost {
     private var shutterMap: Map<Int, String> = emptyMap()
 
     /** B 门：机身 PTP 里用 -1 表示；0xD100 描述符通常不列它，得自己补上 */
-    private val SHUTTER_BULB = -1
+    private val SHUTTER_BULB = ShutterSpeeds.BULB
     /** 闪光同步（X 同步）：机身 PTP 里用 -2 表示，同样不在描述符里 */
-    private val SHUTTER_FLASH = -2
+    private val SHUTTER_FLASH = ShutterSpeeds.FLASH
+
+    /** 当前生效的是尼康私有 0xD100 还是标准 0x500D —— 决定怎么拆档位、怎么排序 */
+    private val usingNikonShutterProp: Boolean
+        get() = activeShutterProp == PtpConstants.PROP_NIKON_SHUTTER_SPEED
 
     /** 档位排法：正常档（1/8000 → 30s）按曝光时长升序，B 门 / 闪光同步垫在最后 */
-    private fun shutterRank(v: Int): Int = when (v) {
-        SHUTTER_BULB -> 1
-        SHUTTER_FLASH -> 2
-        else -> 0
-    }
+    private fun shutterRank(v: Int): Int = ShutterSpeeds.rank(v)
 
     /**
      * 一个档位代表多少秒 —— **排序只能按它，不能按 PTP 原始值**。
@@ -444,75 +458,20 @@ class MainActivity : AppCompatActivity(), SheetHost {
      * 前半段慢到快、后半段又快回慢，用户看到的就是"乱的"。
      * 标准属性 0x500D 是 1/10000 秒为单位，原始值大小和时长倒是同向，但也统一换算成秒更省心。
      */
-    private fun shutterSeconds(v: Int): Double {
-        if (v == SHUTTER_BULB || v == SHUTTER_FLASH) return 0.0
-        return if (activeShutterProp == PtpConstants.PROP_NIKON_SHUTTER_SPEED) {
-            val numerator = (v shr 16) and 0xFFFF
-            val denominator = v and 0xFFFF
-            if (numerator <= 0 || denominator <= 0) 0.0 else numerator.toDouble() / denominator.toDouble()
-        } else {
-            v / 10000.0
-        }
-    }
+    private fun shutterSeconds(v: Int): Double = ShutterSpeeds.seconds(v, usingNikonShutterProp)
 
     /** 快门档位统一排法：正常档按时长由短到长，B 门 / 闪光同步垫底 */
     private fun shuttersSorted(values: Iterable<Int>): List<Int> =
-        values.sortedWith(
-            compareBy<Int> { shutterRank(it) }
-                .thenBy { shutterSeconds(it) }
-                .thenBy { it }
-        )
+        ShutterSpeeds.sorted(values, usingNikonShutterProp)
 
-    private fun getShutterString(valCode: Int): String {
-        if (valCode == SHUTTER_BULB) return "B 门"
-        if (valCode == SHUTTER_FLASH) return "Flash"
-
-        return if (activeShutterProp == PtpConstants.PROP_NIKON_SHUTTER_SPEED) {
-            // Nikon bit-packed（0xD100）：高 16 位 = 分子，低 16 位 = 分母，单位秒。
-            // 真机枚举里除了 1/8000…1/1 这些"分子为 1"的档，还有三档是非 1 分子：
-            //   0x000A0019 = 10/25 → 1/2.5      0x000A0010 = 10/16 → 1/1.6
-            //   0x000A000D = 10/13 → 1/1.3      0x000D000A = 13/10 → 1.3"
-            // 旧实现只判"分子==1"和"分子>分母"，10/25 会原样显示成 "10/25" ——
-            // 那不是快门档，用户看到只会以为读错了（这就是"快门速度显示错误"）。
-            val numerator = (valCode shr 16) and 0xFFFF
-            val denominator = valCode and 0xFFFF
-            when {
-                numerator <= 0 || denominator <= 0 ->
-                    "0x${Integer.toHexString(valCode).uppercase()}"
-                denominator == 1 -> "${numerator}\""
-                numerator == 1 -> "1/$denominator"
-                else -> {
-                    val seconds = numerator.toDouble() / denominator
-                    if (seconds >= 1.0) {
-                        // 1.3" / 1.6" / 2.5" / 30" —— 整秒就不带小数
-                        if (Math.abs(seconds - Math.round(seconds)) < 0.01) "${Math.round(seconds)}\""
-                        else String.format("%.1f\"", seconds)
-                    } else {
-                        // 小于 1 秒的档一律写成 1/x：10/25 → 1/2.5，10/16 → 1/1.6
-                        val inv = denominator.toDouble() / numerator
-                        if (Math.abs(inv - Math.round(inv)) < 0.05) "1/${Math.round(inv)}"
-                        else String.format("1/%.1f", inv)
-                    }
-                }
-            }
-        } else {
-            // Standard PTP Exposure Time (0x500D) - Units of 1/10000s
-            val seconds = valCode / 10000
-            val rest = valCode % 10000
-            if (seconds > 0) {
-                if (rest > 0) {
-                    val frac = Math.round(1.0 / (rest * 0.0001))
-                    "${seconds}\" 1/$frac"
-                } else {
-                    "${seconds}\""
-                }
-            } else if (rest > 0) {
-                "1/${Math.round(1.0 / (rest * 0.0001))}"
-            } else {
-                "0\""
-            }
-        }
-    }
+    /**
+     * 档位 → 菜单显示串。
+     *
+     * 实现整体搬到了 [ShutterSpeeds.label]（纯函数、有单元测试锁着）——
+     * 这类"改坏了不报错、只是显示怪怪的"逻辑，靠肉眼看回归是抓不住的。
+     */
+    private fun getShutterString(valCode: Int): String =
+        ShutterSpeeds.label(valCode, usingNikonShutterProp)
 
     private var shutters = emptyArray<Pair<Int, String>>()
 
@@ -3920,6 +3879,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
                     flashCompRow, imageQualityRow, mediaRow,
                     storageRow, intervalRow, autoDownloadRow
                 ).forEach { it.view.alpha = alpha }
+                if (::focusStackRow.isInitialized) focusStackRow.view.alpha = alpha
                 // 方框那两组没有统一的 Row 外壳，单独压暗
                 selfTimerBox?.alpha = alpha
                 afPointCountBox?.alpha = alpha
@@ -5941,6 +5901,10 @@ class MainActivity : AppCompatActivity(), SheetHost {
         if (::mirrorUpRow.isInitialized) {
             mirrorUpRow.value.text = if (mirrorUpEnabled) "开 · 等 ${mirrorUpDelaySec} 秒" else "关闭"
         }
+        if (::focusStackRow.isInitialized) {
+            focusStackRow.value.text = "$focusStackCount 张 · 每步 $focusStackStep 点 · " +
+                (if (focusStackNearFirst) "近→远" else "远→近")
+        }
     }
 
     private fun saveWorkflowSettings() {
@@ -5952,6 +5916,10 @@ class MainActivity : AppCompatActivity(), SheetHost {
             putBoolean("autoDownloadRaw", autoDownloadRaw)
             putBoolean("mirrorUp", mirrorUpEnabled)
             putInt("mirrorUpDelay", mirrorUpDelaySec)
+            putInt("focusStackCount", focusStackCount)
+            putInt("focusStackStep", focusStackStep)
+            putBoolean("focusStackNearFirst", focusStackNearFirst)
+            putInt("focusStackWait", focusStackWaitSec)
             apply()
         }
     }
@@ -6045,6 +6013,12 @@ class MainActivity : AppCompatActivity(), SheetHost {
         if (isIntervalRunning) {
             isIntervalRunning = false
             log("· 间隔拍摄已停止")
+        }
+
+        // ②b 焦点包围：同一套标志位机制（每站之间等的时候也会看它）
+        if (isFocusStackRunning) {
+            isFocusStackRunning = false
+            log("· 焦点包围已停止")
         }
 
         // ③ 包围曝光：线程和标志都在对话框里，靠它自己登记的回调收尾
@@ -6303,6 +6277,229 @@ class MainActivity : AppCompatActivity(), SheetHost {
                 "NEF 一张十几 MB，走 USB 会明显变慢；只想要小图就别开这一项。"
         ))
 
+        page.show()
+    }
+
+    // =====================================================================
+    // 焦点包围（对焦堆叠）
+    // =====================================================================
+
+    /**
+     * 焦点包围：**不进实时取景**，靠 51 个对焦点从"近"走到"远"，每站各拍一张。
+     *
+     * ★ 为什么不用 0x9205（AF 区域绝对定位）走这条：
+     *   0x9205 只在实时取景里有效，而取景里按快门**必须先退取景**（0x9207 落卡会
+     *   STALL 整条 USB 端点，实测已永久停用）—— 也就是每一张都要完整的
+     *   "退取景 → 0x100E → 再进取景"来回，一次几秒到十几秒，十几张下来根本没法用，
+     *   中途还得反复重写 0xD1A0 取景模式（机身退取景时会把它重置成手持）。
+     *
+     *   换成 0xD108 选点 + 机身自己的相位 AF，整段都在**普通拍摄状态**里跑：
+     *   选点（0xD108）→ 0x90C1 合焦 → 0x100E 释放，每一步都是已经在用的成熟链路，
+     *   不会因为取景的进出把管道搅乱。代价是只能在 51 个固定点位上取景深，
+     *   不如 0x9205 那样任意 —— 但对微距和风景的景深合成，纵向一排点位完全够用。
+     */
+    private fun startFocusStack(
+        onProgress: (Int, Int) -> Unit,
+        onStatus: (String) -> Unit,
+        onFinish: (String) -> Unit
+    ) {
+        if (isFocusStackRunning) return
+        if (!isConnected) { toast("请先连接相机"); return }
+
+        // 机身现在停在哪一点：从它开始往近/往远走，比"永远从中心开始"更符合直觉
+        val points = currentAfPoints()
+        if (points.isEmpty()) { toast("还没有可用的对焦点"); return }
+
+        // 只在同一列附近挑点：跨列会让每一张的构图左右飘，后期叠不起来
+        val anchor = points.firstOrNull { it.id == currentAfPointId }
+            ?: nearestAfPoint(0.5f, 0.5f)
+            ?: points[points.size / 2]
+        val column = points.filter { kotlin.math.abs(it.nx - anchor.nx) < 0.08f }
+            .ifEmpty { points.filter { kotlin.math.abs(it.nx - anchor.nx) < 0.16f } }
+            .ifEmpty { points }
+            .sortedBy { it.ny }          // ny 小 = 画面上方 = 远
+        val startIdx = (column.indexOfFirst { it.id == anchor.id }).let { if (it >= 0) it else column.size / 2 }
+        // 由近到远 = 从画面下方往上走（索引递减）；由远到近反之
+        val dir = if (focusStackNearFirst) -1 else 1
+
+        val seq = ArrayList<AfPoint>()
+        var i = startIdx
+        while (seq.size < focusStackCount) {
+            val p = column.getOrNull(i) ?: break
+            if (seq.none { it.id == p.id }) seq.add(p)
+            val next = i + dir * focusStackStep
+            if (next < 0 || next >= column.size) break
+            i = next
+        }
+        if (seq.size < 2) {
+            toast("这一列上能走的点位不够（换一档步长或减少张数）")
+            return
+        }
+
+        isFocusStackRunning = true
+        focusStackThread = thread {
+            var done = 0
+            try {
+                isPollingPaused = true
+                Thread.sleep(200)
+                exitLiveViewForBatch("焦点包围")
+                log(
+                    "焦点包围开始：${seq.size} 张 · 每步跨 $focusStackStep 个点位 · " +
+                        (if (focusStackNearFirst) "由近到远" else "由远到近")
+                )
+                runOnUiThread { log("对焦点序列：${seq.joinToString(" → ") { it.id.toString() }}") }
+
+                for ((k, p) in seq.withIndex()) {
+                    if (!isFocusStackRunning) break
+                    runOnUiThread { onStatus("第 ${k + 1}/${seq.size} 张：对焦点 ${p.id}") }
+
+                    // ① 选点。**不再另外发 0x90C1** —— shootOnce 内部本来就会
+                    //    按当前对焦点跑一次 AF，这里补一发反而多跑一趟。
+                    val ok = ptpConnection?.setAfAreaPoint(p.id) ?: false
+                    if (ok) {
+                        currentAfPointId = p.id
+                        runOnUiThread {
+                            focusBox.setAfPoints(currentAfPoints(), p.id)
+                            log("焦点包围第 ${k + 1} 站：对焦点 ${p.id}")
+                        }
+                    } else {
+                        runOnUiThread { log("对焦点 ${p.id} 被拒（取景中 / 非单点 AF 时会拒），继续下一站") }
+                    }
+
+                    // ② 拍这一张（第一张前走自拍延时，之后靠下面的等待拉开间隔）
+                    shootOnce(applySelfTimer = (k == 0))
+                    done++
+                    runOnUiThread { onProgress(done, seq.size) }
+                    if (!isFocusStackRunning || k == seq.lastIndex) break
+
+                    var waited = 0
+                    while (waited < focusStackWaitSec * 1000 && isFocusStackRunning) {
+                        Thread.sleep(200)
+                        waited += 200
+                    }
+                }
+            } catch (e: Exception) {
+                runOnUiThread { log("焦点包围出错：${e.message}") }
+            } finally {
+                val stopped = !isFocusStackRunning
+                isFocusStackRunning = false
+                isPollingPaused = false
+                runOnUiThread {
+                    onFinish(if (stopped) "已停止（共拍 $done 张）" else "已完成（共拍 $done 张）")
+                    log(if (stopped) "焦点包围已停止" else "焦点包围完成")
+                }
+                thread { updateProperties() }
+            }
+        }
+    }
+
+    private fun stopFocusStack() {
+        isFocusStackRunning = false
+    }
+
+    /** 焦点包围的参数页：张数 · 步长 · 方向 · 每张之间等待 */
+    private fun showFocusStackSheet() {
+        val page = buildSheetPage("焦点包围", "对焦堆叠 · 近→远各拍一张")
+        val card = sheetCard(page.content, "参数")
+
+        val countEntries = listOf(3, 5, 8, 12, 16, 20)
+        val stepEntries = listOf(1, 2, 3, 4)
+        val waitEntries = listOf(1, 2, 3, 5, 8)
+
+        val countGrid = sheetTileGrid(3, countEntries.map { "$it 张" },
+            countEntries.indexOf(focusStackCount)) { idx ->
+            focusStackCount = countEntries[idx]
+            saveWorkflowSettings()
+            refreshWorkflowRows()
+        }
+        card.addView(sheetHint("总共拍几张。张数越多景深覆盖越全，后期合成的选择也越多。"))
+        card.addView(countGrid.view)
+
+        card.addView(sheetHint("每站跨过几个对焦点。跨得多 → 每张之间的焦点差大（景深跨度大但可能断层）。"))
+        val stepGrid = sheetTileGrid(4, stepEntries.map { "跨 $it 点" },
+            stepEntries.indexOf(focusStackStep)) { idx ->
+            focusStackStep = stepEntries[idx]
+            saveWorkflowSettings()
+            refreshWorkflowRows()
+        }
+        card.addView(stepGrid.view)
+
+        card.addView(sheetHint("由近到远 = 从画面下方往上走（前景→远景），风景和微距通常选这个。"))
+        val dirGrid = sheetTileGrid(2, listOf("由近到远", "由远到近"),
+            if (focusStackNearFirst) 0 else 1) { idx ->
+            focusStackNearFirst = (idx == 0)
+            saveWorkflowSettings()
+            refreshWorkflowRows()
+        }
+        card.addView(dirGrid.view)
+
+        card.addView(sheetHint("两站之间等几秒（等机身写完卡、机震散掉）。"))
+        val waitGrid = sheetTileGrid(5, waitEntries.map { "$it 秒" },
+            waitEntries.indexOf(focusStackWaitSec)) { idx ->
+            focusStackWaitSec = waitEntries[idx]
+            saveWorkflowSettings()
+            refreshWorkflowRows()
+        }
+        card.addView(waitGrid.view)
+
+        card.addView(
+            sheetHint(
+                "走的是机身的固定对焦点（51 点模式下一整列），不进实时取景 ——\n" +
+                    "取景里一拍就得退出取景，那样每一张都要来回一次，太慢也容易卡管道。\n" +
+                    "机身对焦模式需要是 AF-S / AF-C（手动对焦下机身不会重新合焦，堆叠就没意义了）。"
+            )
+        )
+
+        // ---- 执行 ----
+        val run = sheetCard(page.content, "执行")
+        val progress = sheetProgress()
+        run.addView(progress)
+        val status = sheetStatusText(if (isFocusStackRunning) "正在运行…" else "准备就绪")
+        run.addView(status)
+
+        val runBtn = sheetPrimaryButton(if (isFocusStackRunning) "停止" else "开始焦点包围")
+        page.content.addView(runBtn)
+
+        fun idle() {
+            runBtn.text = "开始焦点包围"
+            runBtn.setBackgroundResource(R.drawable.bg_btn_amber)
+            runBtn.setTextColor(Color.parseColor("#0B0E13"))
+            progress.visibility = View.GONE
+            page.dialog.setCancelable(true)
+        }
+
+        fun running() {
+            runBtn.text = "停止"
+            runBtn.setBackgroundResource(R.drawable.bg_btn_red)
+            runBtn.setTextColor(Color.WHITE)
+            progress.visibility = View.VISIBLE
+            progress.max = focusStackCount
+            progress.progress = 0
+            page.dialog.setCancelable(false)
+        }
+
+        if (isFocusStackRunning) running()
+
+        runBtn.setOnClickListener {
+            if (isFocusStackRunning) {
+                stopFocusStack()
+                idle()
+                status.text = "正在停止…"
+            } else {
+                running()
+                status.text = "准备中…"
+                startFocusStack(
+                    onProgress = { d, t ->
+                        progress.max = t
+                        progress.progress = d
+                    },
+                    onStatus = { status.text = it },
+                    onFinish = { status.text = it; idle() }
+                )
+            }
+        }
+
+        page.onDismiss { if (isFocusStackRunning) stopFocusStack() }
         page.show()
     }
 
@@ -7238,6 +7435,10 @@ class MainActivity : AppCompatActivity(), SheetHost {
         autoDownloadRaw = sp.getBoolean("autoDownloadRaw", false)
         mirrorUpEnabled = sp.getBoolean("mirrorUp", false)
         mirrorUpDelaySec = sp.getInt("mirrorUpDelay", 2)
+        focusStackCount = sp.getInt("focusStackCount", 5)
+        focusStackStep = sp.getInt("focusStackStep", 2)
+        focusStackNearFirst = sp.getBoolean("focusStackNearFirst", true)
+        focusStackWaitSec = sp.getInt("focusStackWait", 2)
 
         // ---- 曝光与画质 ----
         val eqList = findViewById<LinearLayout>(R.id.exposureQualityList)
@@ -7407,6 +7608,11 @@ class MainActivity : AppCompatActivity(), SheetHost {
         // 反光板预升：走机身的 Mup 释放模式，由 App 连按两次快门
         mirrorUpRow = sheetValueRow("反光板预升", "关闭") { _ -> showMirrorUpSheet() }
         wfList.addView(mirrorUpRow.view)
+
+        // 焦点包围：机身没有这个功能（没有"拍一张把焦点往前挪一点"的指令），
+        // 只能由 App 逐站选对焦点 + 逐张拍，后期再合成。
+        focusStackRow = sheetValueRow("焦点包围", "5 张 · 每步 2 点") { _ -> showFocusStackSheet() }
+        wfList.addView(focusStackRow.view)
 
         refreshWorkflowRows()
     }

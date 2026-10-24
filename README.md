@@ -1,5 +1,7 @@
 # Nikon D300 Controller
 
+[![校验](https://github.com/Pinksert/NikonD300Controller/actions/workflows/ci.yml/badge.svg)](https://github.com/Pinksert/NikonD300Controller/actions/workflows/ci.yml)
+
 通过 **USB OTG** 用 **PTP（Picture Transfer Protocol）** 协议控制尼康 **D300 / D300s** 单反相机的 Android 应用。不需要相机厂商 SDK，直接走标准 PTP / 尼康私有扩展指令，在手机上完成实时取景、对焦、曝光参数调节、个人设定（CSM）查看与修改、相册浏览与导出。
 
 > English: An Android app that drives a Nikon D300 over USB OTG via the PTP protocol — live view with 51-point AF overlay, touch AF, exposure controls, custom settings (CSM) menu, on-camera gallery browser, NEF → JPEG conversion with real RAW decoding, and shutter-count readout.
@@ -48,7 +50,9 @@
 - 曝光补偿（`0x5010`，1/1000 EV 精度，档位严格按机身枚举）、曝光程序模式 M / P / A / S、白平衡（含色温与预设）。
 - b1 / b2 / b3 步长（1/3、1/2、1 EV）可就地切换，档位表跟着变。
 - 包围曝光：光圈包围 / 快门包围，倒计时与张数可调。
-- 拍摄流程：自拍延时、间隔拍摄、拍完自动下载。
+- **焦点包围（对焦堆叠）**：在 51 个对焦点里沿一列从「近」逐站走到「远」，每站选点 → 合焦 → 拍一张，供后期景深合成。机身没有这个功能，只能由 App 编排；张数 / 每站跨度 / 方向 / 站间等待都可调。
+- 拍摄流程：自拍延时、间隔拍摄、拍完自动下载、反光板预升（Mup，连发两次 `0x100E`）。
+- **机身时钟同步**（`0x5011 DateTime`）：机身小电池掉电后时间归零会让 EXIF、相册排序、间隔拍摄时点全错，连上时自动比一次，偏差超 1 分钟就提示，一键用手机时间校准。
 
 ### 机身菜单
 
@@ -59,6 +63,9 @@
 ### 相册
 
 - 浏览存储卡照片，两阶段加载（先铺满信息再逐张补缩略图），按文件名流水号倒序。
+- **按日期分组**：机身只按文件夹（`100NCD300`）组织照片，那是号段不是日期；这里可以用 EXIF 的拍摄日期重排成"日期相册"，网格里带日期抬头。顶栏「更多」切换。
+- **合成延时视频**：勾选 N 张 → 按拍摄时间从旧到新用 MediaCodec + MediaMuxer 合成 MP4（720P/1080P × 12/24/30 fps），存到 `Movies/D300`。用的是完整照片而不是取景帧，画质不受取景帧率限制 —— 这是「D300 不能录像」的另一种补法。
+- 导出 / 删除 / 合成都有进度条与**取消**按钮：中途收手时已落地的文件照旧保留，单张失败跳过继续而不是整批作废。
 - 单张查看器与多选模式共用一套底栏：**原图导出 / JPG 导出 / 删除 N 张 / 退出**。
 - **JPG 导出**：NEF 经 **LibRaw（原生 C++/JNI）** 真解 RAW（霍夫曼解码 → 线性化 → 机身白平衡 → AHD 插值 → sRGB）再压 JPEG，可选 60/75/85/92/95/100 六档品质；全 JPEG 时不弹品质表。
 - **EXIF 搬运**：把 NEF 的 IFD0 / ExifIFD / GPS / Interop 条目**重建**成新 TIFF 塞进输出 JPEG 的 APP1（MakerNote 过大时先丢它，保证不超 65533 上限），拍摄日期 / 光圈快门 ISO 全部保留。
@@ -95,6 +102,25 @@ export ANDROID_HOME="$HOME/Android/Sdk"
 产物：`app/build/outputs/apk/debug/app-debug.apk` / `app/build/outputs/apk/release/app-release-unsigned.apk`（签名后可用）。
 
 > 若构建报 `app\.cxx\...\hash_key.txt (拒绝访问)`，删掉 `app/.cxx` 再重试（Windows 上 CMake 缓存偶发锁死）。
+
+### 测试与发版
+
+```bash
+./gradlew testDebugUnitTest            # JVM 单元测试（快门档位 / EXIF 重建 / 快门数解析）
+python3 tools/check_layout_parity.py    # 竖屏与横屏布局的 id 一致性
+```
+
+这两项在每次 push 时由 `.github/workflows/ci.yml` 自动跑。
+
+正式包走 `.github/workflows/release.yml`：**push 一个 `v` 开头的 tag 即可** ——
+CI 完成 assembleRelease → zipalign → apksigner → 建 GitHub Release 并上传 APK。
+
+```bash
+git tag v1.2 && git push origin v1.2
+```
+
+签名密钥以 base64 放在仓库 Secrets（`KEYSTORE_B64` / `KEYSTORE_PASS` / `KEY_ALIAS` / `KEY_PASS`），
+构建时还原成 jks。⚠️ 密钥换了签名就换，用户必须先卸载才能装新版 —— 别把它弄丢。
 
 ---
 

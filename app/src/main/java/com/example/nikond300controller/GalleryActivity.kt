@@ -146,6 +146,9 @@ class GalleryActivity : AppCompatActivity() {
     private lateinit var selJpgButton: Button
     private lateinit var selExportButton: Button
     private lateinit var selDeleteButton: Button
+    private lateinit var selCancelButton: Button
+    /** 顶栏「更多」：分组方式 + 合成延时视频 */
+    private lateinit var moreButton: ImageButton
     /** 批量删除进行中（防重入 + 期间禁掉删除按钮） */
     @Volatile
     private var deleting = false
@@ -161,6 +164,20 @@ class GalleryActivity : AppCompatActivity() {
     /** 正在导出时锁住操作条，避免重复点 */
     @Volatile
     private var exporting = false
+
+    /**
+     * 「取消」按钮按下的信号。
+     *
+     * 批量导出几十张 NEF 要好几分钟，以前中途想停只能干等（或者杀掉 App，
+     * 那样已经导出的那几张也会因为 IS_PENDING 没清掉而变成看不见的幽灵文件）。
+     * 现在导出/删除/合成三条循环每一步都看它，置位即在**当前这张做完之后**收手 ——
+     * 不打断正在进行的那一步，免得半张文件留在手机里。
+     */
+    @Volatile
+    private var cancelRequested = false
+
+    /** 当前有没有活儿在跑（决定「取消」按钮露不露面） */
+    private var busyJob: String? = null
 
     private val entries = mutableListOf<Entry>()
     private lateinit var adapter: ThumbAdapter
@@ -195,8 +212,20 @@ class GalleryActivity : AppCompatActivity() {
     private lateinit var albumSwitch: View
     private lateinit var albumNameText: TextView
 
-    /** 已按"新 → 旧"排好的相册列表 */
+    /** 已按"新 → 旧"排好的相册列表 = 当前视角下的分组（文件夹 或 日期，见 [groupByDate]） */
     private var folders: List<PhotoFolder> = emptyList()
+
+    /**
+     * 列举回来的**原始**分组（卡上的文件夹）。
+     *
+     * [folders] 是它派生出来的"当前视角"：按文件夹看时就是它排好序的版本，
+     * 按日期看时是把所有照片重排成的日期组。分开存是为了切分组方式时
+     * 不用再付几百次 GetObjectInfo 去重新列举。
+     */
+    private var rawFolders: List<PhotoFolder> = emptyList()
+
+    /** 分组方式：false = 卡上的文件夹（默认，和机身一致），true = 按拍摄日期 */
+    private var groupByDate = false
 
     /** 当前选中的相册下标（[folders] 内）；[showAll] 为 true 时表示看全部 */
     private var folderIndex = 0
@@ -362,17 +391,27 @@ class GalleryActivity : AppCompatActivity() {
         refreshButton.visibility = View.VISIBLE
         refreshButton.setOnClickListener { reload() }
 
+        moreButton = findViewById(R.id.moreButton)
+        moreButton.visibility = View.VISIBLE
+        moreButton.setOnClickListener { showMoreMenu() }
+
         // ---- 多选导出 ----
         selectionBar = findViewById(R.id.selectionBar)
         selCount = findViewById(R.id.selCount)
         selProgress = findViewById(R.id.selProgress)
         selStatus = findViewById(R.id.selStatus)
+        selCancelButton = findViewById(R.id.selCancelButton)
+        selCancelButton.setOnClickListener {
+            cancelRequested = true
+            selCancelButton.isEnabled = false
+            selStatus.text = "正在收尾，请稍等…"
+        }
         // 进多选只有一个入口：**长按任一张照片**（长按那张顺手就勾上），
         // 顶栏不再放「多选」按钮 —— 多一个入口就多一处状态要同步。
         findViewById<Button>(R.id.selAllButton).setOnClickListener {
             if (adapter.selected.size == entries.size) adapter.selected.clear()
             else entries.forEach { adapter.selected.add(it.info.handle) }
-            adapter.notifyDataSetChanged()
+            adapter.refreshAll()
             updateSelectionUi()
         }
         findViewById<Button>(R.id.selExitButton).setOnClickListener { setSelectMode(false) }
@@ -427,7 +466,13 @@ class GalleryActivity : AppCompatActivity() {
         )
         // 左右滑动切上一张 / 下一张（看大图时不必退出去再点下一格）
         setupViewerSwipe()
-        recycler.layoutManager = GridLayoutManager(this, 3)
+        val grid = GridLayoutManager(this, 3)
+        // 日期抬头要占满整行：默认每格占 1 列，抬头占满 3 列。
+        // 少了这段，抬头会被塞进一格宽的位置里，日期显示成"2026-1…"这种截断的样子。
+        grid.spanSizeLookup = object : GridLayoutManager.SpanSizeLookup() {
+            override fun getSpanSize(position: Int) = if (adapter.isHeader(position)) 3 else 1
+        }
+        recycler.layoutManager = grid
         recycler.adapter = adapter
         // 底栏上那两颗按钮的第二行/可用态要按 adapter 的选中集合初始化，
         // 所以必须等 adapter 建好之后再刷一次
@@ -482,7 +527,7 @@ class GalleryActivity : AppCompatActivity() {
         progress.visibility = View.VISIBLE
         emptyText.visibility = View.GONE
         entries.clear()
-        adapter.notifyDataSetChanged()
+        adapter.refreshAll()
 
         bg {
             // 先重开会话：D300 的照片对象列表是**按会话缓存**的，
@@ -498,8 +543,8 @@ class GalleryActivity : AppCompatActivity() {
             val found = ptp.collectPhotoFolders()
             if (found.isEmpty()) {
                 runOnUiThread {
-                    folders = emptyList()
-                    updateAlbumSwitcher()
+                    rawFolders = emptyList()
+                    applyGrouping()
                     progress.visibility = View.GONE
                     loading = false
                     countText.text = "0 张"
@@ -510,10 +555,13 @@ class GalleryActivity : AppCompatActivity() {
                 return@bg
             }
 
-            folders = sortFoldersNewestFirst(found)
-            // 默认显示**最新**的那个相册（用户在别处选过"全部"就保持全部）
-            if (!showAll) folderIndex = folderIndex.coerceIn(0, folders.size - 1)
-            runOnUiThread { updateAlbumSwitcher() }
+            rawFolders = found
+            runOnUiThread {
+                applyGrouping()
+                // 默认显示**最新**的那个相册（用户在别处选过"全部"就保持全部）
+                if (!showAll) folderIndex = folderIndex.coerceIn(0, (folders.size - 1).coerceAtLeast(0))
+                updateAlbumSwitcher()
+            }
 
             renderCurrentFolder(
                 ptp,
@@ -600,7 +648,7 @@ class GalleryActivity : AppCompatActivity() {
             entries.addAll(seeded)
             // 换相册了：勾选的是句柄，留着会对不上新列表里的照片
             if (adapter.selectMode) adapter.selected.clear()
-            adapter.notifyDataSetChanged()
+            adapter.refreshAll()
             updateSelectionUi()
             updateCountText()
         }
@@ -650,7 +698,7 @@ class GalleryActivity : AppCompatActivity() {
                 if (token != loadToken) return@runOnUiThread   // 已经切走了，别再改网格
                 // 只换这一格的内容，不插不删 —— RecyclerView 不会带出位移动画
                 entries[i].thumb = bmp
-                adapter.notifyItemChanged(i)
+                adapter.notifyPhoto(i)
                 updateCountText()
             }
         }
@@ -689,7 +737,8 @@ class GalleryActivity : AppCompatActivity() {
             albumSwitch.isClickable = false
             return
         }
-        val name = if (showAll) "全部相册" else albumName(folders[folderIndex])
+        val allLabel = if (groupByDate) "全部日期" else "全部相册"
+        val name = if (showAll) allLabel else albumName(folders[folderIndex])
         albumNameText.text = if (folders.size > 1) "$name ▾" else name
         albumNameText.visibility = View.VISIBLE
         if (folders.size > 1) {
@@ -704,6 +753,82 @@ class GalleryActivity : AppCompatActivity() {
     /** 相册显示名。顶层直接放着照片时文件夹名为空，给个不至于空白的兜底 */
     private fun albumName(f: PhotoFolder): String = f.name.ifBlank { "存储卡" }
 
+    // ------------------------------------------------------------------
+    // 分组方式：卡上的文件夹（默认） / 拍摄日期
+    //
+    // 机身只按文件夹（100NCD300…）组织照片，那是"号段"不是日期 ——
+    // 拍满 9999 张就换一个文件夹，同一个文件夹里可能横跨好几个月。
+    // 想"看 10 月 24 号拍的那批"，在机身上是做不到的，但 EXIF 里的
+    // DateTimeOriginal 一直都在（PTP ObjectInfo 的拍摄时间同源），
+    // 所以这个视角只能由 App 补。
+    // ------------------------------------------------------------------
+
+    /** 按 [groupByDate] 重算 [folders]；切分组时不必重新列举 */
+    private fun applyGrouping() {
+        folders = if (groupByDate) buildDateGroups(rawFolders) else sortFoldersNewestFirst(rawFolders)
+        folderIndex = folderIndex.coerceIn(0, (folders.size - 1).coerceAtLeast(0))
+        if (::adapter.isInitialized) {
+            adapter.headersOn = groupByDate
+            adapter.refreshAll()
+        }
+        updateAlbumSwitcher()
+    }
+
+    /**
+     * 把所有照片按拍摄日期重排成"日期相册"，新的在前。
+     *
+     * "未知日期"兜底排在最后：它是解析不出来时的归口，
+     * 排在最前面会让人以为那才是最新的照片。
+     */
+    private fun buildDateGroups(src: List<PhotoFolder>): List<PhotoFolder> {
+        val byDate = src.flatMap { it.photos }.groupBy { dateKeyOf(it.captureDate) }
+        return byDate.entries
+            .sortedWith(
+                compareByDescending<Map.Entry<String, List<PtpObjectInfo>>> {
+                    if (it.key == UNKNOWN_DATE) 0 else 1
+                }.thenByDescending { it.key }
+            )
+            .map { (key, photos) -> PhotoFolder(0, 0, key, "", sortNewestFirst(photos)) }
+    }
+
+    private fun toggleGrouping() {
+        groupByDate = !groupByDate
+        applyGrouping()
+        // 换视角 = 换一批照片上屏，走 switchFolder 那条路（它自己会重铺网格）
+        val ptp = PtpUsbConnection.activeInstance
+        if (ptp != null && folders.isNotEmpty()) switchFolder(folderIndex, showAll)
+        Toast.makeText(
+            this,
+            if (groupByDate) "已按拍摄日期分组（同组内按文件名新→旧）" else "已按卡上的文件夹分组",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
+    /** 顶栏「更多」：分组方式 + 把勾选的照片合成延时视频 */
+    private fun showMoreMenu() {
+        val items = ArrayList<String>()
+        items.add(if (groupByDate) "按文件夹分组" else "按日期分组")
+        val n = adapter.selected.size
+        if (n >= 2) items.add("合成延时视频（$n 张）")
+        if (items.size == 1) { toggleGrouping(); return }   // 没勾选时这一项就是全部内容
+
+        val density = resources.displayMetrics.density
+        val rowH = (46 * density).toInt()
+        val popup = ListPopupWindow(this)
+        popup.anchorView = moreButton
+        popup.setBackgroundDrawable(ContextCompat.getDrawable(this, R.drawable.bg_menu_card))
+        popup.setAdapter(AlbumMenuAdapter(items, -1))
+        popup.width = (220 * density).toInt()
+        popup.height = items.size * rowH
+        popup.isModal = true
+        popup.setOnItemClickListener { _, _, position, _ ->
+            popup.dismiss()
+            if (position == 0) toggleGrouping()
+            else confirmTimelapse()
+        }
+        popup.show()
+    }
+
     /** 相册在菜单里的名字：带上父目录，换过卡也不会两个同名分不清 */
     private fun folderPath(f: PhotoFolder): String =
         if (f.parentName.isBlank()) albumName(f) else "${f.parentName}/${albumName(f)}"
@@ -711,8 +836,8 @@ class GalleryActivity : AppCompatActivity() {
     private fun showAlbumMenu() {
         if (folders.size <= 1) return
         val total = folders.sumOf { it.photos.size }
-        val items = folders.map { "${folderPath(it)} · ${it.photos.size} 张" } +
-            "全部相册 · $total 张"
+        val allLabel = if (groupByDate) "全部日期 · $total 张" else "全部相册 · $total 张"
+        val items = folders.map { "${folderPath(it)} · ${it.photos.size} 张" } + allLabel
         val density = resources.displayMetrics.density
         val rowH = (46 * density).toInt()
 
@@ -1372,8 +1497,9 @@ class GalleryActivity : AppCompatActivity() {
         if (!on) {
             selProgress.visibility = View.GONE
             selStatus.visibility = View.GONE
+            selCancelButton.visibility = View.GONE
         }
-        adapter.notifyDataSetChanged()
+        adapter.refreshAll()
         updateSelectionUi()
     }
 
@@ -1388,6 +1514,33 @@ class GalleryActivity : AppCompatActivity() {
         selJpgButton.isEnabled = n > 0 && !busy
         selDeleteButton.isEnabled = n > 0 && !busy
         selDeleteButton.text = if (n > 0) "删除 $n 张" else "删除"
+    }
+
+    /**
+     * 开一个"有进度、能取消"的活儿。
+     *
+     * 以前导出只有一条进度条在动，**没有任何办法中途喊停**：
+     * 几十张 NEF 传起来要好几分钟，点错了就只能干等（或者杀进程，
+     * 那样已经写进去的文件会带着 IS_PENDING=1 变成谁也看不见的幽灵文件）。
+     */
+    private fun beginBusy(job: String, total: Int) {
+        busyJob = job
+        cancelRequested = false
+        selProgress.visibility = View.VISIBLE
+        selProgress.isIndeterminate = false
+        selProgress.max = total
+        selProgress.progress = 0
+        selStatus.visibility = View.VISIBLE
+        selStatus.text = "准备$job $total 张…"
+        selCancelButton.visibility = View.VISIBLE
+        selCancelButton.isEnabled = true
+        updateSelectionUi()
+    }
+
+    private fun endBusy() {
+        busyJob = null
+        selCancelButton.visibility = View.GONE
+        updateSelectionUi()
     }
 
     /** 把字节写进手机相册（Pictures/D300），成功返回文件名 */
@@ -1451,13 +1604,7 @@ class GalleryActivity : AppCompatActivity() {
         if (targets.isEmpty()) { Toast.makeText(this, "还没勾选照片", Toast.LENGTH_SHORT).show(); return }
 
         exporting = true
-        selProgress.visibility = View.VISIBLE
-        selProgress.isIndeterminate = false
-        selProgress.max = targets.size
-        selProgress.progress = 0
-        selStatus.visibility = View.VISIBLE
-        selStatus.text = "准备导出 ${targets.size} 张…"
-        updateSelectionUi()
+        beginBusy("导出", targets.size)
 
         // ------------------------------------------------------------------
         // 导出流水线：1 个下载线程 + N 个解码线程
@@ -1537,7 +1684,9 @@ class GalleryActivity : AppCompatActivity() {
             try {
                 // 下载：串行占 USB，往前多取一点让解码线程不断粮
                 for (e in targets) {
-                    if (!pageAlive) break
+                    // ★ 取消：在**这张传完之前**不打断（打断会留半个文件在手机上），
+                    //   但不再往下传新的 —— 用户按了取消就该马上看到东西停下来
+                    if (!pageAlive || cancelRequested) break
                     val bytes = fetchFull(ptp, e.info)
                     if (bytes == null) {
                         failed.incrementAndGet()
@@ -1556,17 +1705,26 @@ class GalleryActivity : AppCompatActivity() {
                 try { w.join() } catch (_: Exception) {}
             }
 
+            val cancelled = cancelRequested
             runOnUiThread {
                 exporting = false
-                selProgress.progress = targets.size
-                selStatus.text = buildString {
-                    append("导出完成：${ok.get()} 张已存到 相册/D300")
-                    if (converted.get() > 0) append("（其中 ${converted.get()} 张 NEF 已转 JPG）")
-                    if (failed.get() > 0) append(" · ${failed.get()} 张失败（详见日志）")
+                endBusy()
+                selProgress.progress = ok.get() + failed.get()
+                selStatus.text = if (cancelled) {
+                    "已取消：${ok.get()} 张已存到 相册/D300" +
+                        if (failed.get() > 0) " · ${failed.get()} 张失败" else ""
+                } else {
+                    buildString {
+                        append("导出完成：${ok.get()} 张已存到 相册/D300")
+                        if (converted.get() > 0) append("（其中 ${converted.get()} 张 NEF 已转 JPG）")
+                        if (failed.get() > 0) append(" · ${failed.get()} 张失败（详见日志）")
+                    }
                 }
                 Toast.makeText(
                     this,
-                    if (failed.get() > 0) "导出完成，有 ${failed.get()} 张失败" else "已导出 ${ok.get()} 张到 相册/D300",
+                    if (cancelled) "已取消导出，已完成 ${ok.get()} 张"
+                    else if (failed.get() > 0) "导出完成，有 ${failed.get()} 张失败"
+                    else "已导出 ${ok.get()} 张到 相册/D300",
                     Toast.LENGTH_LONG
                 ).show()
                 updateSelectionUi()
@@ -1576,6 +1734,209 @@ class GalleryActivity : AppCompatActivity() {
 
     /** 流水线里传的一张活；entry 为 null 是收工哨兵 */
     private data class ExportJob(val entry: Entry?, val bytes: ByteArray?)
+
+    // ------------------------------------------------------------------
+    // 延时序列合成 MP4
+    //
+    // D300 不会录像。取景录制（LiveViewRecorder）是唯一的"动态画面"，
+    // 但它受取景帧率（10~12fps）和 640×480 的限制。
+    // 这里换一条路：**用已经拍好的照片**离线合成 ——
+    // 画质是完整照片（4288×2848 降采样），帧率自己定，还不受 USB 带宽牵制。
+    // ------------------------------------------------------------------
+
+    private fun confirmTimelapse() {
+        val targets = entries.filter { adapter.selected.contains(it.info.handle) }
+        if (targets.size < 2) {
+            Toast.makeText(this, "至少勾选 2 张才能合成视频", Toast.LENGTH_SHORT).show()
+            return
+        }
+        showTimelapseSheet(targets)
+    }
+
+    /** 分辨率 / 帧率两行选项；选完立刻开跑 */
+    private fun showTimelapseSheet(targets: List<Entry>) {
+        var w = 1920
+        var h = 1080
+        var fps = 24
+
+        fun chip(text: String, group: MutableList<androidx.appcompat.widget.AppCompatButton>):
+            androidx.appcompat.widget.AppCompatButton {
+            val b = androidx.appcompat.widget.AppCompatButton(this)
+            b.text = text
+            b.textSize = 13f
+            b.isAllCaps = false
+            b.minWidth = 0
+            b.minimumWidth = 0
+            b.stateListAnimator = null
+            b.setPadding((14 * resources.displayMetrics.density).toInt(), 0, (14 * resources.displayMetrics.density).toInt(), 0)
+            b.setBackgroundResource(R.drawable.bg_btn_dark)
+            b.setTextColor(getColor(R.color.text_primary))
+            group.add(b)
+            return b
+        }
+
+        fun mark(group: List<androidx.appcompat.widget.AppCompatButton>, chosen: Int) {
+            group.forEachIndexed { i, b ->
+                val on = i == chosen
+                b.setBackgroundResource(if (on) R.drawable.bg_segment_selected else R.drawable.bg_btn_dark)
+                b.setTextColor(getColor(if (on) R.color.accent_amber else R.color.text_primary))
+            }
+        }
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            val p = (16 * resources.displayMetrics.density).toInt()
+            setPadding(p, p, p, p)
+        }
+        fun row(label: String, group: MutableList<androidx.appcompat.widget.AppCompatButton>): LinearLayout {
+            val r = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            val t = TextView(this).apply {
+                text = label
+                setTextColor(getColor(R.color.text_secondary))
+                textSize = 13f
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { marginEnd = (10 * resources.displayMetrics.density).toInt() }
+            }
+            r.addView(t)
+            group.forEach { r.addView(it) }
+            return r
+        }
+
+        val resGroup = mutableListOf<androidx.appcompat.widget.AppCompatButton>()
+        val fpsGroup = mutableListOf<androidx.appcompat.widget.AppCompatButton>()
+        val b720 = chip("720P", resGroup)
+        val b1080 = chip("1080P", resGroup)
+        val f12 = chip("12 fps", fpsGroup)
+        val f24 = chip("24 fps", fpsGroup)
+        val f30 = chip("30 fps", fpsGroup)
+
+        var resIdx = 1
+        var fpsIdx = 1
+        b720.setOnClickListener { resIdx = 0; w = 1280; h = 720; mark(resGroup, resIdx) }
+        b1080.setOnClickListener { resIdx = 1; w = 1920; h = 1080; mark(resGroup, resIdx) }
+        mark(resGroup, resIdx)
+        mark(fpsGroup, fpsIdx)
+
+        root.addView(row("分辨率", resGroup))
+        root.addView(row("帧率", fpsGroup))
+        val hint = TextView(this).apply {
+            setTextColor(getColor(R.color.text_disabled))
+            textSize = 12f
+            setPadding(0, (10 * resources.displayMetrics.density).toInt(), 0, 0)
+        }
+        root.addView(hint)
+        /** 帧率改了要重算时长：同一批照片在 12fps 和 30fps 下是两种节奏 */
+        fun refreshHint() {
+            hint.text = "按拍摄时间从旧到新排列，共 ${targets.size} 张\n" +
+                "合成约 %.1f 秒的片段".format(targets.size.toDouble() / fps) +
+                "\n存到 相册 Movies/D300"
+        }
+        f12.setOnClickListener { fpsIdx = 0; fps = 12; mark(fpsGroup, fpsIdx); refreshHint() }
+        f24.setOnClickListener { fpsIdx = 1; fps = 24; mark(fpsGroup, fpsIdx); refreshHint() }
+        f30.setOnClickListener { fpsIdx = 2; fps = 30; mark(fpsGroup, fpsIdx); refreshHint() }
+        refreshHint()
+
+        android.app.AlertDialog.Builder(this)
+            .setTitle("合成延时视频")
+            .setView(root)
+            .setNegativeButton("取消", null)
+            .setPositiveButton("开始") { _, _ -> composeTimelapse(targets, w, h, fps) }
+            .show()
+    }
+
+    private fun composeTimelapse(targets: List<Entry>, w: Int, h: Int, fps: Int) {
+        val ptp = PtpUsbConnection.activeInstance
+        if (ptp == null) { Toast.makeText(this, "未连接相机", Toast.LENGTH_SHORT).show(); return }
+        if (busyJob != null) return
+
+        // ★ 顺序：网格是"新→旧"，视频必须"旧→新"，倒着放出来就是时光倒流
+        val ordered = targets.sortedWith(
+            compareBy<Entry> { it.info.captureDate }.thenBy { nameRank(it.info.filename).seq }
+        )
+
+        beginBusy("合成", ordered.size)
+        bg {
+            val composer = TimelapseComposer(this@GalleryActivity)
+            var ok = 0
+            var failed = 0
+            var started = false
+            try {
+                started = composer.start(w, h, fps, 0)
+                if (!started) {
+                    runOnUiThread {
+                        Toast.makeText(this@GalleryActivity, "编码器启动失败：${composer.lastError}", Toast.LENGTH_LONG).show()
+                    }
+                }
+            } catch (e: Exception) {
+                runOnUiThread { Toast.makeText(this@GalleryActivity, "合成失败：${e.message}", Toast.LENGTH_LONG).show() }
+            }
+
+            if (started) {
+                for (e in ordered) {
+                    if (!pageAlive || cancelRequested) break
+                    val bytes = fetchFull(ptp, e.info)
+                    val bmp = if (bytes == null) null else decodeScaled(bytes, e.info.isJpeg, w)
+                    if (bmp == null) {
+                        failed++
+                        // 单张失败跳过继续：一张解不出来（坏 NEF / 传输出错）
+                        // 不该把前面几十张的成果一起作废
+                        android.util.Log.w("TIMELAPSE", "跳过 ${e.info.filename}")
+                    } else {
+                        composer.submitFrame(bmp)
+                        bmp.recycle()
+                        ok++
+                    }
+                    val d = ok + failed
+                    runOnUiThread {
+                        selProgress.progress = d
+                        selStatus.text = "已合成 $d/${ordered.size}：${e.info.filename}"
+                    }
+                }
+            }
+
+            val cancelled = cancelRequested
+            val out = if (cancelled) { composer.abort(); null } else composer.stop()
+            val err = composer.lastError
+            runOnUiThread {
+                endBusy()
+                selStatus.text = when {
+                    cancelled -> "已取消合成"
+                    out == null -> "合成失败：${err ?: "没有写出任何画面"}"
+                    failed > 0 -> "已合成 $ok 帧（$failed 张跳过）→ $out"
+                    else -> "已合成 $ok 帧 → $out"
+                }
+                Toast.makeText(
+                    this@GalleryActivity,
+                    if (out == null) "合成失败：${err ?: "没有写出任何画面"}" else "已保存到 $out",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+    }
+
+    /**
+     * 把一张照片解到**够用就好**的尺寸。
+     *
+     * 4288×2848 的 ARGB_8888 一张就是 49 MB，几十张同时留在内存里必崩；
+     * 反正输出只有 1080P，按 2 的幂降采样到接近目标宽度即可 ——
+     * BitmapFactory 的 inSampleSize 在解码时就跳像素，比"解全尺寸再缩放"省一大截内存和时间。
+     */
+    private fun decodeScaled(bytes: ByteArray, isJpeg: Boolean, targetW: Int): Bitmap? {
+        // NEF 先走 LibRaw 转成 JPG（与导出那颗按钮同一条路），再按普通 JPEG 解
+        val src = if (isJpeg) bytes else NefDecoder.toJpeg(bytes, cacheDir, jpegQuality) ?: return null
+        val probe = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeByteArray(src, 0, src.size, probe)
+        if (probe.outWidth <= 0 || probe.outHeight <= 0) return null
+        var sample = 1
+        while (probe.outWidth / (sample * 2) >= targetW) sample *= 2
+        val opt = android.graphics.BitmapFactory.Options().apply {
+            inSampleSize = sample
+            inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888
+        }
+        return android.graphics.BitmapFactory.decodeByteArray(src, 0, src.size, opt)
+    }
 
     // ---------------- JPG 品质 ----------------
 
@@ -1788,19 +2149,14 @@ class GalleryActivity : AppCompatActivity() {
         val ptp = PtpUsbConnection.activeInstance ?: return
         if (deleting) return
         deleting = true
-        selProgress.visibility = View.VISIBLE
-        selProgress.isIndeterminate = false
-        selProgress.max = targets.size
-        selProgress.progress = 0
-        selStatus.visibility = View.VISIBLE
-        selStatus.text = "准备删除 ${targets.size} 张…"
-        updateSelectionUi()
+        beginBusy("删除", targets.size)
 
         bg {
             val supported = ptp.supportsOperation(PtpConstants.OP_DELETE_OBJECT)
             if (supported == false) {
                 runOnUiThread {
                     deleting = false
+                    endBusy()
                     selProgress.visibility = View.GONE
                     selStatus.text = "机身不支持 USB 删除，请用机身上的删除键"
                     Toast.makeText(this, "机身不支持 USB 删除", Toast.LENGTH_LONG).show()
@@ -1814,7 +2170,8 @@ class GalleryActivity : AppCompatActivity() {
             var lastWhy = ""
             val removed = ArrayList<Int>()
             for (e in targets) {
-                if (!pageAlive) break
+                // 删到一半想停：跟导出一样，当前这张发完就收手，不再往下删
+                if (!pageAlive || cancelRequested) break
                 val (done, why) = ptp.deleteObject(e.info.handle)
                 if (done) {
                     ok++
@@ -1829,31 +2186,39 @@ class GalleryActivity : AppCompatActivity() {
                 }
             }
 
+            val cancelled = cancelRequested
             runOnUiThread {
                 deleting = false
-                selProgress.progress = targets.size
-                selStatus.text = buildString {
-                    append("删除完成：$ok 张已删")
-                    if (failed > 0) append(" · $failed 张失败${if (lastWhy.isNotBlank()) "（$lastWhy）" else ""}")
+                endBusy()
+                selProgress.progress = ok + failed
+                selStatus.text = if (cancelled) {
+                    "已取消删除：已删 $ok 张${if (failed > 0) " · $failed 张失败" else ""}"
+                } else {
+                    buildString {
+                        append("删除完成：$ok 张已删")
+                        if (failed > 0) append(" · $failed 张失败${if (lastWhy.isNotBlank()) "（$lastWhy）" else ""}")
+                    }
                 }
                 // 只把真删掉的从列表摘掉：没删成的留在网格上也留在勾选里，方便重试
                 for (h in removed) {
                     val i = entries.indexOfFirst { it.info.handle == h }
                     if (i >= 0) {
                         entries.removeAt(i)
-                        adapter.notifyItemRemoved(i)
+                        adapter.refreshAll()
                         adapter.selected.remove(h)
                     }
                 }
                 updateCountText()
                 Toast.makeText(
                     this,
-                    if (failed > 0) "删除完成，$failed 张失败" else "已删除 $ok 张",
+                    if (cancelled) "已取消删除，已删 $ok 张"
+                    else if (failed > 0) "删除完成，$failed 张失败"
+                    else "已删除 $ok 张",
                     Toast.LENGTH_LONG
                 ).show()
                 if (adapter.selected.isEmpty()) setSelectMode(false)
                 else {
-                    adapter.notifyDataSetChanged()
+                    adapter.refreshAll()
                     updateSelectionUi()
                 }
             }
@@ -1875,7 +2240,7 @@ class GalleryActivity : AppCompatActivity() {
             val idx = entries.indexOfFirst { it.info.handle == entry.info.handle }
             if (idx >= 0) {
                 entries.removeAt(idx)
-                adapter.notifyItemRemoved(idx)
+                adapter.refreshAll()
                 updateCountText()
             }
         }
@@ -1908,6 +2273,13 @@ class GalleryActivity : AppCompatActivity() {
         else -> "$bytes B"
     }
 
+    /** 网格里的一个格子：要么是一个日期抬头，要么是一张照片 */
+    private sealed class GridItem {
+        class Header(val text: String) : GridItem()
+        /** [entryIndex] 是它在 [GalleryActivity.entries] 里的下标 */
+        class Photo(val entryIndex: Int) : GridItem()
+    }
+
     private class ThumbAdapter(
         private val entries: List<Entry>,
         private val onClick: (Entry) -> Unit,
@@ -1923,44 +2295,103 @@ class GalleryActivity : AppCompatActivity() {
         /** 已勾选的照片句柄（用句柄而不是下标：切相册/刷新时下标会变） */
         val selected = mutableSetOf<Int>()
 
-        class Holder(view: View) : RecyclerView.ViewHolder(view) {
-            val thumb: ImageView = view.findViewById(R.id.thumb)
-            val badge: TextView = view.findViewById(R.id.badge)
-            val name: TextView = view.findViewById(R.id.filename)
-            val check: android.widget.CheckBox = view.findViewById(R.id.check)
+        /**
+         * 日期抬头开关（按拍摄日期分组时开）。
+         *
+         * 改成 private set + 自动重建：抬头是"格子序列"的一部分，
+         * 开关一变必须重排，否则下标和抬头对不上，点第五格会打开第四张照片。
+         */
+        var headersOn: Boolean = false
+            set(value) {
+                if (field == value) return
+                field = value
+                rebuild()
+            }
+
+        /** 当前铺出来的格子序列（照片 + 抬头） */
+        private val items = mutableListOf<GridItem>()
+
+        /** 按 [entries] 的当前内容重排格子；只在日期变化处插一条抬头 */
+        fun rebuild() {
+            items.clear()
+            var last: String? = null
+            for (i in entries.indices) {
+                if (headersOn) {
+                    val d = dateKeyOf(entries[i].info.captureDate)
+                    if (d != last) {
+                        items.add(GridItem.Header(d))
+                        last = d
+                    }
+                }
+                items.add(GridItem.Photo(i))
+            }
         }
 
+        /** 重建 + 整表刷新（entries 被整体换掉之后用） */
+        fun refreshAll() {
+            rebuild()
+            notifyDataSetChanged()
+        }
+
+        /** 只换第 [entryIndex] 张照片的内容（缩略图到位时用） */
+        fun notifyPhoto(entryIndex: Int) {
+            val p = items.indexOfFirst { it is GridItem.Photo && it.entryIndex == entryIndex }
+            if (p >= 0) notifyItemChanged(p)
+        }
+
+        fun isHeader(position: Int): Boolean =
+            position >= 0 && position < items.size && items[position] is GridItem.Header
+
+        /**
+         * 抬头和照片共用同一个 Holder：抬头那一版布局里没有 thumb/badge/name/check，
+         * 所以它们一律可空 —— 写成非空的话 Kotlin 会在 inflate 抬头时直接抛 NPE。
+         */
+        class Holder(view: View) : RecyclerView.ViewHolder(view) {
+            val thumb: ImageView? = view.findViewById(R.id.thumb)
+            val badge: TextView? = view.findViewById(R.id.badge)
+            val name: TextView? = view.findViewById(R.id.filename)
+            val check: android.widget.CheckBox? = view.findViewById(R.id.check)
+            val header: TextView? = view.findViewById(R.id.dateHeader)
+        }
+
+        override fun getItemViewType(position: Int): Int =
+            if (isHeader(position)) 1 else 0
+
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder {
-            val view = LayoutInflater.from(parent.context)
-                .inflate(R.layout.item_gallery_photo, parent, false)
+            val id = if (viewType == 1) R.layout.item_gallery_header else R.layout.item_gallery_photo
+            val view = LayoutInflater.from(parent.context).inflate(id, parent, false)
             return Holder(view)
         }
 
         override fun onBindViewHolder(holder: Holder, position: Int) {
-            val entry = entries[position]
+            if (isHeader(position)) {
+                holder.header?.text = (items[position] as GridItem.Header).text
+                return
+            }
+            val entry = entries[(items[position] as GridItem.Photo).entryIndex]
             if (entry.thumb != null) {
-                holder.thumb.setImageBitmap(entry.thumb)
-                holder.thumb.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                holder.thumb?.setImageBitmap(entry.thumb)
+                holder.thumb?.setBackgroundColor(android.graphics.Color.TRANSPARENT)
             } else {
                 // 缩略图没取到（罕见）：留深色占位，至少网格位置不乱
-                holder.thumb.setImageDrawable(null)
+                holder.thumb?.setImageDrawable(null)
             }
 
             // 左下角文件名：不带后缀（格式由右下角那枚角标负责）
-            holder.name.text = entry.info.filename.substringBeforeLast('.')
+            holder.name?.text = entry.info.filename.substringBeforeLast('.')
 
             // JPEG 是默认预期，不用标注；NEF 等解不了的要标出来
             if (entry.info.isJpeg) {
-                holder.badge.visibility = View.GONE
+                holder.badge?.visibility = View.GONE
             } else {
-                holder.badge.visibility = View.VISIBLE
-                holder.badge.text = entry.info.formatLabel
+                holder.badge?.visibility = View.VISIBLE
+                holder.badge?.text = entry.info.formatLabel
             }
 
-            holder.check.visibility = if (selectMode) View.VISIBLE else View.GONE
-            holder.check.isChecked = selected.contains(entry.info.handle)
+            holder.check?.visibility = if (selectMode) View.VISIBLE else View.GONE
+            holder.check?.isChecked = selected.contains(entry.info.handle)
             // 选中的格子整体压暗一点，隔着 thumbnail 也能一眼看出勾了哪些
-            holder.itemView.alpha = if (selectMode && holder.check.isChecked) 0.65f else 1f
+            holder.itemView.alpha = if (selectMode && holder.check?.isChecked == true) 0.65f else 1f
 
             holder.itemView.setOnClickListener {
                 if (selectMode) {
@@ -1979,6 +2410,24 @@ class GalleryActivity : AppCompatActivity() {
             }
         }
 
-        override fun getItemCount() = entries.size
+        override fun getItemCount() = items.size
     }
+}
+
+/**
+ * 从 PTP 的拍摄时间串里取出"年月日"这一段，用来分组和做抬头。
+ *
+ * 机身给的格式是 `20261024T123456`（PTP 标准），也有固件写成
+ * `2026-10-24T12:34:56`，两种都认；认不出来就归到"未知日期"，
+ * 绝不猜一个日期 —— 猜错会把不同日子的照片混进同一组。
+ */
+/** 解析不出拍摄日期时的归口（分组名 / 抬头文本都用它） */
+private const val UNKNOWN_DATE = "未知日期"
+
+private fun dateKeyOf(raw: String): String {
+    val s = raw.trim()
+    val digits = s.takeWhile { it.isDigit() }
+    if (digits.length >= 8) return "${digits.substring(0, 4)}-${digits.substring(4, 6)}-${digits.substring(6, 8)}"
+    if (s.length >= 10 && s[4] == '-') return s.substring(0, 10)
+    return UNKNOWN_DATE
 }

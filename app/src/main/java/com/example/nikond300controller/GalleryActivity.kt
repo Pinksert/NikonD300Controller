@@ -212,7 +212,13 @@ class GalleryActivity : AppCompatActivity() {
     private lateinit var albumSwitch: View
     private lateinit var albumNameText: TextView
 
-    /** 已按"新 → 旧"排好的相册列表 = 当前视角下的分组（文件夹 或 日期，见 [groupByDate]） */
+    /**
+     * 已按"新 → 旧"排好的相册列表 = 当前视角下的分组（文件夹 或 日期，见 [groupByDate]）。
+     *
+     * ★ @Volatile：现在分组是在**列举照片的后台线程**里算的（[recomputeFolders]），
+     *   而顶栏/网格在 UI 线程读它；不加的话 UI 线程可能一直看到上一批的旧引用。
+     */
+    @Volatile
     private var folders: List<PhotoFolder> = emptyList()
 
     /**
@@ -222,6 +228,7 @@ class GalleryActivity : AppCompatActivity() {
      * 按日期看时是把所有照片重排成的日期组。分开存是为了切分组方式时
      * 不用再付几百次 GetObjectInfo 去重新列举。
      */
+    @Volatile
     private var rawFolders: List<PhotoFolder> = emptyList()
 
     /** 分组方式：false = 卡上的文件夹（默认，和机身一致），true = 按拍摄日期 */
@@ -298,6 +305,16 @@ class GalleryActivity : AppCompatActivity() {
         val t = thread {
             try {
                 block()
+            } catch (t2: Throwable) {
+                // ★ 后台线程的未捕获异常会直接杀掉整个进程（用户看到的就是"闪退"）。
+                //   USB 往返/解码/合成里什么都可能出错，一律兜住并记日志，页面保持可用。
+                if (t2 is InterruptedException) Thread.currentThread().interrupt()
+                android.util.Log.e("GALLERY", "后台任务异常", t2)
+                runOnUiThread {
+                    if (!pageAlive) return@runOnUiThread
+                    progress.visibility = View.GONE
+                    loading = false
+                }
             } finally {
                 synchronized(bgLock) { bgThreads.remove(Thread.currentThread()) }
             }
@@ -542,9 +559,10 @@ class GalleryActivity : AppCompatActivity() {
             // 切换相册时直接复用这次结果，不再重新列举。
             val found = ptp.collectPhotoFolders()
             if (found.isEmpty()) {
+                rawFolders = emptyList()
+                recomputeFolders()
                 runOnUiThread {
-                    rawFolders = emptyList()
-                    applyGrouping()
+                    applyGroupingUi()
                     progress.visibility = View.GONE
                     loading = false
                     countText.text = "0 张"
@@ -556,12 +574,13 @@ class GalleryActivity : AppCompatActivity() {
             }
 
             rawFolders = found
-            runOnUiThread {
-                applyGrouping()
-                // 默认显示**最新**的那个相册（用户在别处选过"全部"就保持全部）
-                if (!showAll) folderIndex = folderIndex.coerceIn(0, (folders.size - 1).coerceAtLeast(0))
-                updateAlbumSwitcher()
-            }
+            // ★ 分组必须**在本线程同步算完**：紧接着的 renderCurrentFolder 就要读 folders，
+            //   早先把它塞进 runOnUiThread 排队，后台线程先跑到底时 folders 还是上一批
+            //   （首次为空）→ folders[folderIndex] 直接 IndexOutOfBounds，整进程崩掉
+            recomputeFolders()
+            // 默认显示**最新**的那个相册（用户在别处选过"全部"就保持全部）
+            if (!showAll) folderIndex = folderIndex.coerceIn(0, (folders.size - 1).coerceAtLeast(0))
+            runOnUiThread { applyGroupingUi() }
 
             renderCurrentFolder(
                 ptp,
@@ -622,8 +641,10 @@ class GalleryActivity : AppCompatActivity() {
         onFirstBatch: (() -> Unit)? = null,
         onFinish: ((Boolean) -> Unit)? = null
     ) {
+        // 兜底：folders 还没算出来（列举刚起步/切分组的瞬间）就别拿下标硬取
         val ordered = sortNewestFirst(
-            if (showAll) folders.flatMap { it.photos } else folders[folderIndex].photos
+            if (showAll) folders.flatMap { it.photos }
+            else folders.getOrNull(folderIndex)?.photos ?: emptyList()
         )
         val token = ++loadToken
         currentList = ordered
@@ -738,7 +759,7 @@ class GalleryActivity : AppCompatActivity() {
             return
         }
         val allLabel = if (groupByDate) "全部日期" else "全部相册"
-        val name = if (showAll) allLabel else albumName(folders[folderIndex])
+        val name = if (showAll) allLabel else folders.getOrNull(folderIndex)?.let { albumName(it) } ?: allLabel
         albumNameText.text = if (folders.size > 1) "$name ▾" else name
         albumNameText.visibility = View.VISIBLE
         if (folders.size > 1) {
@@ -763,15 +784,28 @@ class GalleryActivity : AppCompatActivity() {
     // 所以这个视角只能由 App 补。
     // ------------------------------------------------------------------
 
-    /** 按 [groupByDate] 重算 [folders]；切分组时不必重新列举 */
-    private fun applyGrouping() {
+    /**
+     * 重算 [folders] 与 [folderIndex]。纯数据，**任意线程都可调用** ——
+     * 列举完照片的后台线程必须立刻拿到结果，不能排队等 UI 线程。
+     */
+    private fun recomputeFolders() {
         folders = if (groupByDate) buildDateGroups(rawFolders) else sortFoldersNewestFirst(rawFolders)
         folderIndex = folderIndex.coerceIn(0, (folders.size - 1).coerceAtLeast(0))
+    }
+
+    /** 分组结果上屏（adapter + 顶栏）；必须 UI 线程 */
+    private fun applyGroupingUi() {
         if (::adapter.isInitialized) {
             adapter.headersOn = groupByDate
             adapter.refreshAll()
         }
         updateAlbumSwitcher()
+    }
+
+    /** 切分组方式：重新分组并上屏；必须 UI 线程 */
+    private fun applyGrouping() {
+        recomputeFolders()
+        applyGroupingUi()
     }
 
     /**

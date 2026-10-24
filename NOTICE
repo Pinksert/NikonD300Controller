@@ -1,0 +1,27 @@
+Nikon D300 Controller
+Copyright (c) 2025 Nikon D300 Controller contributors
+
+本项目（除下列第三方组件外的代码）按 MIT License 授权，见 LICENSE。
+
+--------------------------------------------------------------------------
+第三方组件
+--------------------------------------------------------------------------
+
+1) LibRaw  ——  app/src/main/cpp/libraw
+   Copyright (C) 2008-2024 LibRaw LLC (https://www.libraw.org)
+   许可：LGPL-2.1 或 CDDL-1.0，任选其一。
+   用途：NEF / RAW 解码（霍夫曼解码 → 线性化 → 机身白平衡 → AHD 插值 → sRGB），
+        经 JNI 封装为 libnefdecoder.so 供相册「JPG 导出」使用。
+
+2) RemoteYourCam-USB
+   用途：早期 PTP 常量表与 D300 实机 11 点对焦点坐标的参考来源。
+
+3) libgphoto2 (ptp.h)
+   Copyright (C) 2001-2024 Marcus Meissner 等贡献者
+   许可：LGPL-2.1
+   用途：尼康私有操作码 / 属性码命名与值域的对照依据（本项目仅参考其常量定义，
+        未链接其任何代码）。
+
+4) AndroidX / Material Components for Android
+   Copyright (C) The Android Open Source Project
+   许可：Apache License 2.0

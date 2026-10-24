@@ -14,34 +14,37 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 
 /**
- * 两个"只读"页面：使用说明 / 关于。
+ * 三个"只读"页面：使用说明 / 关于 / 开源许可证。
  *
- * 合到一个 Activity 里的原因：两页都只是**静态文本 + 一个返回键**，
- * 拆成两个只换来两份几乎一样的 manifest 条目和两坨样板代码。
+ * 合到一个 Activity 里的原因：三页都只是**静态文本 + 一个返回键**，
+ * 拆成三个只换来三份几乎一样的 manifest 条目和三坨样板代码。
  * 用 [EXTRA_PAGE] 区分内容，入口各写各的 Intent。
  *
  * 界面在代码里建，直接复用 SheetUi 里那套构件（卡片 / 取值行 / 提示文字），
- * 这样不用为了两页静态说明再同步改两份 XML。
+ * 这样不用为了几页静态说明再同步改好几份 XML。
  */
 class InfoActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val page = intent.getStringExtra(EXTRA_PAGE) ?: PAGE_HELP
-        val isAbout = page == PAGE_ABOUT
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(color(R.color.bg_base))
         }
 
-        root.addView(buildTopBar(if (isAbout) "关于" else "使用说明"))
+        root.addView(buildTopBar(titleOf(page)))
 
         val body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14), dp(6), dp(14), dp(30))
         }
-        if (isAbout) buildAbout(body) else buildHelp(body)
+        when (page) {
+            PAGE_ABOUT -> buildAbout(body)
+            PAGE_LICENSE -> buildLicense(body)
+            else -> buildHelp(body)
+        }
 
         root.addView(
             ScrollView(this).apply { addView(body) },
@@ -51,6 +54,12 @@ class InfoActivity : AppCompatActivity() {
         )
 
         setContentView(root)
+    }
+
+    private fun titleOf(page: String): String = when (page) {
+        PAGE_ABOUT -> "关于"
+        PAGE_LICENSE -> "开源许可证"
+        else -> "使用说明"
     }
 
     // ---------------------------------------------------------------- 顶栏
@@ -99,6 +108,26 @@ class InfoActivity : AppCompatActivity() {
         sheetInfoRow("适配机身", "Nikon D300 / D300s").let { info.addView(it.first) }
         sheetInfoRow("连接方式", "USB OTG · 机身 USB 模式选 MTP/PTP")
             .let { info.addView(it.first) }
+        sheetInfoRow("系统要求", "Android 7.0（API 24）以上，需支持 USB OTG")
+            .let { info.addView(it.first) }
+
+        // ---- 开源许可证 ----
+        root.addView(sectionTitle("开源许可证"))
+        root.addView(paragraph(
+            "本项目以 「MIT License」 开源，可自由使用、修改、分发，包括商业用途；" +
+                "唯一要求是保留版权声明与许可声明。软件按「原样」提供，作者不承担任何担保与责任。"
+        ))
+        root.addView(linkRow("查看完整许可证文本与第三方声明") { open(this, PAGE_LICENSE) })
+
+        root.addView(sectionTitle("第三方组件"))
+        root.addView(paragraph(
+            "· LibRaw（LGPL-2.1 / CDDL 双许可）—— NEF 真解 RAW 的解码核心，\n" +
+                "  源码随包提供在 app/src/main/cpp/libraw，经 JNI 编成 libnefdecoder.so。\n" +
+                "· RemoteYourCam-USB —— 早期 PTP 常量与 D300 实机对焦点数据的参考来源。\n" +
+                "· libgphoto2（ptp.h） —— 尼康私有操作码 / 属性码命名与值域的对照依据。\n" +
+                "· AndroidX / Material Components —— Apache-2.0。\n" +
+                "第三方组件各自遵循其原始许可，完整声明见许可证页。"
+        ))
 
         root.addView(sectionTitle("来历"))
         root.addView(paragraph(
@@ -113,14 +142,48 @@ class InfoActivity : AppCompatActivity() {
             "· 删除照片：多数 D300 机身的 USB 操作清单里不给 0x100B DeleteObject，" +
                 "点了会直接告诉你做不到，请用机身按键删。\n" +
                 "· 快门次数：没有 PTP 通道，只能从照片 EXIF 的尼康 MakerNote 里读。\n" +
-                "· 取景内拍摄：照片留在机身内存，App 取回后存进手机相册，卡上不会有这一张。\n" +
-                "· 录制：机身不会录像，录制是把取景帧在手机上压成 MP4。"
+                "· 反光板预升：没有专用 PTP 指令，只能把释放模式拨盘转到 Mup，" +
+                "由 App 连按两次快门（第一次抬板、第二次曝光）。\n" +
+                "· 录制：机身不会录像，录制是把取景帧在手机上压成 MP4。\n" +
+                "· 手持模式的对焦点只能落在那 51 个固定点位上 —— 这是相位检测 AF 的硬件限制，" +
+                "要能在画面任意位置选点，请切到三脚架模式。"
         ))
 
         root.addView(sectionTitle("日志页是给人看的"))
         root.addView(paragraph(
             "顶栏右侧的日志按钮进去。连不上、参数写了没反应、照片没落卡，" +
                 "最后几行基本都能说清卡在哪一步；反馈问题时把它整段贴出来最省事。"
+        ))
+
+        root.addView(linkRow("第一次用？看使用说明") { open(this, PAGE_HELP) })
+    }
+
+    // ------------------------------------------------------------ 开源许可证
+
+    private fun buildLicense(root: LinearLayout) {
+        root.addView(sectionTitle("MIT License"))
+        val card = sheetCard(root, null)
+        card.addView(TextView(this).apply {
+            text = MIT_LICENSE_TEXT.trimIndent()
+            setTextColor(color(R.color.text_primary))
+            textSize = 12f
+            setLineSpacing(dp(2).toFloat(), 1f)
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+            setTypeface(android.graphics.Typeface.MONOSPACE)
+        })
+
+        root.addView(sectionTitle("第三方组件许可"))
+        root.addView(paragraph(
+            "· LibRaw —— Copyright (C) 2008-2024 LibRaw LLC。" +
+                "按 LGPL-2.1 或 CDDL-1.0（任选其一）授权，用于 NEF/RAW 解码。\n" +
+                "  完整源码：https://www.libraw.org/\n\n" +
+                "· RemoteYourCam-USB —— PTP 常量与 D300 实机对焦点数据的参考来源。\n\n" +
+                "· libgphoto2 —— Copyright (C) 2001-2024 Marcus Meissner 等贡献者，LGPL-2.1。" +
+                "其 ptp.h 中的尼康私有操作码 / 属性码命名被本项目的协议注释引用。\n\n" +
+                "· AndroidX / Material Components for Android —— Apache License 2.0。"
+        ))
+        root.addView(paragraph(
+            "上述组件各自遵循其原始许可证；本 App 除这些第三方组件外的代码按上面的 MIT License 授权。"
         ))
     }
 
@@ -149,16 +212,31 @@ class InfoActivity : AppCompatActivity() {
 
         root.addView(sectionTitle("2 · 拍摄页的几个按钮"))
         root.addView(paragraph(
-            "取景 · 抬起反光板，把实时画面传到手机上\n" +
-                "AF · 让机身对一次焦，合焦后状态行变绿\n" +
+            "取景 · 抬起反光板，把实时画面传到手机上（长按可切手持 / 三脚架）\n" +
+                "对焦 · 让机身对一次焦，合焦后状态行变绿\n" +
                 "拍摄 · 释放快门，照片写进卡里\n" +
                 "录制 · 把取景帧在手机上压成 MP4（机身本身不录像）\n" +
                 "峰值 · 手动对焦时把合焦边缘描亮，看哪儿实了\n" +
+                "触摸对焦 · 点画面哪儿就对哪儿（只在取景时出现）\n" +
                 "全屏 · 画面铺满整屏，按钮贴到画面上下沿外面，不挡构图\n" +
                 "反光板预升 · 先抬反光板、再放快门，长曝和微距时避免机震"
         ))
 
-        root.addView(sectionTitle("3 · ISO / 光圈 / 快门"))
+        root.addView(sectionTitle("3 · 对焦：点哪儿对哪儿"))
+        root.addView(paragraph(
+            "先点「取景」，等画面出来。取景有两个模式，对焦方式完全不同：\n\n" +
+                "「手持模式」（默认）：用的是取景器那套 51 点相位检测 AF。" +
+                "把「触摸对焦」点亮，然后点画面 —— App 会把点击吸附到最近那个对焦点，" +
+                "写进机身再自动对一次焦。对焦点只能落在这 51 个固定点位上，" +
+                "这是相位检测的硬件限制，官方软件也只能一个点一个点地选。\n\n" +
+                "「三脚架模式」：长按「取景」按钮切过去。这时是对比度检测 AF，" +
+                "AF 框能停在画面「任意位置」 —— 点画面哪儿框就去哪儿，" +
+                "机身自己会跑一次对焦（会响提示音），不用再按「对焦」。\n\n" +
+                "放大看细节时（画面上的倍率按钮）先回到全画面再选点：" +
+                "放大状态下挪对焦点，机身会顺势把放大的那一块也挪走，画面会跟着跑。"
+        ))
+
+        root.addView(sectionTitle("4 · ISO / 光圈 / 快门"))
         root.addView(paragraph(
             "点这三个大数字任意一下，弹出对应的档位表，点哪档就是哪档，立刻写进机身。\n" +
                 "档位表来自机身描述符，不是写死的 —— 换镜头、改机身上的 b1/b2/b3 步长，" +
@@ -166,51 +244,43 @@ class InfoActivity : AppCompatActivity() {
                 "手动档（M）能同时改光圈和快门；光圈优先（A）下快门交给机身。"
         ))
 
-        root.addView(sectionTitle("4 · 参数页分了五组"))
+        root.addView(sectionTitle("5 · 参数页分了五组"))
         root.addView(paragraph(
             "曝光与画质 · 白平衡 / 测光 / 闪光补偿 / 图像质量 / 记录媒介\n" +
                 "实时取景 · 对焦点数量（51 或 11）、构图网格\n" +
                 "包围曝光 · 光圈包围、快门包围\n" +
                 "拍摄流程 · 自拍延时、间隔拍摄、拍完自动下载\n" +
-                "机身 · 存储卡、个人设定菜单（a–f 共 50 项）、拍摄菜单、NCP 滤镜导入"
+                "机身 · 存储卡、相机设定菜单（a–f 共 50 项）、拍摄菜单、关于与使用说明"
         ))
 
-        root.addView(sectionTitle("5 · 相册"))
+        root.addView(sectionTitle("6 · 相册"))
         root.addView(paragraph(
             "底部导航第三格进去。点一张看大图，左右滑切换；长按任意一张进多选，\n" +
-                "底栏「原图导出」= 相机里是什么字节就存什么字节；\n" +
-                "「JPG 导出」= NEF 用 LibRaw 真解 RAW 再压 JPG（长按这颗改压缩品质，\n" +
-                "按钮第二行写着当前档位）。JPEG 原件两种方式都是原样拷贝。\n" +
-                "转出来的图会把原图 EXIF 原样搬过去 —— 所以在电脑上看仍然带光圈快门 ISO。"
+                "底栏四个按钮：\n" +
+                "「原图导出」= 相机里是什么字节就存什么字节；\n" +
+                "「JPG 导出」= NEF 用 LibRaw 真解 RAW 再压 JPG（点下去先选压缩品质，\n" +
+                "全是 JPEG 时不会问）；「删除 N 张」= 逐张发机身删除指令；「退出」= 回到相册。\n" +
+                "转出来的 JPG 会把原图 EXIF 搬过去 —— 在电脑上看仍然带光圈快门 ISO 和拍摄时间。"
         ))
 
-        root.addView(sectionTitle("6 · 看不懂的提示"))
+        root.addView(sectionTitle("7 · 看不懂的提示"))
         root.addView(paragraph(
             "未连接 / 找不到相机 → OTG 线松了或机身休眠，重插一次再点连接\n" +
                 "机身忙（0x2002）→ 上一张还在写卡，等几秒\n" +
                 "参数不认（0x201C）→ 曝光补偿这类必须填机身枚举里的原值，App 已按机身表填\n" +
-                "对焦失败（0x2019）→ 太暗或没反差，先 AF 或改用手动对焦\n" +
+                "对焦失败（0x2019）→ 太暗或没反差，先对焦或改用手动对焦\n" +
+                "点了画面没反应 → 触摸对焦没打开，或放大状态下；先回全画面再点\n" +
                 "完全没反应 → 有命令把 USB 管道挂住了，拔线重插最省事"
         ))
 
-        root.addView(sectionTitle("7 · 机身上的前提"))
+        root.addView(sectionTitle("8 · 机身上的前提"))
         root.addView(paragraph(
             "· 释放模式拨盘别停在遥控/自拍以外的奇怪档；用反光板预升时按 App 提示走\n" +
                 "· 镜头上的 A/M 开关打到 A 时，机身自动对焦才有效\n" +
                 "· 电量太低时机身会拒掉取景指令，先充满再试"
         ))
 
-        root.addView(TextView(this).apply {
-            text = "看完整版说明"
-            setTextColor(color(R.color.accent_amber))
-            textSize = 13f
-            setTypeface(null, Typeface.BOLD)
-            setPadding(dp(2), dp(20), 0, 0)
-            setOnClickListener {
-                startActivity(Intent(this@InfoActivity, InfoActivity::class.java)
-                    .putExtra(EXTRA_PAGE, PAGE_ABOUT))
-            }
-        })
+        root.addView(linkRow("版本、许可证与第三方声明") { open(this, PAGE_ABOUT) })
     }
 
     // ---------------------------------------------------------------- 构件
@@ -238,15 +308,53 @@ class InfoActivity : AppCompatActivity() {
         setPadding(dp(2), 0, dp(2), 0)
     }
 
+    /** 页内跳转：琥珀色可点文字，串起 使用说明 ⇄ 关于 → 许可证 */
+    private fun linkRow(text: String, onClick: Context.() -> Unit): TextView =
+        TextView(this).apply {
+            this.text = text
+            setTextColor(color(R.color.accent_amber))
+            textSize = 13f
+            setTypeface(null, Typeface.BOLD)
+            setPadding(dp(2), dp(20), 0, 0)
+            setOnClickListener { this@InfoActivity.onClick() }
+        }
+
     companion object {
         const val EXTRA_PAGE = "page"
         const val PAGE_ABOUT = "about"
         const val PAGE_HELP = "help"
+        const val PAGE_LICENSE = "license"
 
         fun open(context: Context, page: String) {
             context.startActivity(
                 Intent(context, InfoActivity::class.java).putExtra(EXTRA_PAGE, page)
             )
         }
+
+        /**
+         * MIT 正文。放在代码里而不是 assets 里，是为了"关于页一定能打开" ——
+         * 少一个文件读失败的路径，也少一处需要同步维护的资源。
+         */
+        private const val MIT_LICENSE_TEXT = """
+Copyright (c) 2025 Nikon D300 Controller contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+"""
     }
 }

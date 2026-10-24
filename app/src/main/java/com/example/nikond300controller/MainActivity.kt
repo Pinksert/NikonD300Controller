@@ -3082,10 +3082,15 @@ class MainActivity : AppCompatActivity(), SheetHost {
         val handheld = mode == PtpConstants.LIVE_VIEW_MODE_HANDHELD
         val tripod = mode == PtpConstants.LIVE_VIEW_MODE_TRIPOD
         val live = isLiveViewRunning
-        // 画面点击（0x9205 绝对定位）只在「取景中 · 三脚架」才有意义：
-        // 手持模式发绝对坐标机身收了也不动，未取景时根本没有画面可点 ——
-        // 挂回调只会让用户白点、还以为点坏了。
-        focusBox.onAreaPicked = if (live && tripod) { { nx, ny -> moveAfAreaTo(nx, ny) } } else null
+        // 画面点击由谁接管：
+        // - 取景中 · 三脚架 → 0x9205 绝对定位，AF 框能落在画面任意位置
+        // - 取景中 · 手持 + 触摸对焦开 → 吸附到最近的对焦点（0xD108）再自动对焦
+        //   手持是 51 点相位 AF，机身只认固定点位，发绝对坐标它不动；
+        //   以前这条回调在手持下压根不挂，用户点了画面毫无反应（"触摸对焦没用"）。
+        // - 其余情况不挂：未取景没有画面可点，触摸对焦关着时不该被误触改写对焦点。
+        focusBox.onAreaPicked =
+            if (live && (tripod || touchAfEnabled)) { { nx, ny -> onViewfinderTapped(nx, ny) } }
+            else null
         // 点阵（固定点位的对焦点）何时显示：
         // - 未取景：显示 —— 用光学取景器拍的时候，就是靠它在手机上调对焦点（写 0xD108）
         // - 取景中·手持：显示（51 点相位检测只能在这些固定点之间跳）
@@ -3142,22 +3147,40 @@ class MainActivity : AppCompatActivity(), SheetHost {
      * 取景中写属性可能被拒 —— 这时用 [fallbackNx]/[fallbackNy] 再试一次
      * 0x9205（取景 AF 区域绝对定位）。两条路的响应码都会写进日志，
      * 真机按一次方向键就能看出该走哪条。
+     *
+     * @param syncArea true = 写 0xD108 之后**再**用 0x9205 把画面上那个可见的 AF 框
+     *   挪到同一个位置。手持取景下机身报回来的框未必跟着 0xD108 走，
+     *   补这一发才能让"点哪儿、框去哪儿"在两种取景模式下表现一致
+     *   （手持下机身多半收了不动，但也不会报错，代价只是一次几十毫秒的往返）。
      */
-    private fun selectAfPoint(id: Int, fallbackNx: Float = -1f, fallbackNy: Float = -1f) {
+    private fun selectAfPoint(
+        id: Int,
+        fallbackNx: Float = -1f,
+        fallbackNy: Float = -1f,
+        syncArea: Boolean = false
+    ) {
         if (!isConnected) { toast("请先连接相机"); return }
         thread {
             val conn = ptpConnection
+            val notes = ArrayList<String>()
             var ok = conn?.setAfAreaPoint(id) ?: false
             var via = "0xD108"
             var errText = "0x${Integer.toHexString(conn?.lastSetPropError ?: 0).uppercase()}"
 
-            if (!ok && conn != null && fallbackNx >= 0f && isLiveViewRunning) {
-                val t = conn.mapNormalizedToAfArea(fallbackNx, fallbackNy)
+            // 0xD108 被拒 → 退回 0x9205；开了 syncArea → 哪怕 0xD108 成功了也补一发
+            val needArea = conn != null && fallbackNx >= 0f && isLiveViewRunning &&
+                (syncArea || !ok)
+            if (needArea) {
+                val t = conn?.mapNormalizedToAfArea(fallbackNx, fallbackNy)
                 if (t != null) {
                     val code = conn.changeAfArea(t.first, t.second)
                     if (code == PtpConstants.RESP_OK) {
-                        ok = true
-                        via = "0x9205(${t.first},${t.second})"
+                        if (!ok) {
+                            ok = true
+                            via = "0x9205(${t.first},${t.second})"
+                        } else {
+                            notes.add("（0x9205 已同步 AF 框 ${t.first},${t.second}）")
+                        }
                     } else {
                         errText += " / 0x9205=" +
                             (if (code < 0) "无响应" else "0x${Integer.toHexString(code).uppercase()}")
@@ -3168,11 +3191,12 @@ class MainActivity : AppCompatActivity(), SheetHost {
             val finalOk = ok
             val finalVia = via
             val finalErr = errText
+            val finalNotes = notes.joinToString("")
             runOnUiThread {
                 if (finalOk) {
                     currentAfPointId = id
                     focusBox.setAfPoints(currentAfPoints(), id)
-                    log("对焦点已切到 id=$id（$finalVia）")
+                    log("对焦点已切到 id=$id（$finalVia）$finalNotes")
                     // 手持模式下"切点"只是选中、机身不对焦 ——
                     // 开着触摸对焦就在这里补一次，省掉"选完再按 AF"。
                     autoFocusOnAfPointChange("0xD108 选点 id=$id")
@@ -3183,6 +3207,60 @@ class MainActivity : AppCompatActivity(), SheetHost {
                 }
             }
         }
+    }
+
+    /**
+     * 点取景画面 —— 「点哪对哪」的总入口。
+     *
+     * 两种取景模式走的是完全不同的对焦机构，必须分开处理：
+     * - **三脚架**：对比度检测 AF，AF 框能在画面里任意挪 → 直接发 0x9205 绝对坐标，
+     *   之后机身自己跑对比度 AF（[moveAfAreaTo]）。
+     * - **手持**：51 点相位检测 AF，机身只认固定点位 → 把点击**吸附到最近那个对焦点**，
+     *   写 0xD108 再补一发 0x90C1。以前手持下这条回调没挂（见 [renderLiveViewMode]），
+     *   用户开了触摸对焦点画面却毫无反应，根子就在这里。
+     */
+    private fun onViewfinderTapped(nx: Float, ny: Float) {
+        if (currentLiveViewMode == PtpConstants.LIVE_VIEW_MODE_TRIPOD) {
+            moveAfAreaTo(nx, ny)
+            return
+        }
+        if (!touchAfEnabled) return
+        val p = nearestAfPoint(nx, ny)
+        if (p == null) {
+            toast("还没有可用的对焦点")
+            return
+        }
+        // 点的位置离所有对焦点都远 → 说明是点在了 51 点覆盖不到的边角。
+        // 手持是相位检测，机身只能在这 51 个固定点位上选，这里明说一句，
+        // 免得用户以为"选了但没挪过去"；真要任意位置，得切三脚架模式走 0x9205。
+        val far = (p.nx - nx) * (p.nx - nx) + (p.ny - ny) * (p.ny - ny) > 0.06f * 0.06f
+        if (far) {
+            toast("手持模式只能在这 ${currentAfPoints().size} 个对焦点上选，已选最近的一个；要任意位置请切三脚架模式")
+        }
+        // 先把框画到那一点上：取景帧最快也要 100ms 才回来，
+        // 中间那段空窗就是"点了没反应"的体感来源。真帧回来时会被顶掉。
+        focusBox.showPendingBox(p.nx, p.ny)
+        focusBox.setAfPoints(currentAfPoints(), p.id)
+        selectAfPoint(p.id, p.nx, p.ny, syncArea = true)
+    }
+
+    /**
+     * 画面归一化坐标 → 最近的一个对焦点。
+     *
+     * **不设命中半径**：[FocusBoxView.nearestPoint] 那个阈值（51 点时 0.06）是给
+     * "逐点选"用的，点偏一点就当没点中；这里是"点画面任意位置"，
+     * 必须永远返回一个结果，否则又变回"点了没反应"。
+     */
+    private fun nearestAfPoint(nx: Float, ny: Float): AfPoint? {
+        val list = currentAfPoints()
+        if (list.isEmpty()) return null
+        var best = list[0]
+        var bestD = Float.MAX_VALUE
+        for (p in list) {
+            val d = (p.nx - nx) * (p.nx - nx) + (p.ny - ny) * (p.ny - ny)
+            if (d < bestD) { bestD = d; best = p }
+        }
+        return best
     }
 
     /**
@@ -3861,8 +3939,11 @@ class MainActivity : AppCompatActivity(), SheetHost {
         getSharedPreferences(AF_PREFS, Context.MODE_PRIVATE).edit()
             .putBoolean(AF_KEY_TOUCH_AF, touchAfEnabled).apply()
         renderTouchAfButton()
+        // 开关一变，画面点击该不该接管就得重算：手持模式下这条回调是跟着开关挂/摘的，
+        // 不重渲染的话"开了触摸对焦点画面仍然没反应"。
+        renderLiveViewMode(currentLiveViewMode)
         log(
-            if (touchAfEnabled) "触摸对焦已开启：改对焦点后自动对焦（三脚架下机身自己会对，不再叠加）"
+            if (touchAfEnabled) "触摸对焦已开启：点画面任意位置即对焦（三脚架下机身自己会对，不再叠加）"
             else "触摸对焦已关闭"
         )
     }
@@ -3872,6 +3953,8 @@ class MainActivity : AppCompatActivity(), SheetHost {
         touchAfButton.setTextColor(
             if (touchAfEnabled) getColor(R.color.accent_amber) else getColor(R.color.text_disabled)
         )
+        // 只对实时画面有意义 —— 没开取景就没有画面可点，chip 露着只会让人白点
+        touchAfButton.visibility = if (isLiveViewRunning) View.VISIBLE else View.GONE
     }
 
     /**
@@ -3991,7 +4074,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
                         recButton.visibility = View.VISIBLE
                         // 峰值对焦同理：只对实时画面有意义，且开销是按帧算的
                         peakButton.visibility = View.VISIBLE
-                        touchAfButton.visibility = View.VISIBLE
+                        renderTouchAfButton()
                         lvFullscreenButton.visibility = View.VISIBLE
                         renderRecState(recorder?.isRecording == true)
                         // 取景一开，点阵要不要显示由取景模式决定（三脚架模式只留 AF 框）
@@ -4094,6 +4177,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
                         touchAfButton.visibility = View.GONE
                         renderLiveViewMode(currentLiveViewMode)
                         log("Live View 启动失败：${result.reason}")
+
                         Toast.makeText(this@MainActivity, "取景启动失败：${result.reason}", Toast.LENGTH_LONG).show()
                     }
                 }
@@ -4139,6 +4223,8 @@ class MainActivity : AppCompatActivity(), SheetHost {
             if (recorder?.isRecording == true) stopRecording()
             recButton.visibility = View.GONE
             peakButton.visibility = View.GONE
+            // 触摸对焦同理：退出取景后没有画面可点，chip 必须跟着收走
+            touchAfButton.visibility = View.GONE
             lvFullscreenButton.visibility = View.GONE
             if (isLvFullscreen) {
                 isLvFullscreen = false

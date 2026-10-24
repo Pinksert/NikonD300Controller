@@ -349,7 +349,20 @@ class FocusBoxView(context: Context, attrs: AttributeSet?) : View(context, attrs
         if (!isEnabled) return false
         val (nx, ny) = toNormalized(event.x, event.y)
         if (mode == Mode.LIVE) {
-            // 点阵开着时优先按点选：手持模式下这才是真能生效的那条路
+            // ★ 顺序：先看"有没有接管整块画面点击的回调"，没有才退回点阵逐点选。
+            //
+            // 三脚架模式、或手持模式下开了触摸对焦时，点画面**任意位置**都该有反应
+            // （手持会把点击吸附到最近那个对焦点）。以前是先走点阵命中判定，
+            // 命中半径（51 点时只有 0.06）之外的点击直接 return false ——
+            // 用户看到的就是"开了触摸对焦，点画面却毫无反应"。
+            val cb = onAreaPicked
+            if (cb != null) {
+                showPendingBox(nx, ny)
+                cb(nx, ny)
+                performClick()
+                return true
+            }
+            // 没接管时按点选：手持模式下这才是真能生效的那条路
             if (pointsOverlay) {
                 val p = nearestPoint(nx, ny)
                 if (p != null) {
@@ -361,11 +374,7 @@ class FocusBoxView(context: Context, attrs: AttributeSet?) : View(context, attrs
                     return true
                 }
             }
-            // D300 的对焦点只能按方向逐个移动（官方 PC 软件同样只有方向键），
-            // 所以取景画面默认不接管点击 —— 没挂回调就直接把事件让出去。
-            val cb = onAreaPicked ?: return false
-            showPendingBox(nx, ny)
-            cb(nx, ny)
+            return false
         } else {
             val p = nearestPoint(nx, ny) ?: return true
             selectedId = p.id

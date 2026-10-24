@@ -1,88 +1,100 @@
 # Nikon D300 Controller
 
-通过 **USB OTG** 用 **PTP（Picture Transfer Protocol）** 协议控制尼康 **D300** 单反相机的 Android 应用。无需相机厂商 SDK，直接走标准 PTP / 尼康私有扩展指令，在手机上完成实时取景、曝光参数调节、个人设定（CSM）查看与修改、相册浏览与导出。
+通过 **USB OTG** 用 **PTP（Picture Transfer Protocol）** 协议控制尼康 **D300 / D300s** 单反相机的 Android 应用。不需要相机厂商 SDK，直接走标准 PTP / 尼康私有扩展指令，在手机上完成实时取景、对焦、曝光参数调节、个人设定（CSM）查看与修改、相册浏览与导出。
 
-> English: An Android app that drives a Nikon D300 over USB OTG via the PTP protocol — live view (with 51-point AF overlay), exposure controls, custom settings (CSM) menu, on-camera gallery browser, NEF preview, and shutter-count readout.
-
----
-
-## 功能特性
-
-- **USB OTG 连接**：插入 OTG 线即自动请求相机 USB 权限并建立 PTP 会话（`openSession` 后自动预设录制介质状态）。
-- **实时取景（Live View）**：发送 `0x9201` 启动、`0x9202` 关闭，实时拉取取景画面；支持手持 / 三脚架取景模式与取景放大倍率调节。
-- **51 点对焦框（AF 叠加层）**：`FocusBoxView` 在取景画面上绘制 51 点相位检测对焦点拓扑，支持点选对焦点与放大状态下坐标双向换算。
-- **快门释放**：触发相机拍摄（标准 `0x100E` / 尼康 `0x90C0` 取景内直拍），取景帧读取让路避免管道冲突。
-- **曝光参数调节**：
-  - ISO（含 ISO 自动开关、自动上限 / 最小快门设置）
-  - 光圈（F 值，按机身支持的档位动态生成）
-  - 快门速度（自动探测机身支持的快门列表，含 B 门 / 闪光同步）
-  - 曝光补偿、曝光程序模式（M / P / A / S）
-  - 白平衡（含色温、预设）
-- **包围曝光**：光圈包围 / 曝光包围，可连续拍摄多张。
-- **个人设定菜单（CSM）**：`CsmMenu` 分组呈现 a1–a10 / b1–b6 / c1–c4 / d1–d11 / e1–e7 / f1–f10 自定义设定项，按机身实际返回的量程只读查看或写入；未适配项灰显，不写入。
-- **拍摄菜单**：色彩空间、动态 D-Lighting、JPEG 压缩、NEF 位深、长曝降噪、高 ISO 降噪、取景驱动模式、放大倍率等机内拍摄项。
-- **相册（GalleryActivity）**：浏览相机存储卡照片，两阶段异步加载（先铺缩略图占位、再逐张补图），查看原图、保存到本机相册、分享、删除；支持多选导出（含 NEF → JPG 转换）。
-- **NEF → JPG 真转档**：`NefDecoder` 借助 **LibRaw（原生 C++ / JNI 模块，源码在 `app/src/main/cpp`）** 真正解码 D300 的 Bayer RAW 数据（霍夫曼解码 → 线性化 → 机身白平衡 → AHD 彩色插值 → sRGB），输出几 MB 的正常 JPEG，而不是机身内嵌的那张 239 KB 预览。`NefPreview` 负责从原 NEF 把 EXIF 原样搬进转出图，保证拍摄日期 / 曝光参数不丢。
-- **EXIF 摘要**：`PhotoExif` 解析快门 / 光圈 / ISO / 焦距 / 补偿 / 白平衡 / 测光，渲染为三行信息条。
-- **快门数读取**：`ShutterCountReader` 读取机身拍摄张数（EXIF MakerNote）。
-- **取景录制**：`LiveViewRecorder` 支持把取景画面录制保存。
-- **状态轮询**：电量（标准 + 尼康私有）、焦距、对焦点等实时刷新。
+> English: An Android app that drives a Nikon D300 over USB OTG via the PTP protocol — live view with 51-point AF overlay, touch AF, exposure controls, custom settings (CSM) menu, on-camera gallery browser, NEF → JPEG conversion with real RAW decoding, and shutter-count readout.
 
 ---
 
-## 硬件与系统要求
+## 下载安装
+
+到 [Releases](https://github.com/Pinksert/NikonD300Controller/releases) 下载最新的 `NikonD300Controller-vX.Y.apk`，在手机上允许「未知来源」安装即可。
 
 | 项目 | 要求 |
 | --- | --- |
 | 手机 / 平板 | 支持 USB OTG 的 Android 设备 |
 | 系统版本 | Android 7.0（API 24）及以上（`minSdk = 24`） |
-| 相机 | 尼康 D300（其他尼康机型未验证） |
+| 相机 | 尼康 D300 / D300s（其他尼康机型未验证） |
 | 线材 | USB OTG 转接线 / 转接头 |
-| 相机 USB 模式 | 设为 PTP / MTP（非“大容量存储”）|
+| 相机 USB 模式 | 设定菜单 → USB → **MTP/PTP**（选「大容量存储」机身不接受任何指令） |
 
-> **实时取景说明**：无需拨动机身顶部的快门释放模式拨盘到 **[Lv]** 档。在任意曝光模式（**M / P / A / S**）下，直接点击 App 内的「LV」按钮即可通过 `0x9201` 启动实时取景；前置条件为相机 `RecordingMedia` 已置为 1，App 在 `openSession` 后自动预设。
+> `applicationId` 为 **`com.example.nikond300controller2`**，与同名的旧版安装包是两个独立 App，不会互相覆盖。
+> Release 包与早期流传的 debug 包签名不同，**覆盖安装会失败**，请先卸载旧版。
 
 ---
 
-## 安装
+## 功能特性
 
-最简单的方式是下载已构建的调试包：
+### 连接
 
-1. 打开 [Releases](https://github.com/Pinksert/NikonD300Controller/releases)。
-2. 下载 `app-debug.apk`。
-3. 在手机上允许「未知来源」安装，安装 APK。
+- 插入 OTG 线即自动请求 USB 权限并建立 PTP 会话，连接时把机身支持的全部操作码打进日志页。
+- USB 抖动（OTG 被碰一下、手机给口断电再上电）不再当作断连：延迟 1.2 秒确认设备真的没了才断开，抖动则静默重建连接。
 
-> 本应用的 `applicationId` 为 **`com.example.nikond300controller2`**，会与同名的旧版安装包作为两个独立 App 共存，不会互相覆盖。
->
-> 当前发布包为 **debug 签名**，仅供测试与侧载，并非上架用的正式签名包。
+### 实时取景与对焦
+
+- **取景**：`0x9201` 启动 / `0x9202` 关闭 / `0x9203` 拉帧，无需把机身释放模式拨盘转到 Lv 档。
+- **两种取景模式**（长按「取景」按钮切换，写 `0xD1A0`）：
+  - **手持** — 51 点相位检测 AF，AF 框画面叠加层可直接点选，机身记住 51 / 11 点档位（`0xD08D`）。
+  - **三脚架** — 对比度检测 AF，AF 框能停在画面**任意位置**（`0x9205` 绝对定位）。
+- **触摸对焦**：点画面哪儿就对哪儿。手持下把点击吸附到最近的对焦点（写 `0xD108`）再自动补一次 `0x90C1`；三脚架下机身自己会跑对比度 AF，不再叠加。
+- **取景放大** `0xD1A3`（手持最大 3 倍 / 三脚架最大 13 倍）：放大时点阵与点击坐标双向换算，放大状态下禁止挪对焦点（否则画面会跟着跑）。
+- **峰值对焦**：Sobel 边缘描亮，手动对焦时看哪儿实了。
+- **取景录制**：机身不会录像，录制是把取景帧在手机侧压成 MP4。
+- **反光板预升**：机身拨盘转到 Mup，App 连按两次快门（第一次抬板、第二次曝光）。
+
+### 曝光与拍摄
+
+- ISO（含自动开关、自动上限 / 最小快门）、光圈、快门（含 B 门 / 闪光同步，档位表**每次点开都重读机身描述符**并与缓存取并集）。
+- 曝光补偿（`0x5010`，1/1000 EV 精度，档位严格按机身枚举）、曝光程序模式 M / P / A / S、白平衡（含色温与预设）。
+- b1 / b2 / b3 步长（1/3、1/2、1 EV）可就地切换，档位表跟着变。
+- 包围曝光：光圈包围 / 快门包围，倒计时与张数可调。
+- 拍摄流程：自拍延时、间隔拍摄、拍完自动下载。
+
+### 机身菜单
+
+- **相机设定（CSM）**：a–f 共 50 项，按机身实际返回的量程只读或写入；属性码未确认的项灰显、不写入。
+- **拍摄菜单**：色彩空间、动态 D-Lighting、JPEG 压缩、NEF 位深、长曝降噪、高 ISO 降噪、取景驱动模式、放大倍率。
+- **测光**机身报只读，页面只标当前档并提示用机身转盘切换。
+
+### 相册
+
+- 浏览存储卡照片，两阶段加载（先铺满信息再逐张补缩略图），按文件名流水号倒序。
+- 单张查看器与多选模式共用一套底栏：**原图导出 / JPG 导出 / 删除 N 张 / 退出**。
+- **JPG 导出**：NEF 经 **LibRaw（原生 C++/JNI）** 真解 RAW（霍夫曼解码 → 线性化 → 机身白平衡 → AHD 插值 → sRGB）再压 JPEG，可选 60/75/85/92/95/100 六档品质；全 JPEG 时不弹品质表。
+- **EXIF 搬运**：把 NEF 的 IFD0 / ExifIFD / GPS / Interop 条目**重建**成新 TIFF 塞进输出 JPEG 的 APP1（MakerNote 过大时先丢它，保证不超 65533 上限），拍摄日期 / 光圈快门 ISO 全部保留。
+- **删除**：标准 `0x100B DeleteObject`，操作前先问机身是否支持，不支持则明确告知。
+- **EXIF 摘要**：快门 / 光圈 / ISO / 焦距 / 补偿 / 白平衡 / 测光渲染为三行信息条。
+- **快门数读取**：从 EXIF 尼康 MakerNote 读（机身没有对应的 PTP 属性）。
+
+---
+
+## 快速上手
+
+1. 机身 USB 设为 **MTP/PTP**，OTG 线接好手机与相机，相机开机。
+2. 打开 App 点「连接相机」，首次弹 USB 授权时勾「默认」再确认。
+3. 左上角显示机型名（如 D300）即已连上。
+4. 点「取景」等画面出来；打开「触摸对焦」后点画面即可对焦（三脚架模式可对任意位置）。
+5. 底部导航：**拍摄 / 参数 / 相册**，日志在顶栏右侧按钮里。
+
+App 内「参数页 → 机身 → 使用说明」有完整图文步骤，首次启动会自动弹一次。
 
 ---
 
 ## 从源码构建
 
-需要：Android Studio（或仅命令行）、JDK 17+、Android SDK（含对应平台与构建工具）。NEF 真转档依赖原生代码，需额外安装 **NDK** 与 **CMake**（Android Studio 的 SDK Manager 中勾选），由 CMake 把 `app/src/main/cpp` 下的 LibRaw 编为 `libnefdecoder.so`。
+需要 JDK 17+、Android SDK、以及 **NDK + CMake**（NEF 真解 RAW 依赖原生代码，CMake 把 `app/src/main/cpp` 下的 LibRaw 编成 `libnefdecoder.so`，ABI：`arm64-v8a`、`armeabi-v7a`）。
 
 ```bash
-# 在项目根目录
 export JAVA_HOME="/path/to/Android Studio/jbr"
 export ANDROID_HOME="$HOME/Android/Sdk"
 
-./gradlew assembleDebug          # 调试包
-# ./gradlew assembleRelease      # 正式包（需自行配置签名 keystore）
+./gradlew assembleDebug      # 调试包
+./gradlew assembleRelease    # 正式包（需自行配置签名 keystore）
 ```
 
-产物位于 `app/build/outputs/apk/debug/app-debug.apk`。
+产物：`app/build/outputs/apk/debug/app-debug.apk` / `app/build/outputs/apk/release/app-release-unsigned.apk`（签名后可用）。
 
----
-
-## 使用说明
-
-1. 用 OTG 线连接手机与相机，相机开机并进入 PTP 模式。
-2. 手机弹出 USB 权限请求时点击允许。
-3. 点击 **连接**，状态栏显示相机型号与电量即表示会话建立。
-4. 进入 **实时取景** 预览画面；用各档位按钮调节 ISO / 光圈 / 快门 / 白平衡，可在画面上点选 51 点对焦点。
-5. **相册** 中可浏览、查看原图、保存 / 分享 / 删除相机内的照片，长按进入多选可批量导出（支持 NEF 转 JPG）。
-6. **个人设定 / 拍摄菜单** 可查看并修改 a–f 组自定义菜单项与机内拍摄设定。
+> 若构建报 `app\.cxx\...\hash_key.txt (拒绝访问)`，删掉 `app/.cxx` 再重试（Windows 上 CMake 缓存偶发锁死）。
 
 ---
 
@@ -90,51 +102,55 @@ export ANDROID_HOME="$HOME/Android/Sdk"
 
 ```
 app/src/main/java/com/example/nikond300controller/
-├── MainActivity.kt        # UI 与业务流程编排（连接、取景、参数、包围、CSM、相册入口）
+├── MainActivity.kt        # UI 与业务流程编排（连接、取景、对焦、参数、包围、CSM）
 ├── PtpUsbConnection.kt    # PTP/USB 底层：建链、命令/数据/响应收发、事件清理、管道救援
 ├── PtpConstants.kt        # PTP 操作码、响应码、设备属性码（含尼康 D300 CSM 码）
-├── FocusBoxView.kt        # 51 点对焦框叠加层（取景画面上的对焦点绘制与坐标换算）
-├── GalleryActivity.kt     # 相册：缩略图、原图、保存/分享/删除、多选导出
+├── FocusBoxView.kt        # 对焦点叠加层：点阵、AF 框、构图网格、放大坐标双向换算
+├── GalleryActivity.kt     # 相册：缩略图、原图查看器、多选导出与删除
 ├── CsmMenu.kt             # 个人设定（CSM）菜单分组与读数/写值
-├── ShootingMenu.kt        # 拍摄菜单（色彩空间、D-Lighting、NEF 位深、降噪、取景模式等）
+├── ShootingMenu.kt        # 拍摄菜单（色彩空间、D-Lighting、NEF 位深、降噪等）
 ├── SheetUi.kt             # 底部抽屉 / 网格选择器构件（各参数页复用）
 ├── NefDecoder.kt          # NEF → JPG 真转档（JNI 调 LibRaw 解 RAW，非抠预览）
-├── NefPreview.kt          # NEF 内嵌预览定位 + 把原 NEF 的 EXIF 原样搬进转出 JPG
+├── NefPreview.kt          # NEF 预览定位 + EXIF 重建并搬进转出 JPEG
 ├── PhotoExif.kt           # EXIF 解析与三行信息条渲染
 ├── LiveViewRecorder.kt    # 取景画面录制
+├── PeakingView.kt         # 峰值对焦叠加层
+├── InfoActivity.kt        # 使用说明 / 关于 / 开源许可证
 └── ShutterCountReader.kt  # 读取机身快门数（EXIF MakerNote）
-
-app/src/main/res/layout/
-├── activity_main.xml      # 主界面
-├── activity_gallery.xml   # 相册界面
-├── item_gallery_photo.xml # 相册缩略图单元
-└── item_menu_row.xml      # 菜单行单元
 ```
 
-> 原生模块 `app/src/main/cpp/`：内含 **LibRaw**（dcraw 的库化版本）与 JNI 桥 `nef_jni.cpp`，经 CMake 编译为 `libnefdecoder.so`（目标 ABI：`arm64-v8a`、`armeabi-v7a`），由 `NefDecoder` 通过 JNI 调用完成 NEF → PPM 解码。
+核心通信封装在 `PtpUsbConnection`：所有对 `UsbDeviceConnection` 的读写都经 `usbLock` 串行化，避免轮询 / 取景 / 相册线程并发抢占同一 Bulk 端点导致响应错乱或管道挂死；每次事务后消费残留响应，必要时 `clearHalt` 救援。
 
-核心通信封装在 `PtpUsbConnection`：所有对 `UsbDeviceConnection` 的读写都经 `usbLock` 串行化，避免轮询 / 取景 / 相册线程并发抢占同一 Bulk 端点导致响应错乱或管道挂死；并在每次事务后消费残留响应、必要时 `clearHalt` 救援。
+> ⚠️ 只发机身**确认支持**的命令。`GetDeviceInfo` 的 OperationsSupported 会在连接时打进日志；机身不认的操作码可能连响应都不给，`usbLock` 会一直攥着，整条 USB 通道就废了。
 
 ---
 
 ## PTP 与尼康私有指令
 
-- 标准 PTP：会话 `0x1002`/`0x1003`、取设备信息 `0x1001`、取属性 `0x1015`、设属性 `0x1016`、触发捕获 `0x100E` 等。
-- 尼康扩展：实时取景 `0x9201`/`0x9202`/`0x9203`、取景模式 `0xD1A0`、取景放大 `0xD1A3`、AF 驱动 `0x90C1`、取景内直拍 `0x90C0`、设备就绪 `0x90C8`、事件 `0x90C7` 等。
-- 个人设定（CSM）与拍摄属性码位于 `0xD000`–`0xD1FF` 区间（如 `a1=0xD048`、`b1=0xD055`），读取以机身实际返回的量程为准；未适配项灰显，不写入。
+- 标准 PTP：会话 `0x1002`/`0x1003`、设备信息 `0x1001`、取属性 `0x1015`、设属性 `0x1016`、触发捕获 `0x100E`、删除对象 `0x100B`。
+- 尼康扩展：取景 `0x9201`/`0x9202`/`0x9203`、取景模式 `0xD1A0`、取景放大 `0xD1A3`、AF 驱动 `0x90C1`、取景内直拍 `0x90C0`、设备就绪 `0x90C8`、事件 `0x90C7`、AF 区域定位 `0x9205`。
+- 属性集中在 `0xD000`–`0xD1FF`：对焦点 `0xD108`、AF 点数 `0xD08D`、锁焦 `0xD104`、快门 `0xD100`（`n<<16|d`，排序必须按曝光时长而非原始值）、曝光补偿 `0x5010`、CSM `a1=0xD048` … `f6=0xD05F`。
+- 常量表以 RemoteYourCam 为起点，逐条对照 libgphoto2 的 `ptp.h`、真机 DeviceInfo 与 D300 固件反编译结果核过。
 
 ---
 
-## 已知问题 / 限制
+## 已知限制
 
-- 仅针对 **尼康 D300** 真机调试，其它机型未验证，部分私有属性码可能不适用。
-- 当前发布包为 debug 签名，无法上架商店。
-- 大文件（RAW / 大 JPEG）传输若被中断会导致相机 USB 端点 STALL，需重启相机或重新插拔 OTG 恢复。
-- 相册多选导出中的 NEF → JPG 转换目前为简化实现（直接取对象落盘），内嵌预览转 JPG 的完整路径待后续完善。
-- 个人设定菜单中仍有部分属性码未完全适配，以 App 内实际可操作为准。
+- 仅针对 **尼康 D300** 真机调试，其它机型未验证。
+- 手持模式的对焦点只能落在 51 个固定点位上 —— 相位检测 AF 的硬件限制，官方软件也只能逐点选；要任意位置请切三脚架模式。
+- 快门数没有 PTP 通道，只能从 EXIF MakerNote 读；私有 opcode 需抓包才能确认，**不做盲试**（有砖机风险）。
+- 部分机身不给 `0x100B` 删除能力，App 会明确提示而不是假装成功。
+- 大文件传输被中断会导致相机 USB 端点 STALL，需重启相机或重插 OTG。
 
 ---
 
 ## 许可证
 
-本项目当前 **未声明许可证（unlicensed）**。如需用于分发或修改，请先添加合适的开源许可证。
+本项目代码按 **[MIT License](LICENSE)** 开源。
+
+第三方组件各自遵循其原始许可，汇总见 **[NOTICE](NOTICE)**：
+
+- **LibRaw**（`app/src/main/cpp/libraw`）— LGPL-2.1 / CDDL-1.0 双许可，用于 NEF 真解 RAW。
+- **RemoteYourCam-USB** — PTP 常量与 D300 实机对焦点坐标的参考来源。
+- **libgphoto2**（`ptp.h`）— LGPL-2.1，仅参考其常量定义，未链接代码。
+- **AndroidX / Material Components** — Apache-2.0。

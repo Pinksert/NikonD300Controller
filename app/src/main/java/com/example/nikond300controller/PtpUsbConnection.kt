@@ -658,7 +658,7 @@ class PtpUsbConnection(
         size: Int? = null,
         logDesc: String = "",
         maxRetries: Int = 3
-    ): Boolean = synchronized(usbLock) {
+    ): Boolean {
         // size 用可空参数而不是默认值 2：之前用"是否等于默认值"来判断调用方有没有显式指定，
         // 结果上层查到机身声明 UINT16（size=2）后想按声明宽度重试，
         // 却被当成"没指定"又降级回 UINT8 —— 重试形同没发生，一直用错的宽度在写。
@@ -677,8 +677,25 @@ class PtpUsbConnection(
             }
             else -> byteArrayOf(value.toByte())
         }
-
         val valStr = "0x${Integer.toHexString(value).uppercase()}"
+        return setDevicePropBytes(propCode, valBytes, logDesc, maxRetries, valStr)
+    }
+
+    /**
+     * 真正发 0x1016 SetDevicePropValue 的地方。
+     *
+     * 单独拆出来是为了让**字符串属性**也能走同一条重试/恢复链路 ——
+     * 0x5011 DateTime 就是字符串类型，之前只有按整数拼字节的入口，写不了它。
+     *
+     * @param valStr 只是日志里给人看的取值描述；字节以 [valBytes] 为准
+     */
+    fun setDevicePropBytes(
+        propCode: Int,
+        valBytes: ByteArray,
+        logDesc: String = "",
+        maxRetries: Int = 3,
+        valStr: String = bytesToHex(valBytes, valBytes.size)
+    ): Boolean = synchronized(usbLock) {
         val bytesHex = bytesToHex(valBytes, valBytes.size)
         android.util.Log.d("PTP_TX_PROP", "Set Prop 0x${Integer.toHexString(propCode).uppercase()} to value $valStr (Hex: $bytesHex)")
 
@@ -729,6 +746,69 @@ class PtpUsbConnection(
         }
         logger("Prop 0x${Integer.toHexString(propCode).uppercase()} 设置失败，已重试 $maxRetries 次")
         return false
+    }
+
+    /**
+     * 写**字符串**类型的设备属性（PTP DataType = String）—— 最典型的就是 0x5011 DateTime。
+     *
+     * 编码是「1 字节字符数 + ASCII + 结尾 0x00」，而**字符数要把结尾那个 null 算进去**；
+     * 空串则是单独一个 0x00。机身缓冲区有限，超长只会换来一个看不懂的回码，这里直接拒掉。
+     */
+    fun setDevicePropString(propCode: Int, text: String, maxRetries: Int = 2): Boolean {
+        val ascii = text.toByteArray(Charsets.US_ASCII)
+        val codeHex = Integer.toHexString(propCode).uppercase()
+        if (ascii.isEmpty() || ascii.size > 60) {
+            logger("字符串属性 0x$codeHex：长度 ${ascii.size} 不合法，放弃写入")
+            return false
+        }
+        val bytes = ByteArray(1 + ascii.size + 1)
+        bytes[0] = (ascii.size + 1).toByte()     // 含结尾 null 的字符数
+        System.arraycopy(ascii, 0, bytes, 1, ascii.size)
+        bytes[bytes.size - 1] = 0
+        return setDevicePropBytes(propCode, bytes, "Set Prop 0x$codeHex (String)", maxRetries, "\"$text\"")
+    }
+
+    /**
+     * 读**字符串**类型的设备属性。读不到或者根本不是字符串返回 null。
+     *
+     * 两种编码都兜一下：标准那种「首字节 = 字符数」，以及少数机身直接裸发
+     * ASCII + 0 结尾的 —— 后者首字节是 '2' 这类数字字符（0x32 = 50），
+     * 当长度解会大得离谱，靠范围检查挡掉。
+     */
+    fun getDevicePropString(propCode: Int): String? = synchronized(usbLock) {
+        val codeHex = Integer.toHexString(propCode).uppercase()
+        try {
+            drain()
+            val packet = createCommandPacket(PtpConstants.OP_GET_DEVICE_PROP_VALUE, propCode)
+            if (!sendPacket(packet)) return null
+
+            val data = receiveData() ?: return null
+            receiveResponseWithRetry()
+
+            data.position(12)
+            val n = data.remaining()
+            if (n <= 0) return null
+            val raw = ByteArray(n)
+            data.get(raw)
+
+            val declared = raw[0].toInt() and 0xFF
+            if (declared > 0 && declared <= n - 1) {
+                // declared 个字符里最后一个是 null 终止符，去掉
+                val s = String(raw, 1, declared - 1, Charsets.US_ASCII)
+                if (s.isNotBlank()) {
+                    android.util.Log.d("PTP_RX_PROP", "Prop 0x$codeHex = \"$s\"")
+                    return s
+                }
+            }
+            var end = raw.size
+            while (end > 0 && raw[end - 1] == 0.toByte()) end--
+            val bare = String(raw, 0, end, Charsets.US_ASCII)
+            android.util.Log.d("PTP_RX_PROP", "Prop 0x$codeHex（裸 ASCII）= \"$bare\"")
+            return bare.ifBlank { null }
+        } catch (e: Exception) {
+            logger("读字符串属性 0x$codeHex 失败：${e.message}")
+            return null
+        }
     }
 
     fun getDevicePropValue(propCode: Int): Int = synchronized(usbLock) {

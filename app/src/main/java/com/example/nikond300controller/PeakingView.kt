@@ -32,6 +32,12 @@ class PeakingView @JvmOverloads constructor(
     attrs: AttributeSet? = null
 ) : View(context, attrs) {
 
+    /**
+     * 叠加层画什么。两种辅助各有各的用处，同一时刻只画一种 ——
+     * 两个都画会互相盖住，边缘和过曝区根本分不清。
+     */
+    enum class OverlayMode { PEAKING, ZEBRA }
+
     /** 峰值开关。关掉时连算都不算，白送的帧率 */
     var peakingEnabled: Boolean = false
         set(value) {
@@ -39,12 +45,27 @@ class PeakingView @JvmOverloads constructor(
             if (!value) clear()
         }
 
+    /** 当前叠加哪种辅助；改了下一帧就生效，不用重新开关 */
+    var mode: OverlayMode = OverlayMode.PEAKING
+        set(value) {
+            if (field == value) return
+            field = value
+            clear()          // 两种掩码的画法不同，旧的直接作废，避免闪一帧错的
+        }
+
     /**
      * 边缘强度阈值，低于它的梯度不算边缘。
      * 调大 → 只留最锐的轮廓（画面干净但可能漏掉弱边缘）；调小 → 满屏都是噪点。
-     * 110 是在 640×480 取景帧上试出来比较均衡的一档。
+     * 110 是在 640×480 取景帧上试出来比较均衡的一档 —— 但不同镜头/光线下差别不小，
+     * 所以界面上做成可调（见取景页峰值按钮的长按）。
      */
     var threshold: Int = 110
+
+    /**
+     * 斑马纹的亮度阈值：灰度超过它就算过曝（画面上会画斜条纹提醒）。
+     * 245 而不是 255 —— 到 255 已经是死白，救不回来了；提前两档提醒才有意义。
+     */
+    var zebraThreshold: Int = 245
 
     /** 峰值颜色。默认红色，和取景画面里其他元素（白框、黄点）区分度最高 */
     var peakingColor: Int = Color.RED
@@ -116,25 +137,40 @@ class PeakingView @JvmOverloads constructor(
             }
         }
 
-        // ---- 2) Sobel，超阈值的点染成峰值色，其余透明 ----
-        val thr = threshold
+        // ---- 2) 按模式生成掩码 ----
         val col = peakingColor
         var p = 0
-        for (y in 0 until mh) {
-            val y0 = if (y > 0) y - 1 else 0
-            val y1 = if (y < mh - 1) y + 1 else mh - 1
-            val r0 = y0 * mw
-            val rm = y * mw
-            val r1 = y1 * mw
-            for (x in 0 until mw) {
-                val x0 = if (x > 0) x - 1 else 0
-                val x1 = if (x < mw - 1) x + 1 else mw - 1
-                val gx = (gray[r0 + x1] + 2 * gray[rm + x1] + gray[r1 + x1]) -
-                    (gray[r0 + x0] + 2 * gray[rm + x0] + gray[r1 + x0])
-                val gy = (gray[r1 + x0] + 2 * gray[r1 + x] + gray[r1 + x1]) -
-                    (gray[r0 + x0] + 2 * gray[r0 + x] + gray[r0 + x1])
-                val mag = (if (gx < 0) -gx else gx) + (if (gy < 0) -gy else gy)
-                px[p++] = if (mag >= thr) col else Color.TRANSPARENT
+        if (mode == OverlayMode.ZEBRA) {
+            // 斑马纹只看亮度：超阈值的区域画 45° 斜条纹。
+            // 斜纹而不是整片染色 —— 整片上去就把画面内容盖死，看不出那块是什么。
+            // (x + y) % 8 < 4 就是每 8 个采样点一道纹（源图上是每 16 像素）。
+            val zthr = zebraThreshold
+            for (y in 0 until mh) {
+                for (x in 0 until mw) {
+                    val bright = gray[y * mw + x]
+                    px[p++] = if (bright >= zthr && ((x + y) and 7) < 4) col else Color.TRANSPARENT
+                }
+            }
+        } else {
+            // Sobel，超阈值的点染成峰值色，其余透明。
+            // 为什么用 |gx|+|gy| 而不是开方：见类注释。
+            val thr = threshold
+            for (y in 0 until mh) {
+                val y0 = if (y > 0) y - 1 else 0
+                val y1 = if (y < mh - 1) y + 1 else mh - 1
+                val r0 = y0 * mw
+                val rm = y * mw
+                val r1 = y1 * mw
+                for (x in 0 until mw) {
+                    val x0 = if (x > 0) x - 1 else 0
+                    val x1 = if (x < mw - 1) x + 1 else mw - 1
+                    val gx = (gray[r0 + x1] + 2 * gray[rm + x1] + gray[r1 + x1]) -
+                        (gray[r0 + x0] + 2 * gray[rm + x0] + gray[r1 + x0])
+                    val gy = (gray[r1 + x0] + 2 * gray[r1 + x] + gray[r1 + x1]) -
+                        (gray[r0 + x0] + 2 * gray[r0 + x] + gray[r0 + x1])
+                    val mag = (if (gx < 0) -gx else gx) + (if (gy < 0) -gy else gy)
+                    px[p++] = if (mag >= thr) col else Color.TRANSPARENT
+                }
             }
         }
 

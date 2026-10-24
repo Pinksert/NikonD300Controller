@@ -124,6 +124,21 @@ object PtpConstants {
     const val PROP_EXPOSURE_PROGRAM_MODE = 0x500E
     const val PROP_EXPOSURE_INDEX = 0x500F // ISO
     const val PROP_EXPOSURE_BIAS_COMPENSATION = 0x5010
+
+    /**
+     * DateTime（0x5011）—— **机身时钟**，PTP 标准属性，数据类型是字符串。
+     *
+     * 格式：`YYYYMMDDThhmmss.s` 后跟时区（`Z` 或 `±hh:mm`），例如
+     * `20261024T221800.0+08:00`。尼康机身里那个小电池掉电后时间会归零，
+     * EXIF 里的时间戳就全是 2000 年 —— 相册排序、间隔拍摄的时点都会跟着错。
+     *
+     * ⚠️ 它**不是**整数属性，读写都要走字符串那套（见 [PtpUsbConnection.setDevicePropString] /
+     * [PtpUsbConnection.getDevicePropString]），拿 [PtpUsbConnection.getDevicePropValue]
+     * 去读只会得到一个无意义的数字。写之前先查描述符的 get/set 位：
+     * 部分机身把它报成只读。
+     */
+    const val PROP_DATE_TIME = 0x5011
+
     const val PROP_FOCUS_MODE = 0x500A
 
     /**

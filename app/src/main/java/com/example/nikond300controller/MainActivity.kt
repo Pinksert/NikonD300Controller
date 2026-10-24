@@ -538,6 +538,8 @@ class MainActivity : AppCompatActivity(), SheetHost {
 
     /** NCP 滤镜导入的文件选择器（选 .ncp） */
     private lateinit var ncpPicker: androidx.activity.result.ActivityResultLauncher<Array<String>>
+    private lateinit var backupExportLauncher: androidx.activity.result.ActivityResultLauncher<String>
+    private lateinit var backupImportLauncher: androidx.activity.result.ActivityResultLauncher<Array<String>>
     @Volatile
     private var isPollingPaused = false
 
@@ -726,6 +728,16 @@ class MainActivity : AppCompatActivity(), SheetHost {
             if (uri != null) showNcpImportSheet(uri)
         }
 
+        // 备份导出 / 导入：注册同样必须在 onCreate 之前完成
+        backupExportLauncher =
+            registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+                if (uri != null) writeBackupTo(uri)
+            }
+        backupImportLauncher =
+            registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+                if (uri != null) readBackupFrom(uri)
+            }
+
         // 返回键：全屏时先退出全屏；取景中先停取景再退出。
         // 直接 finish 会把读帧线程留在后台占着 USB（见 onDestroy 的说明）。
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
@@ -764,8 +776,18 @@ class MainActivity : AppCompatActivity(), SheetHost {
         recButton.setOnClickListener { toggleRecording() }
 
         peakingView = findViewById(R.id.peakingView)
+        // 取景辅助的三项设置（模式 / 阈值 / 颜色）都是记住的，画第一帧之前读出来。
+        // 阈值有 sane 区间兜底：旧版本存过的值若被改坏（0 或负数）会画出满屏噪点。
+        peakingView.mode = if (afPrefs.getInt(PEAK_MODE_KEY, 0) == 1)
+            PeakingView.OverlayMode.ZEBRA else PeakingView.OverlayMode.PEAKING
+        peakingView.threshold = afPrefs.getInt(PEAK_THRESHOLD_KEY, 110).coerceIn(20, 240)
+        peakingView.zebraThreshold = afPrefs.getInt(ZEBRA_THRESHOLD_KEY, 245).coerceIn(200, 255)
+        peakingView.peakingColor = afPrefs.getInt(PEAK_COLOR_KEY, Color.RED)
         peakButton = findViewById(R.id.peakButton)
         peakButton.setOnClickListener { togglePeaking() }
+        // 长按 = 阈值/颜色/模式。放在长按而不是再摆一颗按钮：
+        // 取景页的按钮已经够密了，而这组值调好一次就很少再动。
+        peakButton.setOnLongClickListener { showPeakingSheet(); true }
 
         touchAfButton = findViewById(R.id.touchAfButton)
         touchAfEnabled = getSharedPreferences(AF_PREFS, Context.MODE_PRIVATE)
@@ -3918,11 +3940,565 @@ class MainActivity : AppCompatActivity(), SheetHost {
     private fun togglePeaking() {
         val on = !peakingView.peakingEnabled
         peakingView.peakingEnabled = on
-        peakButton.text = if (on) "峰值 ●" else "峰值"
+        renderPeakButton()
+        log(
+            if (!on) "取景辅助已关闭"
+            else if (peakingView.mode == PeakingView.OverlayMode.ZEBRA) "过曝斑马纹已开启：过曝处画斜纹"
+            else "峰值对焦已开启：合焦处泛红"
+        )
+    }
+
+    /** 取景页那颗「峰值 / 斑马纹」按钮的统一渲染：可见性之外，文字也要跟着当前模式走 */
+    private fun renderPeakButton() {
+        val on = peakingView.peakingEnabled
+        val zebra = peakingView.mode == PeakingView.OverlayMode.ZEBRA
+        peakButton.text = when {
+            !on -> if (zebra) "斑马纹" else "峰值"
+            zebra -> "斑马纹 ●"
+            else -> "峰值 ●"
+        }
         peakButton.setTextColor(
             if (on) getColor(R.color.accent_red) else getColor(R.color.text_disabled)
         )
-        log(if (on) "峰值对焦已开启：合焦处会泛红" else "峰值对焦已关闭")
+    }
+
+    /**
+     * 取景辅助二级页（峰值按钮**长按**进）：模式 / 阈值 / 颜色。
+     *
+     * 阈值原来是写死在 PeakingView 里的常量 110 —— 那是在 640×480 取景帧上试出来的
+     * 折中值，但换个镜头、换个光线（暗光噪点多、逆光轮廓硬）差别很大：
+     * 有人嫌满屏噪点，有人嫌弱边缘上不了色。所以做成可调并记住。
+     *
+     * 斑马纹（过曝警告）是另一件事：不看梯度只**看亮度**，超过阈值的区域画斜纹。
+     * 它解决的不是"合没合焦"而是"高光是不是要爆了" —— 三脚架上拍风景时
+     * 取景画面又小又亮，肉眼很难判断天空是否已经死白。
+     */
+    private fun showPeakingSheet() {
+        val prefs = getSharedPreferences(AF_PREFS, Context.MODE_PRIVATE)
+        val page = buildSheetPage("取景辅助", "峰值对焦 / 过曝斑马纹（长按峰值按钮也能进）")
+
+        val modeCard = sheetCard(page.content, "模式")
+        val modeLabels = listOf("峰值对焦", "过曝斑马纹")
+        val modeIdx = if (peakingView.mode == PeakingView.OverlayMode.ZEBRA) 1 else 0
+        modeCard.addView(sheetTileGrid(2, modeLabels, modeIdx) { idx ->
+            peakingView.mode =
+                if (idx == 1) PeakingView.OverlayMode.ZEBRA else PeakingView.OverlayMode.PEAKING
+            prefs.edit().putInt(PEAK_MODE_KEY, idx).apply()
+            renderPeakButton()
+            log("取景辅助：${modeLabels[idx]}")
+        }.view)
+        page.content.addView(modeCard)
+
+        val thrCard = sheetCard(page.content, "阈值")
+        thrCard.addView(sliderRow("峰值灵敏度", peakingView.threshold, 20, 240) { v ->
+            peakingView.threshold = v
+            prefs.edit().putInt(PEAK_THRESHOLD_KEY, v).apply()
+        })
+        thrCard.addView(sliderRow("斑马纹亮度", peakingView.zebraThreshold, 200, 255) { v ->
+            peakingView.zebraThreshold = v
+            prefs.edit().putInt(ZEBRA_THRESHOLD_KEY, v).apply()
+        })
+        page.content.addView(thrCard)
+
+        val colorCard = sheetCard(page.content, "颜色")
+        val colors = listOf("红", "黄", "绿", "青", "白")
+        val cvals = listOf(
+            Color.RED, Color.YELLOW, Color.GREEN, Color.CYAN, Color.WHITE
+        )
+        val cIdx = cvals.indexOf(peakingView.peakingColor).let { if (it < 0) 0 else it }
+        colorCard.addView(sheetTileGrid(colors.size, colors, cIdx) { idx ->
+            peakingView.peakingColor = cvals[idx]
+            prefs.edit().putInt(PEAK_COLOR_KEY, cvals[idx]).apply()
+            log("取景辅助颜色：${colors[idx]}")
+        }.view)
+        page.content.addView(colorCard)
+
+        page.content.addView(
+            sheetHint("峰值灵敏度调低 → 连弱边缘也上色（但噪点也会一起亮）；调高 → 只留最锐的轮廓。斑马纹亮度调到 255 就是只标死白，245 会提前两档提醒。")
+        )
+        page.show()
+    }
+
+    /** 一行「标签 + 当前值 + 滑块」，二级页里没有现成构件，这里自己搭一个 */
+    private fun sliderRow(
+        label: String,
+        value: Int,
+        min: Int,
+        max: Int,
+        onChange: (Int) -> Unit
+    ): LinearLayout {
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dpx(14), dpx(4), dpx(14), dpx(4))
+        }
+        val head = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        head.addView(TextView(this).apply {
+            text = label
+            setTextColor(getColor(R.color.text_primary))
+            textSize = 13f
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        val num = TextView(this).apply {
+            text = value.toString()
+            setTextColor(getColor(R.color.accent_amber))
+            textSize = 13f
+        }
+        head.addView(num)
+        val seek = androidx.appcompat.widget.AppCompatSeekBar(this).apply {
+            this.max = max - min
+            progress = (value - min).coerceIn(0, max - min)
+        }
+        seek.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: android.widget.SeekBar?, v: Int, fromUser: Boolean) {
+                val real = v + min
+                num.text = real.toString()
+                if (fromUser) onChange(real)
+            }
+            override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
+            override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {}
+        })
+        root.addView(head)
+        root.addView(seek)
+        return root
+    }
+
+    // =====================================================================
+    // 机身时钟（0x5011 DateTime）
+    //
+    // 机身里那颗小电池掉电后时间会归零，EXIF 时间戳就全是 2000 年 ——
+    // 相册排序、间隔拍摄的时点、照片归档全跟着错。PTP 标准把 DateTime 定成
+    // 可写属性，所以 App 能顺手把手机时间写进去，不必去菜单里一格格拨。
+    // =====================================================================
+
+    /** "20261024T221800.0+08:00" → "2026-10-24 22:18:00"（机身墙上时间，不做时区换算） */
+    private fun formatPtpWallClock(raw: String): String {
+        if (raw.length < 15) return raw
+        return "${raw.substring(0, 4)}-${raw.substring(4, 6)}-${raw.substring(6, 8)} " +
+            "${raw.substring(9, 11)}:${raw.substring(11, 13)}:${raw.substring(13, 15)}"
+    }
+
+    /**
+     * PTP 时间字符串 → epoch 毫秒（**已按尾部时区折算成真实瞬时**），解析不了返回 null。
+     *
+     * 折算很关键：机身给的是"它的墙上时间 + 它的时区"，手机给的是 UTC 瞬时，
+     * 两边直接比字符串没有意义，也不该假设机身就是本地时区。
+     */
+    private fun parsePtpDateTime(raw: String): Long? {
+        val s = raw.trim()
+        if (s.length < 15) return null
+        return try {
+            val cal = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"))
+            cal.clear()
+            cal.set(
+                s.substring(0, 4).toInt(), s.substring(4, 6).toInt() - 1, s.substring(6, 8).toInt(),
+                s.substring(9, 11).toInt(), s.substring(11, 13).toInt(), s.substring(13, 15).toInt()
+            )
+            var ms = cal.timeInMillis
+            var i = 15
+            while (i < s.length && s[i] != '+' && s[i] != '-' && s[i] != 'Z') i++
+            if (i < s.length && s[i] != 'Z') {
+                val sign = if (s[i] == '-') -1 else 1
+                val rest = s.substring(i + 1).split(":")
+                val oh = rest.getOrNull(0)?.toIntOrNull() ?: 0
+                val om = rest.getOrNull(1)?.toIntOrNull() ?: 0
+                ms -= sign * (oh * 60 + om) * 60_000L
+            }
+            ms
+        } catch (e: Exception) {
+            log("机身时间解析失败（原始串 \"$raw\"）")
+            null
+        }
+    }
+
+    /** 把手机此刻的时间编成 PTP 字符串：20261024T221800.0+08:00 */
+    private fun ptpTimeNow(): String {
+        val sdf = java.text.SimpleDateFormat("yyyyMMdd'T'HHmmss", Locale.US)
+        val cal = java.util.Calendar.getInstance()
+        val offMin = (cal.get(java.util.Calendar.ZONE_OFFSET) +
+            cal.get(java.util.Calendar.DST_OFFSET)) / 60_000
+        val a = kotlin.math.abs(offMin)
+        return sdf.format(java.util.Date()) + ".0" +
+            (if (offMin < 0) "-" else "+") + String.format(Locale.US, "%02d:%02d", a / 60, a % 60)
+    }
+
+    /** 描述符里的 get/set 位：0 = 只读。发写命令之前先问一次，别硬撞 */
+    private fun devicePropWritable(propCode: Int): Boolean {
+        val raw = ptpConnection?.getDevicePropDesc(propCode) ?: return false
+        // payload: 12 字节头 + 属性码(2) + 数据类型(2) + get/set(1)
+        if (raw.size < 18) return false
+        return (raw[16].toInt() and 0xFF) != 0
+    }
+
+    private fun showCameraClockSheet() {
+        if (!isConnected) { toast("请先连接相机"); return }
+        val page = buildSheetPage("机身时钟", "0x5011 DateTime · 机身内部时钟")
+        val card = sheetCard(page.content, "时间")
+        val (bodyRow, bodyValue) = sheetInfoRow("机身时间", "读取中…")
+        val (phoneRow, phoneValue) = sheetInfoRow("手机时间", "")
+        val (diffRow, diffValue) = sheetInfoRow("偏差", "--")
+        card.addView(bodyRow); card.addView(phoneRow); card.addView(diffRow)
+        page.content.addView(card)
+
+        phoneValue.text = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+            .format(java.util.Date())
+
+        val syncRow = sheetValueRow("用手机时间校准机身", "点击写入") { _ ->
+            if (!isConnected) { toast("请先连接相机"); return@sheetValueRow }
+            val text = ptpTimeNow()
+            toast("正在写入 $text")
+            thread {
+                val conn = ptpConnection
+                val writable = devicePropWritable(PtpConstants.PROP_DATE_TIME)
+                val ok = if (writable) conn?.setDevicePropString(PtpConstants.PROP_DATE_TIME, text) ?: false else false
+                runOnUiThread {
+                    if (ok) {
+                        log("机身时钟已同步为 $text")
+                        toast("已同步")
+                        bodyValue.text = formatPtpWallClock(text)
+                        diffValue.text = "0 秒"
+                    } else {
+                        val why = if (!writable) "机身把 0x5011 报成只读" else "机身拒绝了写入（看日志里的回码）"
+                        log("机身时钟同步失败：$why")
+                        toast("同步失败：$why")
+                    }
+                }
+            }
+        }
+        card.addView(syncRow.view)
+        page.content.addView(
+            sheetHint("机身内部电池掉电后时间会归零，EXIF 里就全是 2000 年 —— 相册排序和间隔拍摄的时点都会跟着错。同步只是把手机当前时间写进机身，不碰别的设置。")
+        )
+        page.show()
+
+        thread {
+            val raw = ptpConnection?.getDevicePropString(PtpConstants.PROP_DATE_TIME)
+            runOnUiThread {
+                if (raw == null) {
+                    bodyValue.text = "读取失败"
+                    diffValue.text = "--"
+                    log("机身时钟：0x5011 没读到（机身不支持或会话忙）")
+                    return@runOnUiThread
+                }
+                bodyValue.text = formatPtpWallClock(raw)
+                val bodyMs = parsePtpDateTime(raw)
+                if (bodyMs == null) {
+                    diffValue.text = "无法解析（原始串 \"$raw\"）"
+                } else {
+                    val diffSec = (bodyMs - System.currentTimeMillis()) / 1000L
+                    diffValue.text = describeClockDrift(diffSec)
+                    if (kotlin.math.abs(diffSec) > 60) {
+                        diffValue.setTextColor(getColor(R.color.accent_red))
+                    }
+                }
+            }
+        }
+    }
+
+    private fun describeClockDrift(diffSec: Long): String {
+        val a = kotlin.math.abs(diffSec)
+        val span = when {
+            a < 5 -> "基本准确"
+            a < 60 -> "$a 秒"
+            a < 3600 -> "${a / 60} 分 ${a % 60} 秒"
+            a < 86400 -> "${a / 3600} 小时"
+            else -> "${a / 86400} 天"
+        }
+        return when {
+            a < 5 -> span
+            diffSec > 0 -> "快 $span"
+            else -> "慢 $span"
+        }
+    }
+
+    /**
+     * 每次连上机身顺手看一眼时钟，偏差超过 1 分钟就提示一次。
+     *
+     * 静默读一次 0x5011 只要几十毫秒，但能挡掉"照片时间全是 2000 年"这种
+     * 事后才发现、且没法补救（EXIF 已经写死在文件里）的问题。
+     */
+    private fun checkCameraClockDrift() {
+        if (!isConnected) return
+        thread {
+            val raw = ptpConnection?.getDevicePropString(PtpConstants.PROP_DATE_TIME) ?: return@thread
+            val bodyMs = parsePtpDateTime(raw) ?: return@thread
+            val diffSec = (bodyMs - System.currentTimeMillis()) / 1000L
+            if (kotlin.math.abs(diffSec) <= 60) {
+                log("机身时钟：${describeClockDrift(diffSec)}")
+                return@thread
+            }
+            runOnUiThread {
+                log("⚠️ 机身时钟${describeClockDrift(diffSec)}，可在参数页「机身时钟」一键校准")
+                toast("机身时钟${describeClockDrift(diffSec)}，可在参数页「机身时钟」里校准")
+            }
+        }
+    }
+
+    // =====================================================================
+    // 诊断包导出
+    //
+    // 真机出问题的时候，最有价值的东西不是截图而是这四样：机身自述了什么、
+    // 支持哪些操作码、当前各属性是什么、以及出事前那几百行日志。
+    // 打成一个 txt 丢进下载目录，比让人手抄日志靠谱得多。
+    // =====================================================================
+
+    private fun appVersionText(): String = try {
+        val p = packageManager.getPackageInfo(packageName, 0)
+        val code = if (Build.VERSION.SDK_INT >= 28) p.longVersionCode else p.versionCode.toLong()
+        "${p.versionName} ($code)"
+    } catch (e: Exception) {
+        "未知"
+    }
+
+    private fun exportDiagnostics() {
+        val sb = StringBuilder()
+        sb.append("D300 Controller 诊断包\n")
+        sb.append("生成时间：${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(java.util.Date())}\n")
+        sb.append("App 版本：${appVersionText()}　包名：$packageName\n")
+        sb.append("手机：${Build.MANUFACTURER} ${Build.MODEL} / Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})\n")
+        sb.append("连接状态：${if (isConnected) "已连接" else "未连接"}\n")
+
+        sb.append("\n---- 机身 ----\n")
+        val info = deviceInfoCache
+        if (info == null) {
+            sb.append("（无 DeviceInfo；${if (isConnected) "连接中但没读到" else "未连接"}）\n")
+        } else {
+            sb.append("厂商：${info.manufacturer}\n型号：${info.model}\n固件：${info.versionOrDash()}\n序列号：${info.serialOrDash()}\n")
+        }
+        sb.append("快门数：${if (shutterCount >= 0) "$shutterCount 次" else "未读取"}\n")
+
+        sb.append("\n---- 机身支持的操作码 ----\n")
+        ptpConnection?.logSupportedOperations { sb.append(it).append('\n') }
+            ?: sb.append("（未连接）\n")
+
+        sb.append("\n---- 关键属性快照 ----\n")
+        val snapshot = listOf(
+            "0x5011 DateTime" to PtpConstants.PROP_DATE_TIME,
+            "0xD100 快门" to PtpConstants.PROP_NIKON_SHUTTER_SPEED,
+            "0xD10B 记录媒介" to PtpConstants.PROP_NIKON_RECORDING_MEDIA,
+            "0xD1A0 取景模式" to PtpConstants.PROP_NIKON_LIVE_VIEW_MODE,
+            "0x500A 对焦模式" to PtpConstants.PROP_FOCUS_MODE,
+            "0xD054 ISO 自动" to PtpConstants.PROP_NIKON_ISO_AUTO
+        )
+        thread {
+            val lines = StringBuilder()
+            if (isConnected) {
+                val media = ptpConnection?.getDevicePropValue(PtpConstants.PROP_NIKON_RECORDING_MEDIA)
+                lines.append(
+                    "0xD10B 记录媒介：" + if (media == null || media == -999999) "读取失败"
+                    else "0x${Integer.toHexString(media).uppercase()}" + "\n"
+                )
+                for ((name, code) in snapshot) {
+                    val desc = ptpConnection?.describeProp(code)
+                    lines.append("$name：$desc\n")
+                }
+            } else {
+                lines.append("（未连接）\n")
+            }
+            // 自定义属性码覆盖：这些码是手工试出来的，换台机身也许不同，值得一起带走
+            val ov = getSharedPreferences("csm_codes", Context.MODE_PRIVATE).all
+            lines.append("\n---- 属性码覆盖 ----\n")
+            if (ov.isEmpty()) lines.append("（无）\n")
+            else ov.toSortedMap().forEach { (k, v) ->
+                lines.append("$k = 0x${Integer.toHexString((v as? Int) ?: 0).uppercase()}\n")
+            }
+            lines.append("\n---- 日志（最近 ${LOG_MAX_LINES} 行）----\n")
+            lines.append(infoText.text).append('\n')
+
+            val name = "D300诊断_${java.text.SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(java.util.Date())}.txt"
+            val ok = saveTextToDownloads(name, sb.toString() + lines.toString())
+            runOnUiThread {
+                if (ok) {
+                    log("诊断包已导出到 下载/D300/$name")
+                    toast("已导出到 下载/D300/$name")
+                } else {
+                    toast("导出失败：写不了下载目录")
+                }
+            }
+        }
+    }
+
+    /** 写个文本文件到 下载/D300。走 MediaStore，不需要任何存储权限 */
+    private fun saveTextToDownloads(name: String, text: String): Boolean {
+        if (Build.VERSION.SDK_INT < 29) {
+            log("导出失败：Android 10 以下不支持免权限写入公共目录")
+            return false
+        }
+        return try {
+            val values = android.content.ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, name)
+                put(MediaStore.Downloads.MIME_TYPE, "text/plain")
+                put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/D300")
+                put(MediaStore.Downloads.IS_PENDING, 1)
+            }
+            val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: return false
+            contentResolver.openOutputStream(uri)?.use {
+                it.write(text.toByteArray(Charsets.UTF_8))
+            } ?: return false
+            values.clear()
+            values.put(MediaStore.Downloads.IS_PENDING, 0)
+            contentResolver.update(uri, values, null, null)
+            true
+        } catch (e: Exception) {
+            log("导出诊断包失败：${e.message}")
+            false
+        }
+    }
+
+    // =====================================================================
+    // 设置与标定数据的备份 / 恢复
+    //
+    // AF 51 点标定、手工试出来的属性码覆盖、流程设置全躺在 SharedPreferences 里，
+    // 卸载就没了 —— 而换装正式签名包恰恰必须卸载重装（签名不同不能覆盖安装），
+    // 标定一次要十几分钟，这个坑迟早会踩。所以做成导出成 JSON、可再导入。
+    // =====================================================================
+
+    private fun backupPrefNames(): List<String> =
+        listOf(AF_PREFS, "af51_calib", "csm_codes", "workflow")
+
+    private fun buildBackupJson(): String {
+        val root = org.json.JSONObject()
+        root.put("schema", 1)
+        root.put("app", "NikonD300Controller")
+        root.put("exportedAt", java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(java.util.Date()))
+        val prefsObj = org.json.JSONObject()
+        for (name in backupPrefNames()) {
+            val obj = org.json.JSONObject()
+            for ((k, v) in getSharedPreferences(name, Context.MODE_PRIVATE).all) {
+                when (v) {
+                    null -> obj.put(k, org.json.JSONObject.NULL)
+                    is Set<*> -> {
+                        val arr = org.json.JSONArray()
+                        v.forEach { arr.put(it) }
+                        obj.put(k, arr)
+                    }
+                    else -> obj.put(k, v)
+                }
+            }
+            prefsObj.put(name, obj)
+        }
+        root.put("prefs", prefsObj)
+        return root.toString(2)
+    }
+
+    /** @return 写进去的键值条数；格式不对直接抛，让调用方提示用户 */
+    private fun applyBackupJson(text: String): Int {
+        val root = org.json.JSONObject(text)
+        val schema = root.optInt("schema", 0)
+        if (schema != 1) throw IllegalArgumentException("不支持的备份版本 schema=$schema")
+        val prefsObj = root.getJSONObject("prefs")
+        var count = 0
+        val names = prefsObj.keys()
+        while (names.hasNext()) {
+            val name = names.next()
+            val obj = prefsObj.getJSONObject(name)
+            val editor = getSharedPreferences(name, Context.MODE_PRIVATE).edit()
+            editor.clear()
+            val ks = obj.keys()
+            while (ks.hasNext()) {
+                val k = ks.next()
+                when (val v = obj.get(k)) {
+                    org.json.JSONObject.NULL -> editor.remove(k)
+                    is Boolean -> editor.putBoolean(k, v)
+                    is Int -> editor.putInt(k, v)
+                    is Long -> editor.putLong(k, v)
+                    is Double -> editor.putFloat(k, v.toFloat())
+                    is Float -> editor.putFloat(k, v)
+                    is String -> editor.putString(k, v)
+                    is org.json.JSONArray -> {
+                        val set = LinkedHashSet<String>()
+                        for (i in 0 until v.length()) set.add(v.getString(i))
+                        editor.putStringSet(k, set)
+                    }
+                }
+                count++
+            }
+            editor.apply()
+        }
+        return count
+    }
+
+    private fun showBackupSheet() {
+        val page = buildSheetPage("备份与恢复", "标定数据 · 属性码覆盖 · 流程设置")
+        val card = sheetCard(page.content, "备份内容")
+        val items = listOf(
+            AF_PREFS to "对焦偏好（触摸对焦、取景模式、峰值设置、AF 点数…）",
+            "af51_calib" to "51 点对焦框标定（照着取景画面一格格调出来的坐标）",
+            "csm_codes" to "手工试出来的属性码覆盖",
+            "workflow" to "拍摄流程（自拍延时、间隔、反光板预升、自动下载）"
+        )
+        items.forEach { (name, desc) ->
+            val n = getSharedPreferences(name, Context.MODE_PRIVATE).all.size
+            card.addView(sheetInfoRow(desc, "$n 项").first)
+        }
+        page.content.addView(card)
+
+        val exportRow = sheetValueRow("导出备份", "存成 .json") { _ ->
+            runCatching { backupExportLauncher.launch("D300备份_${
+                java.text.SimpleDateFormat("yyyyMMdd", Locale.US).format(java.util.Date())
+            }.json") }.onFailure { toast("打不开保存对话框：${it.message}") }
+        }
+        card.addView(exportRow.view)
+
+        val importRow = sheetValueRow("导入备份", "选 .json 恢复") { _ ->
+            runCatching { backupImportLauncher.launch(arrayOf("application/json", "*/*")) }
+                .onFailure { toast("打不开文件选择器：${it.message}") }
+        }
+        card.addView(importRow.view)
+
+        page.content.addView(
+            sheetHint("换装正式签名的包必须卸载旧的（签名不同覆盖安装会失败），卸载就会清空这些设置 —— 先导出一份，装完再导回来，标定不用重做。导入会覆盖同名设置，之后需要重启 App 生效。")
+        )
+        page.show()
+    }
+
+    private fun writeBackupTo(uri: android.net.Uri) {
+        thread {
+            val json = runCatching { buildBackupJson() }.getOrNull()
+            runOnUiThread {
+                if (json == null) { toast("生成备份失败"); return@runOnUiThread }
+                val ok = try {
+                    contentResolver.openOutputStream(uri)?.use {
+                        it.write(json.toByteArray(Charsets.UTF_8))
+                    } != null
+                } catch (e: Exception) {
+                    log("写备份失败：${e.message}"); false
+                }
+                if (ok) {
+                    log("备份已导出（${backupPrefNames().size} 组设置）")
+                    toast("备份已导出")
+                } else toast("导出失败：写不了这个文件")
+            }
+        }
+    }
+
+    private fun readBackupFrom(uri: android.net.Uri) {
+        thread {
+            val text = try {
+                contentResolver.openInputStream(uri)?.use {
+                    it.readBytes().toString(Charsets.UTF_8)
+                }
+            } catch (e: Exception) {
+                log("读备份失败：${e.message}"); null
+            }
+            val count = text?.let { runCatching { applyBackupJson(it) }.getOrNull() }
+            runOnUiThread {
+                if (count == null) {
+                    toast("导入失败：文件不是有效的备份")
+                    return@runOnUiThread
+                }
+                log("已导入 $count 项设置，需要重启 App 生效")
+                androidx.appcompat.app.AlertDialog.Builder(this)
+                    .setTitle("导入完成")
+                    .setMessage("已恢复 $count 项设置。这些值在 App 启动时读入，需要重启一次才生效。")
+                    .setPositiveButton("立即重启") { _, _ -> recreate() }
+                    .setNegativeButton("稍后", null)
+                    .show()
+            }
+        }
     }
 
     /**
@@ -4654,6 +5230,8 @@ class MainActivity : AppCompatActivity(), SheetHost {
                     // ★ 把机身自述支持的操作码打进日志：以后再遇到"这个按钮点了没反应"，
                     //  先看它到底认不认这条命令，而不是猜固件实现。（日志/ABD 都能捞这段）
                     ptpConnection?.logSupportedOperations { line -> runOnUiThread { log(line) } }
+                    // 连上就看一眼机身时钟：差太多会让 EXIF 时间戳全错，事后没法补救
+                    checkCameraClockDrift()
                     runOnUiThread {
                         if (deviceInfo != null && deviceInfo.model.isNotBlank()) {
                             // 走统一入口：机型名 + 尾部小箭头（点它开机身信息）
@@ -6640,6 +7218,11 @@ class MainActivity : AppCompatActivity(), SheetHost {
         const val AF_KEY_TOUCH_AF = "touch_af"
         const val LV_MODE_KEY = "lv_mode"
         const val LV_GRID_KEY = "lv_grid"
+        /** 取景辅助：0 = 峰值对焦，1 = 过曝斑马纹 */
+        const val PEAK_MODE_KEY = "peak_mode"
+        const val PEAK_THRESHOLD_KEY = "peak_threshold"
+        const val ZEBRA_THRESHOLD_KEY = "zebra_threshold"
+        const val PEAK_COLOR_KEY = "peak_color"
 
         /** 反光板预升可选的等待时长（秒）。1 秒是机身 d9 的口径，长曝/微距往上加 */
         val MIRROR_UP_DELAYS = listOf(1, 2, 3, 5, 10)
@@ -6765,6 +7348,25 @@ class MainActivity : AppCompatActivity(), SheetHost {
             }
         }
         csmEntryHost.addView(ncpEntry.view)
+
+        // ---- 机身时钟 ----
+        // 机身内部电池掉电后时间会归零，EXIF 里就全是 2000 年 —— 事后没法补救，
+        // 所以给它一个固定入口，而不是等人在日志里发现。
+        val clockEntry = sheetValueRow("机身时钟", "校准 EXIF 时间戳") { _ ->
+            if (!isConnected) toast("请先连接相机") else showCameraClockSheet()
+        }
+        csmEntryHost.addView(clockEntry.view)
+
+        // ---- 诊断包 ----
+        // 出问题时最有信息量的不是截图，是"机身自述了什么 + 出事前那几百行日志"。
+        // 不依赖连接也能导（未连接时导出的是手机侧信息 + 日志）。
+        val diagEntry = sheetValueRow("导出诊断包", "存成 txt 便于排查") { _ -> exportDiagnostics() }
+        csmEntryHost.addView(diagEntry.view)
+
+        // ---- 备份 / 恢复 ----
+        // 换装正式签名的包必须卸载旧的，卸载就清空 AF 标定 —— 先导出再装。
+        val backupEntry = sheetValueRow("备份与恢复", "标定 · 属性码 · 流程设置") { _ -> showBackupSheet() }
+        csmEntryHost.addView(backupEntry.view)
 
         // ---- 使用说明 / 关于 ----
         // 放在参数页最底下：不依赖相机连接，也没人天天点，

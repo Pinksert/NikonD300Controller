@@ -83,16 +83,6 @@ class MainActivity : AppCompatActivity(), SheetHost {
     @Volatile
     private var lastAutoAfMs = 0L
 
-    /** 曝光预览：拍一张不落卡的照片，取缩略图盖在取景上看曝光（0x90C0 → 机身内存） */
-    private lateinit var exposurePreviewButton: TextView
-
-    /** 曝光预览浮层（代码创建，避免再改两份布局）；null = 当前没在显示 */
-    private var exposurePreviewOverlay: View? = null
-
-    /** 防重入：一次快门要占住 usbLock 好几秒，重复点会叠出多个线程抢锁 */
-    @Volatile
-    private var isExposurePreviewRunning = false
-
     // 对焦点控制全部收在取景框上：右上角 chip 切 11/51 点，画面上点对焦点（写 0xD108），
     // 三脚架模式点画面挪 AF 框（0x9205）。参数页那张「自动对焦」卡片已按用户要求整块删除。
 
@@ -783,8 +773,6 @@ class MainActivity : AppCompatActivity(), SheetHost {
         renderTouchAfButton()
         touchAfButton.setOnClickListener { toggleTouchAf() }
 
-        exposurePreviewButton = findViewById(R.id.exposurePreviewButton)
-        exposurePreviewButton.setOnClickListener { runExposurePreview() }
 
         topStatusBar = findViewById(R.id.topStatusBar)
         topBarRow = findViewById(R.id.topBarRow)
@@ -3649,7 +3637,17 @@ class MainActivity : AppCompatActivity(), SheetHost {
      * 于是"画面在中间、按钮在两头"，眼睛要在画面和按钮之间来回跳。
      *
      * 这里按画面真正画到哪（[lvImageBounds]，跟着 imageMatrix 走，放大时也准）
-     * 重新给上下两组按钮定边距，让它们贴着画面内缩 8dp。
+     * 重新给上下两组按钮定边距，让它们**贴着画面**。
+     *
+     * ★★ 方向很关键：是贴在画面**外面**，不是压在画面上。
+     * 取景画面的每一格像素都可能是用户在看的构图，按钮盖上去那块就永远看不见了，
+     * 手动对焦放大看细节时尤其致命（盖住的往往正是要看的地方）。
+     * 所以上组整条坐在画面上沿之上（底边 = 画面顶 - 8dp），
+     * 下组整条吊在画面下沿之下（顶边 = 画面底 + 8dp）。
+     *
+     * 空间不够时（横屏下画面顶满取景框）没有"画面外"可用，
+     * 这时退让给底部信息条 —— 宁可压一点点画面，也不能和状态条叠成一团。
+     *
      * 退出全屏时把记下来的原始边距还原，非全屏下的排布一点不变。
      */
     private var lvSavedControlMargins: IntArray? = null
@@ -3660,16 +3658,14 @@ class MainActivity : AppCompatActivity(), SheetHost {
         if (!isLvFullscreen) {
             lvSavedControlMargins?.let { m ->
                 setTopMargin(lvTopTools, m[0])
-                setTopMargin(exposurePreviewButton, m[1])
-                setTopMargin(lvFullscreenButton, m[2])
-                setBottomMargin(lvFullControls, m[3])
+                setTopMargin(lvFullscreenButton, m[1])
+                setBottomMargin(lvFullControls, m[2])
             }
             return
         }
         if (lvSavedControlMargins == null) {
             lvSavedControlMargins = intArrayOf(
                 topMarginOf(lvTopTools),
-                topMarginOf(exposurePreviewButton),
                 topMarginOf(lvFullscreenButton),
                 bottomMarginOf(lvFullControls)
             )
@@ -3679,15 +3675,21 @@ class MainActivity : AppCompatActivity(), SheetHost {
         if (frameH <= 0) return
         val d = resources.displayMetrics.density
         val pad = (8 * d).toInt()
-        val toolsH = (28 * d).toInt()      // 顶部工具条固定 28dp
-        val gap = (8 * d).toInt()          // 工具条与曝光预览之间的间距
+        // 底部信息条 34dp 高 + 12dp 边距，再留 6dp 间隔 —— 下组不许压到它上面
+        val minBottom = (52 * d).toInt()
 
         val (imgTop, imgBottom) = lvImageBounds()
-        setTopMargin(lvTopTools, imgTop + pad)
-        setTopMargin(exposurePreviewButton, imgTop + pad + toolsH + gap)
-        setTopMargin(lvFullscreenButton, imgTop + pad)
-        // 控件是 bottom 对齐的：底边距 = 画面下沿到取景框底边的距离 + 内缩量
-        setBottomMargin(lvFullControls, (frameH - imgBottom + pad).coerceAtLeast(0))
+
+        // 上组：底边 = 画面上沿 - pad，反推顶边距 = imgTop - pad - 高度
+        val toolsH = lvTopTools.height.takeIf { it > 0 } ?: (28 * d).toInt()
+        val topMargin = (imgTop - pad - toolsH).coerceAtLeast(0)
+        setTopMargin(lvTopTools, topMargin)
+        setTopMargin(lvFullscreenButton, topMargin)
+
+        // 下组：顶边 = 画面下沿 + pad，反推底边距 = frameH - (imgBottom + pad + 高度)
+        val ctrlH = lvFullControls.height.takeIf { it > 0 } ?: (46 * d).toInt()
+        val bottomMargin = (frameH - (imgBottom + pad + ctrlH)).coerceAtLeast(minBottom)
+        setBottomMargin(lvFullControls, bottomMargin)
     }
 
     /** 取景画面在取景框里的上下沿；取不到（还没开取景）就按整块算 */
@@ -3908,250 +3910,6 @@ class MainActivity : AppCompatActivity(), SheetHost {
         }
     }
 
-    // ------------------------------------------------------------------
-    // 曝光预览：拍一张不落卡的照片来看曝光
-    // ------------------------------------------------------------------
-
-    /**
-     * 拍一张**不落卡**的照片（0x90C0 → 机身内存），取回缩略图盖在取景画面上。
-     *
-     * 与实时取景画面的区别：取景流是机身为了让你能对焦而实时生成的，
-     * 亮度/白平衡都未必等于成片；这里走的是**真实曝光**，反映的是真正会拍出来的样子
-     * （当然快门/光圈/ISO 得先设好）。
-     *
-     * ⚠️ 代价：这是真实快门动作，反光板和快门帘会走一遍，取景会被打断；
-     * 拍完机身常常自己结束取景，所以下面拍完要负责把它开回来。
-     */
-    private fun runExposurePreview() {
-        // 已经显示着就当作"关闭"用，省一次快门
-        if (exposurePreviewOverlay != null) {
-            dismissExposurePreview()
-            return
-        }
-        if (isExposurePreviewRunning) return
-
-        val p = ptpConnection
-        if (p == null) {
-            toast("还没连上相机")
-            return
-        }
-
-        isExposurePreviewRunning = true
-        exposurePreviewButton.text = "拍摄中…"
-        exposurePreviewButton.isEnabled = false
-
-        // 读帧循环让路：0x90C0 要独占 USB，不能和每 70ms 一次的 0x9203 抢同一条管道
-        lvFramesPaused = true
-        Thread {
-            // ★ 两条通道，A 不成自动走 B。
-            //
-            // A：0x90C0 拍进机身内存（不落卡）—— 理想路径，但要求机身切得动记录媒介、
-            //    并在事件里把 SDRAM 对象的句柄交出来，真机上这两条一直在翻车。
-            // B：0x100E 老老实实拍进卡 → 0x100A 取缩略图 → 0x100B 删掉。
-            //    三步都是已经在真机跑通的命令（删除功能用户已确认可用），
-            //    代价只是文件编号往下走一号。
-            var viaCard = false
-            var deleted = true
-            var bmp = try {
-                Thread.sleep(150) // 让正在进行的那一帧收尾
-                p.captureToSdramPreview()
-            } catch (e: Exception) {
-                android.util.Log.e("EXP_PREV", "曝光预览（通道A）异常：${e.message}")
-                null
-            }
-
-            if (bmp == null && !stopAllRequested) {
-                runOnUiThread {
-                    exposurePreviewButton.text = "换条路…"
-                    log("曝光预览：机身内存这条路没拿到画面，改走「拍进卡 → 取缩略图 → 删掉」")
-                }
-                try {
-                    val r = p.captureToCardPreview()
-                    bmp = r.first
-                    deleted = r.second
-                    viaCard = bmp != null
-                } catch (e: Exception) {
-                    android.util.Log.e("EXP_PREV", "曝光预览（通道B）异常：${e.message}")
-                }
-            }
-            lvFramesPaused = false
-
-            val finalDeleted = deleted
-            val finalViaCard = viaCard
-            runOnUiThread {
-                isExposurePreviewRunning = false
-                exposurePreviewButton.text = "曝光预览"
-                exposurePreviewButton.isEnabled = true
-
-                if (bmp != null) {
-                    showExposurePreview(bmp)
-                    log(
-                        if (finalViaCard) {
-                            if (finalDeleted) "曝光预览：已拍到（走存储卡，那张已删除）"
-                            else "曝光预览：已拍到，但那张**没删掉** —— 请到相册里手动删"
-                        } else "曝光预览：已拍到（不落卡）"
-                    )
-                } else {
-                    toast("曝光预览没取回画面，看日志")
-                }
-            }
-
-            // 0x90C0 之后机身常常自己结束取景：画面冻在那里，左上角还挂着
-            // 录制/峰值/曝光预览几个按钮 —— 看着就像 App 卡死。
-            // 所以不管上面成没成，都探一次：确实死了就把 UI 收回"没在取景"的状态。
-            settleLiveViewAfterPreviewShot()
-        }.start()
-    }
-
-    /**
-     * 预览拍完之后，确认取景还活着不。
-     *
-     * 判据就是"还能不能取到帧"：机身退了取景以后各种状态位未必马上同步，
-     * 但取帧一定会失败。死了就走正常退出流程（自带超时上限），把按钮状态复位。
-     */
-    private fun settleLiveViewAfterPreviewShot() {
-        Thread {
-            try {
-                Thread.sleep(300)
-                val alive = try {
-                    ptpConnection?.getLiveViewFrame() != null
-                } catch (_: Exception) {
-                    false
-                }
-                if (alive) return@Thread
-                runOnUiThread {
-                    log("曝光预览：机身已结束实时取景（已复位界面，点 LV 可重开）")
-                }
-                stopLiveViewBlocking()
-            } catch (_: Exception) {
-            }
-        }.start()
-    }
-
-    /** 显示曝光预览浮层：预览图 + 亮度直方图 + 曝光读数，点任意处关闭 */
-    private fun showExposurePreview(bmp: Bitmap) {
-        dismissExposurePreview()
-
-        val root = findViewById<ViewGroup>(android.R.id.content) ?: return
-        val overlay = android.widget.FrameLayout(this).apply {
-            setBackgroundColor(0xDD000000.toInt())
-            isClickable = true
-        }
-
-        val img = ImageView(this).apply {
-            setImageBitmap(bmp)
-            scaleType = ImageView.ScaleType.FIT_CENTER
-            adjustViewBounds = true
-        }
-        overlay.addView(
-            img,
-            android.widget.FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            ).apply { setMargins(12, 12, 12, 150) }
-        )
-
-        val (hist, stat) = buildLumaHistogram(bmp)
-        overlay.addView(
-            ImageView(this).apply {
-                setImageBitmap(hist)
-                scaleType = ImageView.ScaleType.FIT_XY
-            },
-            android.widget.FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 76
-            ).apply {
-                gravity = android.view.Gravity.BOTTOM
-                setMargins(16, 0, 16, 58)
-            }
-        )
-
-        overlay.addView(
-            TextView(this).apply {
-                text = "均值 ${stat.mean} · 死黑 ${stat.clipLow}% · 高光溢出 ${stat.clipHigh}%\n点击任意处关闭"
-                setTextColor(Color.WHITE)
-                textSize = 12f
-                gravity = android.view.Gravity.CENTER
-            },
-            android.widget.FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply {
-                gravity = android.view.Gravity.BOTTOM
-                setMargins(0, 0, 0, 16)
-            }
-        )
-
-        overlay.setOnClickListener { dismissExposurePreview() }
-        root.addView(
-            overlay,
-            android.widget.FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-        )
-        exposurePreviewOverlay = overlay
-
-        // 自动收：别一直挡着取景画面
-        overlay.postDelayed({ dismissExposurePreview() }, 8000)
-    }
-
-    private fun dismissExposurePreview() {
-        val v = exposurePreviewOverlay ?: return
-        exposurePreviewOverlay = null
-        (v.parent as? ViewGroup)?.removeView(v)
-    }
-
-    private data class LumaStat(val mean: Int, val clipLow: Int, val clipHigh: Int)
-
-    /**
-     * 由缩略图算亮度直方图与曝光读数。
-     *
-     * 缩略图先降采样到 128 宽再统计 —— 直方图看的是分布，不需要全分辨率，
-     * 这样一两张图也就几毫秒。
-     *
-     * @return 直方图位图 + 读数（均值 0~255，死黑/高光溢出百分比）
-     */
-    private fun buildLumaHistogram(src: Bitmap, w: Int = 512, h: Int = 76): Pair<Bitmap, LumaStat> {
-        val sw = 128
-        val sh = (src.height.toFloat() / src.width.coerceAtLeast(1) * sw).toInt().coerceAtLeast(1)
-        val small = Bitmap.createScaledBitmap(src, sw, sh, true)
-        val px = IntArray(sw * sh)
-        small.getPixels(px, 0, sw, 0, 0, sw, sh)
-        if (small !== src) small.recycle()
-
-        val bins = IntArray(256)
-        var sum = 0
-        for (p in px) {
-            val l = (0.299f * ((p shr 16) and 0xFF) +
-                0.587f * ((p shr 8) and 0xFF) +
-                0.114f * (p and 0xFF)).toInt().coerceIn(0, 255)
-            bins[l]++
-            sum += l
-        }
-        val n = px.size.coerceAtLeast(1)
-        val mean = sum / n
-        val clipLow = (bins.take(8).sum() * 100) / n
-        val clipHigh = (bins.takeLast(8).sum() * 100) / n
-
-        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val c = Canvas(out)
-        c.drawColor(0xFF101010.toInt())
-        val paint = Paint().apply { style = Paint.Style.FILL }
-        val max = bins.maxOrNull()?.coerceAtLeast(1) ?: 1
-        val barW = w / 256f + 0.6f
-        for (i in 0 until 256) {
-            val bh = (bins[i].toFloat() / max * (h - 6)).toInt()
-            if (bh <= 0) continue
-            paint.color = when {
-                i < 8 -> Color.parseColor("#4A90E2")    // 死黑
-                i > 247 -> Color.parseColor("#E24A4A")  // 高光溢出
-                else -> Color.parseColor("#CCCCCC")
-            }
-            val x = i.toFloat() / 255 * w
-            c.drawRect(x, (h - 3 - bh).toFloat(), x + barW, (h - 3).toFloat(), paint)
-        }
-        return out to LumaStat(mean, clipLow, clipHigh)
-    }
 
     private fun startLiveView(keepAfLock: Boolean = false) {
         // 防重入：整条开启链路可能跑十几秒。以前这期间不设防，用户等不及再点一次
@@ -4234,7 +3992,6 @@ class MainActivity : AppCompatActivity(), SheetHost {
                         // 峰值对焦同理：只对实时画面有意义，且开销是按帧算的
                         peakButton.visibility = View.VISIBLE
                         touchAfButton.visibility = View.VISIBLE
-                        exposurePreviewButton.visibility = View.VISIBLE
                         lvFullscreenButton.visibility = View.VISIBLE
                         renderRecState(recorder?.isRecording == true)
                         // 取景一开，点阵要不要显示由取景模式决定（三脚架模式只留 AF 框）
@@ -4334,10 +4091,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
                         liveViewPlaceholder.visibility = View.GONE
                         recButton.visibility = View.GONE
                         peakButton.visibility = View.GONE
-            touchAfButton.visibility = View.GONE
                         touchAfButton.visibility = View.GONE
-                        exposurePreviewButton.visibility = View.GONE
-                        dismissExposurePreview()
                         renderLiveViewMode(currentLiveViewMode)
                         log("Live View 启动失败：${result.reason}")
                         Toast.makeText(this@MainActivity, "取景启动失败：${result.reason}", Toast.LENGTH_LONG).show()
@@ -4385,8 +4139,6 @@ class MainActivity : AppCompatActivity(), SheetHost {
             if (recorder?.isRecording == true) stopRecording()
             recButton.visibility = View.GONE
             peakButton.visibility = View.GONE
-            exposurePreviewButton.visibility = View.GONE
-            dismissExposurePreview()
             lvFullscreenButton.visibility = View.GONE
             if (isLvFullscreen) {
                 isLvFullscreen = false

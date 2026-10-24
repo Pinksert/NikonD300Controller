@@ -152,21 +152,43 @@
                     android:textAllCaps="false"
                     android:textColor="@color/text_primary"
                     android:textSize="12sp" />
+            </LinearLayout>
+
+            <!-- 四个按钮的排布与配色**照抄单张查看器那四个** ——
+                 两处都在做"把这张/这批照片拿走或删掉"，按钮位置长得一样才不用重新找。
+                 第一行：原图导出（暗） / JPG 导出（琥珀，主操作）
+                 第二行：删除（红） / 退出（灰）—— 删除放下行且不高亮，避免手滑。 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:orientation="horizontal">
 
                 <androidx.appcompat.widget.AppCompatButton
-                    android:id="@+id/selExitButton"
-                    android:layout_width="wrap_content"
-                    android:layout_height="34dp"
-                    android:layout_marginStart="8dp"
+                    android:id="@+id/selExportButton"
+                    android:layout_width="0dp"
+                    android:layout_height="42dp"
+                    android:layout_weight="1"
                     android:background="@drawable/bg_btn_dark"
-                    android:minWidth="0dp"
-                    android:paddingStart="12dp"
-                    android:paddingEnd="12dp"
                     android:stateListAnimator="@null"
-                    android:text="退出"
+                    android:text="原图导出"
                     android:textAllCaps="false"
-                    android:textColor="@color/text_secondary"
-                    android:textSize="12sp" />
+                    android:textColor="@color/text_primary"
+                    android:textSize="13sp" />
+
+                <androidx.appcompat.widget.AppCompatButton
+                    android:id="@+id/selJpgButton"
+                    android:layout_width="0dp"
+                    android:layout_height="42dp"
+                    android:layout_marginStart="10dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_btn_amber"
+                    android:stateListAnimator="@null"
+                    android:text="JPG导出"
+                    android:textAllCaps="false"
+                    android:textColor="#0B0E13"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
             </LinearLayout>
 
             <LinearLayout
@@ -175,35 +197,30 @@
                 android:layout_marginTop="10dp"
                 android:orientation="horizontal">
 
-                <!-- 两个按钮都直接导出，区别只在"要不要把 NEF 转成 JPG"：
-                     原图导出 = 相机里是什么字节就存什么字节（NEF 原片一张十几 MB）；
-                     JPG 导出 = NEF 用 LibRaw 真解再压 JPG，JPEG 原件仍原样拷贝。
-                     JPG 导出那颗**长按**改压缩品质（按钮第二行写着当前档位）。 -->
                 <androidx.appcompat.widget.AppCompatButton
-                    android:id="@+id/selJpgButton"
+                    android:id="@+id/selDeleteButton"
                     android:layout_width="0dp"
-                    android:layout_height="48dp"
+                    android:layout_height="42dp"
                     android:layout_weight="1"
                     android:background="@drawable/bg_btn_dark"
                     android:stateListAnimator="@null"
-                    android:text="JPG 导出"
+                    android:text="删除"
                     android:textAllCaps="false"
-                    android:textColor="@color/text_secondary"
+                    android:textColor="@color/accent_red"
                     android:textSize="13sp" />
 
                 <androidx.appcompat.widget.AppCompatButton
-                    android:id="@+id/selExportButton"
+                    android:id="@+id/selExitButton"
                     android:layout_width="0dp"
-                    android:layout_height="48dp"
-                    android:layout_marginStart="8dp"
+                    android:layout_height="42dp"
+                    android:layout_marginStart="10dp"
                     android:layout_weight="1"
-                    android:background="@drawable/bg_btn_amber"
+                    android:background="@drawable/bg_btn_dark"
                     android:stateListAnimator="@null"
-                    android:text="原图导出"
+                    android:text="退出"
                     android:textAllCaps="false"
-                    android:textColor="#0B0E13"
-                    android:textSize="13sp"
-                    android:textStyle="bold" />
+                    android:textColor="@color/text_secondary"
+                    android:textSize="13sp" />
             </LinearLayout>
 
             <ProgressBar

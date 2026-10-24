@@ -145,6 +145,10 @@ class GalleryActivity : AppCompatActivity() {
     private lateinit var selStatus: TextView
     private lateinit var selJpgButton: Button
     private lateinit var selExportButton: Button
+    private lateinit var selDeleteButton: Button
+    /** 批量删除进行中（防重入 + 期间禁掉删除按钮） */
+    @Volatile
+    private var deleting = false
 
     /**
      * NEF → JPG 的压缩质量（只对转档生效；JPEG 原件是原样拷贝）。
@@ -372,18 +376,25 @@ class GalleryActivity : AppCompatActivity() {
             updateSelectionUi()
         }
         findViewById<Button>(R.id.selExitButton).setOnClickListener { setSelectMode(false) }
-        // 两颗按钮都直接导出，区别只在"NEF 要不要转成 JPG"：
-        // 「JPG 导出」转档（长按改品质，按钮第二行写着当前档位），
-        // 「原图导出」相机里是什么字节就存什么字节。
+        // 四颗按钮跟单张查看器那四颗同位置同配色，语义也一样：
+        //   原图导出 = 相机里是什么字节就存什么字节（NEF 原片一张十几 MB）
+        //   JPG 导出  = NEF 用 LibRaw 真解再压 JPG，JPEG 原件仍原样拷贝
+        //   删除      = 从相机卡上删掉勾选的那批
+        //   退出      = 收起多选
         // 以前是「JPG 品质」+「转为 JPG」开关 +「导出到手机」三颗，
         // 选了品质还得记得开开关 —— 两件事拆两处，漏一步就白选。
         jpegQuality = getSharedPreferences("gallery", MODE_PRIVATE)
             .getInt("jpeg_quality", NefDecoder.QUALITY_DEFAULT)
         selJpgButton = findViewById(R.id.selJpgButton)
-        selJpgButton.setOnClickListener { exportSelected(asJpg = true) }
-        selJpgButton.setOnLongClickListener { showQualitySheet(); true }
+        // ★ 与单张页「JPG 导出」同一条路：**先弹品质选择、选完立刻导出**。
+        // 单张那颗是这么做的，这里也必须一样 —— 两处同一件事走两条路，
+        // 用户在一处养成的习惯到另一处就失效了。
+        selJpgButton.setOnClickListener { exportSelectedWithQuality() }
         selExportButton = findViewById(R.id.selExportButton)
         selExportButton.setOnClickListener { exportSelected(asJpg = false) }
+
+        selDeleteButton = findViewById(R.id.selDeleteButton)
+        selDeleteButton.setOnClickListener { confirmDeleteSelected() }
 
         // ---- 单张查看器：导出 JPG / 从相机删除 ----
         viewerJpgButton = findViewById(R.id.viewerJpgButton)
@@ -1369,10 +1380,14 @@ class GalleryActivity : AppCompatActivity() {
     private fun updateSelectionUi() {
         val n = adapter.selected.size
         selCount.text = if (n == 0) "已选 0 张（点照片勾选）" else "已选 $n 张"
-        // 第二行把当前品质写出来：一是让人知道会压到几，二是"长按能改"才有被发现的机会
-        selJpgButton.text = "JPG 导出\n品质 $jpegQuality"
-        selExportButton.isEnabled = n > 0 && !exporting
-        selJpgButton.isEnabled = n > 0 && !exporting
+        // ★ 按钮只写「JPG导出」三个字，不再把当前品质挂到第二行。
+        // 品质是在点下去之后弹的那张表里选的（跟单张页一样），
+        // 写在这儿反而像"已经定死了"，和实际操作对不上。
+        val busy = exporting || deleting
+        selExportButton.isEnabled = n > 0 && !busy
+        selJpgButton.isEnabled = n > 0 && !busy
+        selDeleteButton.isEnabled = n > 0 && !busy
+        selDeleteButton.text = if (n > 0) "删除 $n 张" else "删除"
     }
 
     /** 把字节写进手机相册（Pictures/D300），成功返回文件名 */
@@ -1395,6 +1410,31 @@ class GalleryActivity : AppCompatActivity() {
         } catch (_: Exception) {
             false
         }
+    }
+
+    /**
+     * 多选「JPG导出」：与单张页那颗**同一条路** —— 先弹品质选择，选完立刻导出。
+     *
+     * 单张页对应的是 [exportCurrentAsJpgWithQuality]，规则是：JPEG 原件整份拷贝、
+     * 不经 LibRaw 重编码，品质选了也没用，所以"这一张是 JPEG"时直接导出、不弹表。
+     * 这里是同一条规则的批量版：只要勾选里**有一张 NEF** 才弹表。
+     *
+     * 为什么必须一致：两处都在做"导出成 JPG"，一处先选品质、一处直接跑，
+     * 用户在一处养成的习惯到另一处就失效了 —— 而且多选这批动辄十几张，
+     * 选错了档回头得全部重来。
+     */
+    private fun exportSelectedWithQuality() {
+        val ptp = PtpUsbConnection.activeInstance
+        if (ptp == null) { Toast.makeText(this, "未连接相机", Toast.LENGTH_SHORT).show(); return }
+        if (exporting) return
+        val targets = entries.filter { adapter.selected.contains(it.info.handle) }
+        if (targets.isEmpty()) { Toast.makeText(this, "还没勾选照片", Toast.LENGTH_SHORT).show(); return }
+        if (targets.none { !it.info.isJpeg }) {
+            // 全是 JPEG：品质档对它们没有意义，别拿一个改不动任何东西的表糊弄人
+            exportSelected(asJpg = true)
+            return
+        }
+        showQualitySheet { exportSelected(asJpg = true) }
     }
 
     /**
@@ -1708,6 +1748,116 @@ class GalleryActivity : AppCompatActivity() {
                 }
             }
             .show()
+    }
+
+    /**
+     * 批量删除前的确认。
+     *
+     * 删一批比删一张更容易手滑，所以确认框里把**张数**和"不可恢复"都摆出来 ——
+     * 一句"从相机删除这 12 张？"比泛泛的"删除所选？"更能让人停下来看一眼。
+     */
+    private fun confirmDeleteSelected() {
+        val ptp = PtpUsbConnection.activeInstance
+        if (ptp == null) {
+            Toast.makeText(this, "未连接相机", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (deleting) return
+        val targets = entries.filter { adapter.selected.contains(it.info.handle) }
+        if (targets.isEmpty()) {
+            Toast.makeText(this, "还没勾选照片", Toast.LENGTH_SHORT).show()
+            return
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("从相机删除这 ${targets.size} 张？")
+            .setMessage("卡上的原文件会被删掉，不可恢复。")
+            .setNegativeButton("取消", null)
+            .setPositiveButton("删除") { _, _ -> deleteSelected(targets) }
+            .show()
+    }
+
+    /**
+     * 逐张删：删一张报一张，失败不停下剩下的（把"哪几张没删掉"如实留在勾选里）。
+     *
+     * ★ 开删之前先问机身认不认 `0x100B` —— 这条和单张删除是同一个理由：
+     *   不支持的操作码发出去机身可能一声不吭，usbLock 一直攥着，
+     *   整条 USB 通道就全堵死了（"点了没反应 + 之后什么都发不出去"）。
+     *   批量版更危险：一发就是十几条，等于把通道反复往死里堵。
+     */
+    private fun deleteSelected(targets: List<Entry>) {
+        val ptp = PtpUsbConnection.activeInstance ?: return
+        if (deleting) return
+        deleting = true
+        selProgress.visibility = View.VISIBLE
+        selProgress.isIndeterminate = false
+        selProgress.max = targets.size
+        selProgress.progress = 0
+        selStatus.visibility = View.VISIBLE
+        selStatus.text = "准备删除 ${targets.size} 张…"
+        updateSelectionUi()
+
+        bg {
+            val supported = ptp.supportsOperation(PtpConstants.OP_DELETE_OBJECT)
+            if (supported == false) {
+                runOnUiThread {
+                    deleting = false
+                    selProgress.visibility = View.GONE
+                    selStatus.text = "机身不支持 USB 删除，请用机身上的删除键"
+                    Toast.makeText(this, "机身不支持 USB 删除", Toast.LENGTH_LONG).show()
+                    updateSelectionUi()
+                }
+                return@bg
+            }
+
+            var ok = 0
+            var failed = 0
+            var lastWhy = ""
+            val removed = ArrayList<Int>()
+            for (e in targets) {
+                if (!pageAlive) break
+                val (done, why) = ptp.deleteObject(e.info.handle)
+                if (done) {
+                    ok++
+                    removed.add(e.info.handle)
+                } else {
+                    failed++
+                    lastWhy = why
+                }
+                runOnUiThread {
+                    selProgress.progress = ok + failed
+                    selStatus.text = "已处理 ${ok + failed}/${targets.size}：${e.info.filename}"
+                }
+            }
+
+            runOnUiThread {
+                deleting = false
+                selProgress.progress = targets.size
+                selStatus.text = buildString {
+                    append("删除完成：$ok 张已删")
+                    if (failed > 0) append(" · $failed 张失败${if (lastWhy.isNotBlank()) "（$lastWhy）" else ""}")
+                }
+                // 只把真删掉的从列表摘掉：没删成的留在网格上也留在勾选里，方便重试
+                for (h in removed) {
+                    val i = entries.indexOfFirst { it.info.handle == h }
+                    if (i >= 0) {
+                        entries.removeAt(i)
+                        adapter.notifyItemRemoved(i)
+                        adapter.selected.remove(h)
+                    }
+                }
+                updateCountText()
+                Toast.makeText(
+                    this,
+                    if (failed > 0) "删除完成，$failed 张失败" else "已删除 $ok 张",
+                    Toast.LENGTH_LONG
+                ).show()
+                if (adapter.selected.isEmpty()) setSelectMode(false)
+                else {
+                    adapter.notifyDataSetChanged()
+                    updateSelectionUi()
+                }
+            }
+        }
     }
 
     /** 删除的收尾：结果提示 + 成功才从列表摘掉 */

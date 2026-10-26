@@ -247,13 +247,6 @@ class PtpUsbConnection(
     private var lastResponse: PtpResponse? = null
 
     /**
-     * 是否在 AF 驱动后补发 0x9206（官方 MAID→PTP 翻译表 case 3 的第三步）。
-     * 该操作码的公开语义尚未在 libgphoto2 等资料中确认，默认关闭；
-     * 真机实测确认无害后置 true 即可。
-     */
-    var sendAfDriveFollowUp: Boolean = false
-
-    /**
      * 最近一次 SetDevicePropValue 的失败响应码（0 = 无失败）。
      * 用来给界面生成人能看懂的失败原因，而不是干巴巴一句"失败"。
      */
@@ -2994,12 +2987,9 @@ class PtpUsbConnection(
     /**
      * 驱动自动对焦。
      *
-     * 官方 MAID→PTP 翻译表 case 3（AF）的完整序列是三步：
-     *   1) 0x90C1 AfDrive
-     *   2) 0x90C8 DeviceReady —— 轮询等待机身完成对焦动作
-     *   3) 0x9206 收尾
-     * 我们此前只发了第 1 步，机身还在对焦行程中就返回了，
-     * 紧接着的 0x90C0 自然拿到 0x2019 Focus Not Locked。
+     * 官方序列（§2.4①「激活型命令」）：`0x90C1 AfDrive` 只是"开始"，完成与否要问
+     * `0x90C8 DeviceReady`：`Device_Busy/0x2019` = 还在跑，`OK` = 完成，
+     * `Out_of_Focus` = 没合上且机身已取消。
      */
     fun afDrive(): Boolean {
         // ---- 步骤 1：发 0x90C1（持锁，但要快）----
@@ -3048,6 +3038,7 @@ class PtpUsbConnection(
             // 用户点了「停止」：立刻收手，别再占着 USB 通道问机身
             if (abortRequested) {
                 logger("对焦已中止（用户停止）")
+                cancelAfDrive("用户停止")
                 return false
             }
             val code = synchronized(usbLock) {
@@ -3090,27 +3081,42 @@ class PtpUsbConnection(
             Thread.sleep(100)
         }
 
-        // ---- 步骤 3：0x9206 收尾（语义未确认，默认关闭）----
-        if (ready && sendAfDriveFollowUp) {
-            synchronized(usbLock) {
-                val fp = createCommandPacket(PtpConstants.OP_NIKON_AF_DRIVE_FOLLOWUP)
-                if (sendPacket(fp)) {
-                    val fr = receiveResponse(2000)
-                    if (fr?.responseCode != PtpConstants.RESP_OK) {
-                        val hex =
-                            if (fr != null) "0x${Integer.toHexString(fr.responseCode).uppercase()}"
-                            else "TIMEOUT"
-                        logger("AF 收尾 0x9206 返回 $hex（不影响对焦结果）")
-                    }
-                }
-            }
-        }
+        // ---- 步骤 3：只有"没走完"才收尾 ----
+        //
+        // 官方 0x9206 = AfDriveCancel（取消对焦驱动），**不是**"AF 之后的收尾命令"。
+        // 所以正常合焦后绝对不能发：发了等于把刚对好的焦取消掉。
+        // 只在两种情况下发：用户按了停止、或者等不到 DeviceReady（机身还在跑 AF）。
+        if (!ready) cancelAfDrive("未在时限内就绪")
 
         logger(
             if (ready) "AF 驱动完成，机身已就绪"
             else "AF 驱动已发送，但机身未回到就绪态（0xD104 锁焦=$lockStatus）"
         )
         return ready
+    }
+
+    /**
+     * 取消正在进行的 AF 驱动（官方 `0x9206 AfDriveCancel`）。
+     *
+     * 用于对焦被中途叫停：AF 电机还在跑的时候不取消，机身会一直占着，
+     * 后面的 0x100E / 0x90C0 全都会被 Device_Busy 挡回来。
+     */
+    fun cancelAfDrive(reason: String = "") {
+        synchronized(usbLock) {
+            val p = createCommandPacket(PtpConstants.OP_NIKON_AF_DRIVE_CANCEL)
+            if (!sendPacket(p)) {
+                logger("取消对焦失败：发不出去${if (reason.isNotBlank()) "（$reason）" else ""}")
+                return
+            }
+            val r = receiveResponse(2000)
+            if (r?.responseCode != PtpConstants.RESP_OK) {
+                val hex =
+                    if (r != null) "0x${Integer.toHexString(r.responseCode).uppercase()}" else "TIMEOUT"
+                logger("取消对焦 0x9206 返回 $hex${if (reason.isNotBlank()) "（$reason）" else ""}")
+            } else if (reason.isNotBlank()) {
+                logger("已取消对焦（$reason）")
+            }
+        }
     }
 
     /** 读取事件队列并解析，逐个交给 eventHandler（拍照完成 / 属性变更 / 对象新增） */

@@ -3404,6 +3404,14 @@ class MainActivity : AppCompatActivity(), SheetHost {
      */
     private fun loadAfCalibration() {
         val sp = getSharedPreferences("af51_calib", Context.MODE_PRIVATE)
+        // ★ 2026-10-26：51 点的 id 已换成官方编号（此前 40 个是阅读顺序占位）。
+        //   旧的标定表存的是"占位 id → 实测坐标"，套到新 id 上会张冠李戴，
+        //   而且现在官方坐标本身就是准的 —— 直接作废，不做半吊子合并。
+        if (sp.getInt("grid_version", 1) < 2) {
+            sp.edit().clear().putInt("grid_version", 2).apply()
+            log("51 点已改用官方编号，旧标定（占位 id）作废")
+            return
+        }
         val n = sp.getInt("count", 0)
         if (n <= 0) return
         synchronized(calibLock) {
@@ -4254,6 +4262,23 @@ class MainActivity : AppCompatActivity(), SheetHost {
                     val desc = ptpConnection?.describeProp(code)
                     lines.append("$name：$desc\n")
                 }
+
+                // ---- 机身状态位：用户报"按不下快门 / 进不了取景 / 拍一半卡住"时先看这三行 ----
+                // 三个码都来自官方属性表（0xD102 WarningStatus、0xD1A4 LiveViewProhibitionCondition、
+                // 0xD103 RemainingExposure），只看原始值不猜语义：非 0 就是"机身有话说"。
+                lines.append("\n---- 机身状态位 ----\n")
+                val statusBits = listOf(
+                    "0xD102 警告状态 WarningStatus" to PtpConstants.PROP_NIKON_WARNING_STATUS,
+                    "0xD1A4 取景禁止条件" to PtpConstants.PROP_NIKON_LV_PROHIBIT,
+                    "0xD103 剩余可拍张数" to PtpConstants.PROP_NIKON_REMAINING_EXPOSURE
+                )
+                for ((label, code) in statusBits) {
+                    val v = ptpConnection?.getDevicePropValue(code) ?: -999999
+                    lines.append(
+                        if (v == -999999) "$label：读取失败\n"
+                        else "$label：0x${Integer.toHexString(v).uppercase()}（$v）\n"
+                    )
+                }
             } else {
                 lines.append("（未连接）\n")
             }
@@ -4902,9 +4927,11 @@ class MainActivity : AppCompatActivity(), SheetHost {
                 Thread.sleep(50)
                 val focusModeRaw = ptpConnection?.getDevicePropValue(PtpConstants.PROP_FOCUS_MODE) ?: -999999
                 Thread.sleep(50)
+                // 电量只认 PTP 标准的 0x5001 BatteryLevel（官方属性表 Setup 页）。
+                // 0xD1B3 的官方名是 ExposureIndicateLightup（曝光指示点亮），**不是电量** ——
+                // 早先把它当"尼康专用电量"跟 0x5001 取最大值，一旦 0x5001 读不到就会
+                // 把 0/1 显示成"1%"，是真真切切的假读数。少读一条还省一次 USB 往返。
                 val stdBattery = ptpConnection?.getDevicePropValue(PtpConstants.PROP_BATTERY_LEVEL) ?: -999999
-                Thread.sleep(50)
-                val nikonBattery = ptpConnection?.getDevicePropValue(PtpConstants.PROP_NIKON_BATTERY_LEVEL) ?: -999999
                 Thread.sleep(50)
                 val isoAuto = ptpConnection?.getDevicePropValue(PtpConstants.PROP_NIKON_ISO_AUTO) ?: -999999
                 Thread.sleep(50)
@@ -4922,8 +4949,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
                 val lvMode = ptpConnection?.getLiveViewMode() ?: -999999
 
                 currentIsoAuto = isoAuto
-                val batteryLevel = if (stdBattery >= nikonBattery) stdBattery else nikonBattery
-                
+                val batteryLevel = stdBattery
                 val supportedAps = ptpConnection?.getDevicePropSupportedValues(PtpConstants.PROP_F_NUMBER)
                 
                 runOnUiThread {
@@ -7810,7 +7836,6 @@ class MainActivity : AppCompatActivity(), SheetHost {
             var lastMode = -1
             var lastFocus = -1
             var lastBatteryStd = -1
-            var lastBatteryNikon = -1
             var lastIsoAuto = -1
 
             while (isPollingActive && isConnected) {
@@ -7831,11 +7856,10 @@ class MainActivity : AppCompatActivity(), SheetHost {
                         val mode = pollProp(PtpConstants.PROP_EXPOSURE_PROGRAM_MODE)
                         val focus = pollProp(PtpConstants.PROP_FOCUS_MODE)
                         val batteryStd = pollProp(PtpConstants.PROP_BATTERY_LEVEL)
-                        val batteryNikon = pollProp(PtpConstants.PROP_NIKON_BATTERY_LEVEL)
                         val isoAuto = pollProp(PtpConstants.PROP_NIKON_ISO_AUTO)
 
                         if (focal != lastFocal || iso != lastIso || ap != lastAp || sh != lastSh || mode != lastMode || focus != lastFocus || 
-                            batteryStd != lastBatteryStd || batteryNikon != lastBatteryNikon || isoAuto != lastIsoAuto) {
+                            batteryStd != lastBatteryStd || isoAuto != lastIsoAuto) {
                             
                             lastFocal = focal
                             if (iso != -999999) lastIso = iso
@@ -7843,6 +7867,8 @@ class MainActivity : AppCompatActivity(), SheetHost {
                             if (sh != -999999) lastSh = sh
                             if (mode != -999999) lastMode = mode
                             if (focus != -999999) lastFocus = focus
+                            // 电量也要记下来，否则这一项恒为"变了"，每轮都会重刷整页 UI
+                            if (batteryStd != -999999) lastBatteryStd = batteryStd
                             if (isoAuto != -999999) { lastIsoAuto = isoAuto; currentIsoAuto = isoAuto }
                             updateProperties()
                         }

@@ -52,7 +52,8 @@ data class CsmGroup(val title: String, val items: List<CsmItem>)
 
 object CsmMenu {
 
-    private const val UNKNOWN = PtpConstants.CSM_CODE_UNKNOWN
+    // 2026-10-26：所有项都已按官方 PTP 规格书的"菜单归属"列落码，
+    // 不再有 CSM_CODE_UNKNOWN 的待扫描项（扫描按钮会显示"已全部适配"）。
 
     val groups: List<CsmGroup> = listOf(
         // ---------------------------------------------------------------- a 自动对焦
@@ -124,15 +125,17 @@ object CsmMenu {
         CsmGroup("d · 拍摄 / 显示", listOf(
             CsmItem(PtpConstants.CSM_D1_BEEP, "d1", "蜂鸣音",
                 mapOf(0 to "增强", 1 to "柔和", 2 to "关闭")),
-            // d2/d3/d8/d11 都是两档开关，d 区里可写的两档属性只有 0xD06B / 0xD06F 两个
-            // （0xD06F 已判给 d7），四个抢一个 —— 只能靠用户在机身上拨动对照确认，扫描不敢替他定。
-            // d10 是 d 区唯一 0..3 四档可写属性（0xD070），且说明书只有它是四档，可直接落码。
-            CsmItem(UNKNOWN, "d2", "取景器网格显示",
-                mapOf(0 to "开启", 1 to "关闭"), verified = false,
-                scanRange = 0xD065..0xD073, candidates = listOf(0xD06B)),
-            CsmItem(UNKNOWN, "d3", "取景器警告显示",
-                mapOf(0 to "开启", 1 to "关闭"), verified = false,
-                scanRange = 0xD065..0xD073, candidates = listOf(0xD06B)),
+            // ★ d2/d3/d7/d8/d10/d11 的属性码**不再靠扫描猜**：尼康官方 PTP 规格书
+            //   （`_sdk/d300_ptp_official.json`，197 项属性表）直接给了"菜单归属"列，
+            //   表里 menu=d2 → 0xD16C、d3 → 0xD181、d7 → 0xD187、d8 → 0xD06F、
+            //   d10 → 0xD182、d11 → 0xD18E。
+            //   旧值里 d7 借的是 0xD06F（其实是 d8 LCD 照明）、d10 借的是 0xD070
+            //   （其实是拍摄菜单的高 ISO 降噪）—— 这两处会**改错机身设置**，已纠正。
+            //   ⚠️ 各档的数值顺序仍未经真机核对，界面以机身描述符回的值域为准。
+            CsmItem(PtpConstants.CSM_D2_GRID, "d2", "取景器网格显示",
+                mapOf(0 to "开启", 1 to "关闭")),
+            CsmItem(PtpConstants.CSM_D3_FINDER_WARNING, "d3", "取景器警告显示",
+                mapOf(0 to "开启", 1 to "关闭")),
             // 1–7 幅/秒，值到底是 0..6 还是 1..7 不确定，不翻译
             CsmItem(PtpConstants.CSM_D4_CL_SHOOTING_SPEED, "d4", "CL 模式拍摄速度",
                 emptyMap(), expectedCount = 7),
@@ -143,17 +146,15 @@ object CsmMenu {
                 mapOf(0 to "开启", 1 to "关闭", 2 to "重新设定")),
             CsmItem(PtpConstants.CSM_D7_INFO_DISPLAY, "d7", "拍摄信息显示",
                 mapOf(0 to "自动", 1 to "手动 · 光亮时用暗字体", 2 to "手动 · 黑暗时用亮字体")),
-            CsmItem(UNKNOWN, "d8", "LCD 照明",
-                mapOf(0 to "开启", 1 to "关闭"), verified = false,
-                scanRange = 0xD065..0xD073, candidates = listOf(0xD06B)),
+            CsmItem(PtpConstants.CSM_D8_LCD_ILLUM, "d8", "LCD 照明",
+                mapOf(0 to "开启", 1 to "关闭")),
             CsmItem(PtpConstants.CSM_D9_EXPOSURE_DELAY, "d9", "曝光延迟模式",
                 mapOf(0 to "关闭", 1 to "开启")),
             CsmItem(PtpConstants.CSM_D10_BATTERY_TYPE, "d10", "MB-D10 电池类型",
                 mapOf(0 to "LR6（AA 碱性）", 1 to "HR6（AA 镍氢）",
                     2 to "FR6（AA 锂）", 3 to "ZR6（AA 镍锰）")),
-            CsmItem(UNKNOWN, "d11", "电池顺序",
-                mapOf(0 to "先用 MB-D10 中的电池", 1 to "先用相机中的电池"),
-                verified = false, scanRange = 0xD065..0xD073, candidates = listOf(0xD06B))
+            CsmItem(PtpConstants.CSM_D11_CELL_ORDER, "d11", "电池顺序",
+                mapOf(0 to "先用 MB-D10 中的电池", 1 to "先用相机中的电池"))
         )),
 
         // ---------------------------------------------------------------- e 包围 / 闪光
@@ -166,8 +167,12 @@ object CsmMenu {
                 mapOf(0 to "1/60 秒", 1 to "1/30 秒", 2 to "1/15 秒", 3 to "1/8 秒",
                     4 to "1/4 秒", 5 to "1/2 秒", 6 to "1 秒", 7 to "2 秒", 8 to "4 秒",
                     9 to "8 秒", 10 to "15 秒", 11 to "30 秒")),
+            // e3 官方 menu=e3 → 0xD167 InternalFlashMode；旧值 0xD076 不在官方表、真机也不应答
             CsmItem(PtpConstants.CSM_E3_FLASH_CONTROL, "e3", "内置闪光灯闪光控制",
                 mapOf(0 to "TTL", 1 to "手动", 2 to "重复闪光", 3 to "指令模式")),
+            // e3 切到「手动」后调的就是这一项（官方 0xD16D），档位写法交给机身值域
+            CsmItem(PtpConstants.CSM_E3_FLASH_MANUAL, "e3·手动", "手动闪光量",
+                emptyMap()),
             CsmItem(PtpConstants.CSM_E4_MODELING_FLASH, "e4", "模拟闪光",
                 mapOf(0 to "开启", 1 to "关闭")),
             CsmItem(PtpConstants.CSM_E5_BRACKET_SET, "e5", "自动包围曝光设定",
@@ -204,25 +209,24 @@ object CsmMenu {
                     4 to "AE 锁定（释放时重设）", 5 to "AE 锁定（保持）", 6 to "仅锁定自动对焦",
                     7 to "闪光灯关闭", 8 to "曝光包围连续拍摄", 9 to "矩阵测光",
                     10 to "中央重点测光", 11 to "点测光", 12 to "无")),
-            CsmItem(UNKNOWN, "f5", "指定预览按钮",
+            // f5 官方 menu=f5 → 0xD189 PreviewButton（可选第二键位 0xD18A）
+            CsmItem(PtpConstants.CSM_F5_PREVIEW_BUTTON, "f5", "指定预览按钮",
                 mapOf(0 to "预览", 1 to "FV 锁定", 2 to "AE/AF 锁定", 3 to "仅锁定自动曝光",
                     4 to "AE 锁定（释放时重设）", 5 to "AE 锁定（保持）", 6 to "仅锁定自动对焦",
                     7 to "闪光灯关闭", 8 to "曝光包围连续拍摄", 9 to "矩阵测光",
-                    10 to "中央重点测光", 11 to "点测光", 12 to "无"),
-                verified = false, scanRange = 0xD080..0xD09F),
-            CsmItem(PtpConstants.CSM_F6_AEL_AFL_BUTTON, "f6", "设定 AE-L/AF-L 按钮",
+                    10 to "中央重点测光", 11 to "点测光", 12 to "无")),            CsmItem(PtpConstants.CSM_F6_AEL_AFL_BUTTON, "f6", "设定 AE-L/AF-L 按钮",
                 mapOf(0 to "AE/AF 锁定", 1 to "仅锁定自动曝光", 2 to "AE 锁定（释放时重设）",
                     3 to "AE 锁定（保持）", 4 to "仅锁定自动对焦", 5 to "AF-ON")),
             CsmItem(PtpConstants.CSM_F7_CUSTOM_DIALS, "f7", "自定义指令拨盘",
                 mapOf(0 to "反转方向 · 否", 1 to "反转方向 · 是")),
-            CsmItem(UNKNOWN, "f8", "释放按钮以使用拨盘",
-                mapOf(0 to "否", 1 to "是"), verified = false, scanRange = 0xD080..0xD09F,
-                candidates = listOf(0xD086, 0xD087, 0xD088, 0xD089)),
+            // f8 官方 menu=f8 → 0xD089 UniversalMode
+            CsmItem(PtpConstants.CSM_F8_DIAL_RELEASE, "f8", "释放按钮以使用拨盘",
+                mapOf(0 to "否", 1 to "是")),
             CsmItem(PtpConstants.CSM_F9_NO_CARD, "f9", "无存储卡时？",
                 mapOf(0 to "快门释放开启", 1 to "快门释放锁定")),
-            CsmItem(UNKNOWN, "f10", "反转指示器",
-                mapOf(0 to "正常", 1 to "反转"), verified = false, scanRange = 0xD080..0xD09F,
-                candidates = listOf(0xD086, 0xD087, 0xD088, 0xD089))
+            // f10 官方 menu=f10 → 0xD18D IndicatorDisplay
+            CsmItem(PtpConstants.CSM_F10_INDICATOR, "f10", "反转指示器",
+                mapOf(0 to "正常", 1 to "反转"))
         )),
 
         // ---------------------------------------------------------------- 库

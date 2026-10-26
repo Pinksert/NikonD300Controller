@@ -110,12 +110,28 @@ object PtpConstants {
     const val RESP_INVALID_STATUS = 0xA004
 
     // Device Property Codes
+    /**
+     * 电量。**只有 0x5001 是电量**（官方属性表 Setup 页 BatteryLevel）。
+     *
+     * 注意别再用 0xD1B3 当电量：官方名是 `ExposureIndicateLightup`（曝光指示点亮），
+     * 返回的是"曝光刻度是否点亮"那种 0/1 小值，当成百分比会把界面显示成 1%。
+     */
     const val PROP_BATTERY_LEVEL = 0x5001
     const val PROP_WHITE_BALANCE = 0x5005
     const val PROP_NIKON_ISO_AUTO = 0xD054
     const val PROP_NIKON_ISO_AUTO_MAX_ISO = 0xD183
     const val PROP_NIKON_ISO_AUTO_MIN_SHUTTER = 0xD164
-    const val PROP_NIKON_BATTERY_LEVEL = 0xD1B3
+
+    /** 曝光指示点亮（官方 ExposureIndicateLightup）。不是电量，别拿它算百分比 */
+    const val PROP_NIKON_EXPOSURE_INDICATE = 0xD1B3
+
+    // ---- 机身状态位（诊断用，官方属性表里都在）----
+    /** 警告状态（官方 WarningStatus）：位掩码，0 = 没有警告 */
+    const val PROP_NIKON_WARNING_STATUS = 0xD102
+    /** 取景禁止条件（官方 LiveViewProhibitionCondition）：非 0 = 机身现在不允许开取景 */
+    const val PROP_NIKON_LV_PROHIBIT = 0xD1A4
+    /** 剩余可拍张数（官方 RemainingExposure） */
+    const val PROP_NIKON_REMAINING_EXPOSURE = 0xD103
     const val PROP_NIKON_WB_COLOR_TEMP = 0xD01E
     const val PROP_NIKON_WB_PRESET_NO = 0xD01F
     const val PROP_F_NUMBER = 0x5007
@@ -350,7 +366,7 @@ object PtpConstants {
     const val CSM_A3_GROUP_DYNAMIC_AF = 0xD184  // DynamicAFArea（libgphoto2 命名 + 真机 0x90CA 清单应答；0xD04A 不应答已弃用）
     const val CSM_A4_LOCKON = 0xD051            // AFLockOn（锁定跟踪对焦，真机 4 档 0..3，当前=3=关闭 吻合）
     const val CSM_A5_TRIGGER_AF = 0xD04B        // A4AFActivation（机身上的 a5 触发自动对焦）
-    const val CSM_A6_AF_POINT_ILLUM = 0xD04E    // FocusAreaIllumWhenSelected
+    const val CSM_A6_AF_POINT_ILLUM = 0xD166    // FocusAreaLED（官方 menu=a6；旧值 0xD04E 不在官方表）
     const val CSM_A7_AF_POINT_WRAP = 0xD04F     // FocusAreaWrap
     const val CSM_A8_AF_POINT_SELECT = 0xD08D   // AFAreaPoint（0=51 点 / 1=11 点，真机确认）
     const val CSM_A10_MBD10_AFON = 0xD050       // VerticalAFON
@@ -372,18 +388,27 @@ object PtpConstants {
     const val CSM_C4_MONITOR_OFF = 0xD064       // MonitorOff
 
     const val CSM_D1_BEEP = 0xD160              // BeepOff
+    // ---- 以下 d2/d3/d7/d8/d10/d11 的属性码来自**官方 PTP 规格书属性表**（197 项那版，
+    // _sdk/d300_ptp_official.json），表里直接给了"菜单归属"列，不再需要靠扫描猜。
+    const val CSM_D2_GRID = 0xD16C              // GridDisplay（官方 menu=d2 取景器网格显示）
+    const val CSM_D3_FINDER_WARNING = 0xD181    // FinderWarningDisplay（官方 menu=d3）
     const val CSM_D4_CL_SHOOTING_SPEED = 0xD068 // D1ShootingSpeed（老编号 d1，D300 是 d4）
     const val CSM_D5_MAX_SHOTS = 0xD069         // D2MaximumShots（紧挨着 d4，D300 是 d5）
     const val CSM_D6_FILE_NUMBER_SEQ = 0xD06C   // FileNumberSequence
-    const val CSM_D7_INFO_DISPLAY = 0xD06F      // D7Illumination
-    // d10 电池类型：d 区里唯一 0..3 四档可写属性（0xD070），libgphoto2 把它叫 NrHighISO
-    // 是 D3 语义；D300 上 4 档的 d10 只能是它
-    const val CSM_D10_BATTERY_TYPE = 0xD070
+    // ⚠️ d7 是「拍摄信息显示」= 0xD187；0xD06F 官方归属是 **d8 LCD 照明**，早先错放在 d7
+    const val CSM_D7_INFO_DISPLAY = 0xD187      // InformationScreenDisplaySetting（官方 menu=d7）
+    const val CSM_D8_LCD_ILLUM = 0xD06F         // LCDIllumination（官方 menu=d8）
+    // ⚠️ d10「MB-D10 电池类型」= 0xD182 CellKindSetting；0xD070 官方是 NoiseReductionHiIso
+    //    （高 ISO 降噪，属于拍摄菜单，ShootingMenu 里用对了，CSM 里曾错当成电池类型）
+    const val CSM_D10_BATTERY_TYPE = 0xD182     // CellKindSetting（官方 menu=d10）
+    const val CSM_D11_CELL_ORDER = 0xD18E       // CellKindPrioritylevel（官方 menu=d11 电池顺序）
     const val CSM_D9_EXPOSURE_DELAY = 0xD06A    // ExposureDelayMode（说明书是 d9，不是 d8）
 
     const val CSM_E1_FLASH_SYNC_SPEED = 0xD074  // FlashSyncSpeed
     const val CSM_E2_FLASH_SHUTTER_SPEED = 0xD075 // FlashShutterSpeed
-    const val CSM_E3_FLASH_CONTROL = 0xD076     // E3AAFlashMode（内置闪光灯闪光控制）
+    // ⚠️ e3 内置闪光灯闪光控制 = 0xD167；旧值 0xD076 不在官方表里、真机也不应答
+    const val CSM_E3_FLASH_CONTROL = 0xD167     // InternalFlashMode（官方 menu=e3）
+    const val CSM_E3_FLASH_MANUAL = 0xD16D      // InternalFlashManual（e3·手动 的闪光量）
     const val CSM_E4_MODELING_FLASH = 0xD077    // E4ModelingFlash
     const val CSM_E5_BRACKET_SET = 0xD078       // BracketSet
     const val CSM_E6_MANUAL_BRACKETING = 0xD079 // E6ManualModeBracketing
@@ -393,7 +418,11 @@ object PtpConstants {
     const val CSM_F2_MULTI_SELECTOR = 0xD082    // F2Multiselector
     const val CSM_F3_PHOTO_INFO = 0xD083        // F3PhotoInfoPlayback
     const val CSM_F4_ASSIGN_FUNC_BUTTON = 0xD084 // F4AssignFuncButton
+    const val CSM_F5_PREVIEW_BUTTON = 0xD189    // PreviewButton（官方 menu=f5）
+    const val CSM_F5_PREVIEW_BUTTON2 = 0xD18A   // PreviewButton2（f5 的第二个键位）
     const val CSM_F7_CUSTOM_DIALS = 0xD085      // F5CustomizeCommDials（老编号 f5，D300 是 f7）
+    const val CSM_F8_DIAL_RELEASE = 0xD089      // UniversalMode（官方 menu=f8 释放按钮以使用拨盘）
+    const val CSM_F10_INDICATOR = 0xD18D        // IndicatorDisplay（官方 menu=f10 反转指示器）
     const val CSM_F9_NO_CARD = 0xD08A           // NoCFCard（无存储卡时？）
 
     /** 属性码未适配的标记：这类项只能靠扫描匹配，绝不硬猜一个码写进机身。 */
@@ -480,12 +509,13 @@ object PtpConstants {
     const val OP_NIKON_AF_AND_CAPTURE = 0x9207
 
     /**
-     * AF 驱动后的收尾操作码。Camera Control Pro 2 的 MAID→PTP 翻译表里，
-     * AF 分支同时引用 0x90C1 / 0x90C8 / 0x9206。
-     * 该码的公开名称未在 libgphoto2 等资料中确认，故默认不发送，
-     * 实测确认无害后再打开 [PtpUsbConnection.afDrive] 的 sendFollowUp。
+     * **取消**正在进行的 AF 驱动（官方名 `AfDriveCancel`，见规格书 5.2 操作码表）。
+     *
+     * ⚠️ 别把它当"AF 之后的收尾命令"：它的语义是**中止**对焦动作。
+     * 对焦已经合上之后再发它，等于把刚对好的焦取消掉。
+     * 正确用法只有两处：用户中途点「停止」、以及 DeviceReady 超时收尾。
      */
-    const val OP_NIKON_AF_DRIVE_FOLLOWUP = 0x9206
+    const val OP_NIKON_AF_DRIVE_CANCEL = 0x9206
 
     /**
      * ChangeAfArea —— 取景时把 AF 区域框（对比度 AF 框）挪到画面上的某一点。

@@ -2508,6 +2508,33 @@ class PtpUsbConnection(
         return now
     }
 
+    /**
+     * 0x90CC GetPicCtrlData：读一项优化校准的原始数据（P1 = 项编号，P2 = 0 当前 / 1 默认）。
+     *
+     * **只读**。写入（0x90CD）刻意没接：PicCtrlData 的内部结构（名称偏移、参数区、
+     * 可选曲线段）在规格书里只写了"有这么一个数据块"，没给字段表 ——
+     * 照 NCP 文件格式硬拼一份写回去，很可能把机身里的自定义优化校准弄坏。
+     * 装滤镜现在走 NCP 导入那条路（0x100C/0x100D 传文件），已经够用。
+     */
+    fun getPicCtrlData(item: Int, defaultFlag: Int = 0): ByteArray? {
+        synchronized(usbLock) {
+            try {
+                drain()
+                val packet = createCommandPacket(
+                    PtpConstants.OP_NIKON_GET_PIC_CTRL_DATA, item, defaultFlag
+                )
+                if (!sendPacket(packet)) return null
+                val data = receiveData(16384) ?: return null
+                receiveResponse()
+                val limit = data.limit()
+                if (limit <= 0) return null
+                return data.array().copyOfRange(0, limit)
+            } catch (_: Exception) {
+                return null
+            }
+        }
+    }
+
     fun getDevicePropDesc(propCode: Int): ByteArray? {
         try {
             drain()

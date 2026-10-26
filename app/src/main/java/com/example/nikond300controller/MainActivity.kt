@@ -7991,6 +7991,12 @@ class MainActivity : AppCompatActivity(), SheetHost {
         }
         csmEntryHost.addView(ncpEntry.view)
 
+        // 优化校准原始数据（0x90CC 只读）：能看到机身里每个 PicCtrl 项的数据大小与名称
+        val picCtrlEntry = sheetValueRow("优化校准数据", "只读 · 看机身里存了什么") { _ ->
+            if (!isConnected) toast("请先连接相机") else showPicCtrlSheet()
+        }
+        csmEntryHost.addView(picCtrlEntry.view)
+
         // ---- 机身时钟 ----
         // 机身内部电池掉电后时间会归零，EXIF 里就全是 2000 年 —— 事后没法补救，
         // 所以给它一个固定入口，而不是等人在日志里发现。
@@ -8590,6 +8596,75 @@ class MainActivity : AppCompatActivity(), SheetHost {
      * **不接 0x90C9 SetPreWbData**：那个接口要同时传增益值和最多 13440 B 的缩略图，
      * App 侧没有可靠的缩略图来源，硬造一份会把预设写坏。机身自己测出来的值它自己会存。
      */
+    /**
+     * 优化校准原始数据（0x90CC 只读）。
+     *
+     * 用它能看到机身里每个 PicCtrl 项到底存了什么：数据块多大、名称是什么。
+     * **不提供写入** —— PicCtrlData 的字段表官方没公开，硬拼数据写回去会弄坏
+     * 机身里的自定义优化校准；装滤镜继续走 NCP 文件导入那条路。
+     */
+    private fun showPicCtrlSheet() {
+        if (!isConnected) { toast("请先连接相机"); return }
+        val page = buildSheetPage("优化校准数据", "0x90CC · 只读")
+        val status = sheetStatusText("正在读取机身里的项…")
+        page.content.addView(status)
+        val card = sheetCard(page.content, "机身里的优化校准项")
+        page.content.addView(sheetHint(
+            "名称是从数据块里能连续读出的可打印字符猜出来的 —— 官方没公开 PicCtrlData 的字段表，" +
+                "所以名称可能带杂字。这一页只看不改。"
+        ))
+        page.show()
+
+        thread {
+            val desc = try {
+                ptpConnection?.readPropDesc(PtpConstants.PROP_NIKON_ACTIVE_PIC_CTRL)
+            } catch (_: Exception) {
+                null
+            }
+            val items = desc?.allowed ?: emptyList()
+            if (items.isEmpty()) {
+                runOnUiThread {
+                    status.text = "机身没报优化校准项清单（0xD200 无描述符或没给值域）"
+                }
+                return@thread
+            }
+            val rows = ArrayList<Triple<Long, Int, String>>()
+            for (v in items) {
+                if (!isConnected) break
+                val data = try {
+                    ptpConnection?.getPicCtrlData(v.toInt())
+                } catch (_: Exception) {
+                    null
+                } ?: continue
+                rows.add(Triple(v, data.size, guessPicCtrlName(data)))
+            }
+            runOnUiThread {
+                status.text = "读到 ${rows.size}/${items.size} 项"
+                for ((v, size, name) in rows) {
+                    val (row, _) = sheetInfoRow("项 $v", "$name · $size 字节")
+                    card.addView(row)
+                }
+            }
+        }
+    }
+
+    /** 从 PicCtrlData 里猜名称：前 64 字节中最长的一段可打印 ASCII（≥3 字符） */
+    private fun guessPicCtrlName(data: ByteArray): String {
+        var best = ""
+        val cur = StringBuilder()
+        for (i in 0 until minOf(64, data.size)) {
+            val c = data[i].toInt() and 0xFF
+            if (c in 32..126) {
+                cur.append(c.toChar())
+            } else {
+                if (cur.length > best.length) best = cur.toString()
+                cur.setLength(0)
+            }
+        }
+        if (cur.length > best.length) best = cur.toString()
+        return if (best.length >= 3) best else "（名称未识别）"
+    }
+
     private fun showWbMeasureSheet() {
         if (!isConnected) { toast("请先连接相机"); return }
         val page = buildSheetPage("白平衡预设测量", "0x90C0 P1=0…4 · 先对准白纸再点槽位")

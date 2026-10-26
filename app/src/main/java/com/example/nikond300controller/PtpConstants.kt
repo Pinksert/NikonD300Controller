@@ -623,6 +623,17 @@ object PtpConstants {
     const val OP_NIKON_GET_LARGE_THUMB = 0x90C4
 
     const val OP_NIKON_GET_EVENT = 0x90C7
+
+    // ---- 优化校准（Picture Control）直读 ----
+    /** 读一项优化校准的原始数据（P1=项编号，P2=0 当前/1 默认）；只读，不改机身 */
+    const val OP_NIKON_GET_PIC_CTRL_DATA = 0x90CC
+    /** 写一项优化校准（P1=项编号，P2=是否修改过）+ 数据阶段。⚠️ 数据结构未验证前不要用 */
+    const val OP_NIKON_SET_PIC_CTRL_DATA = 0x90CD
+    /** 删除一项自定义优化校准（P1=项编号） */
+    const val OP_NIKON_DELETE_CUSTOM_PIC_CTRL = 0x90CE
+
+    /** 当前生效的优化校准项编号（0xD200，值域 = 机身有哪些项） */
+    const val PROP_NIKON_ACTIVE_PIC_CTRL = 0xD200
     const val OP_NIKON_DEVICE_READY = 0x90C8
     /** 取厂商属性码清单（remoteyourcam 在开会话时会先取这个） */
     const val OP_NIKON_GET_VENDOR_PROP_CODES = 0x90CA

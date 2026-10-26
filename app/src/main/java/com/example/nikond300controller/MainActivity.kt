@@ -7395,9 +7395,16 @@ class MainActivity : AppCompatActivity(), SheetHost {
         // 也不把 2.4mm 那种数字当成事实证明给用户看。
         val lensCard = sheetCard(page.content, "镜头")
         val (lensIdRow, lensIdValue) = sheetInfoRow("镜头标识", "读取中…")
-        val (lensFocalRow, lensFocalValue) = sheetInfoRow("焦距范围", "读取中…")
-        val (lensApertureRow, lensApertureValue) = sheetInfoRow("光圈范围", "读取中…")
-        lensCard.addView(lensIdRow); lensCard.addView(lensFocalRow); lensCard.addView(lensApertureRow)
+        val (lensSpecRow, lensSpecValue) = sheetInfoRow("规格（推断）", "读取中…")
+        val (lensRawRow, lensRawValue) = sheetInfoRow("原始值", "读取中…")
+        lensCard.addView(lensIdRow); lensCard.addView(lensSpecRow); lensCard.addView(lensRawRow)
+        lensCard.addView(sheetHint(
+            "PTP 协议里**没有**「镜头型号」这种字符串字段，机身只给：镜头标识编号（0xD0E0）、" +
+                "焦距范围（0xD0E3/E4）、光圈范围（0xD0E5/E6）。\n\n" +
+                "所以「规格」这一行是按焦距+光圈范围拼出来的（24–70 mm · f/2.8 这种），" +
+                "**不是**机身报的型号名。要显示「AF-S 24-70mm f/2.8G ED」这种，得内置一张" +
+                "「编号 → 型号」对照表 —— 那份表不在协议里，是厂商内部数据（ExifTool 等社区表可参考）。"
+        ))
 
         // 释放模式（0x5013）：自拍 / Mup / 取景 用 App 改完之后，这里能确认机身到底停在哪一挡。
         // 反光板预升改走机内设定之后，这一行就是"有没有恢复成功"的照妖镜。
@@ -7450,8 +7457,12 @@ class MainActivity : AppCompatActivity(), SheetHost {
             val apMax = ptpConnection?.getDevicePropValue(PtpConstants.PROP_NIKON_LENS_APERTURE_MAX) ?: -999999
             runOnUiThread {
                 lensIdValue.text = if (lensId == -999999) "不支持" else "0x%04X".format(lensId)
-                lensFocalValue.text = lensRange(focalMin, focalMax, isFocal = true)
-                lensApertureValue.text = lensRange(apMin, apMax, isFocal = false)
+                lensSpecValue.text = lensSpec(focalMin, focalMax, apMin, apMax)
+                lensRawValue.text = "%s / %s".format(
+                    lensRange(focalMin, focalMax, isFocal = true),
+                    lensRange(apMin, apMax, isFocal = false)
+                )
+                lensRawValue.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 11f)
             }
 
             // 释放模式：确认 App 改完之后机身停在哪一挡（尤其是"有没有从 Mup 恢复回来"）
@@ -7470,6 +7481,43 @@ class MainActivity : AppCompatActivity(), SheetHost {
                 }
             }
         }
+    }
+
+    /**
+     * 用焦距 / 光圈范围拼出镜头规格串，例如 `24–70 mm · f/2.8`。
+     *
+     * ⚠️ 这是**从机身报的范围推出来的规格**，不是型号名 —— PTP 里没有型号字符串字段。
+     * 原始值按尼康惯例是 mm×100 / f×100；折算结果落在合理区间才用，否则退回原始数字
+     * （单位猜错时让人看到 2400，比看到"2.4 mm"更容易判断）。
+     */
+    private fun lensSpec(focalMin: Int, focalMax: Int, apMin: Int, apMax: Int): String {
+        fun mm(v: Int): String? {
+            if (v <= 0 || v == -999999) return null
+            val f = v / 100f
+            return if (f in 1f..2000f) "%.0f".format(f) else v.toString()
+        }
+        fun ap(v: Int): String? {
+            if (v <= 0 || v == -999999) return null
+            val f = v / 100f
+            return if (f in 0.5f..128f) "f/%.1f".format(f) else "f/$v"
+        }
+        val f1 = mm(focalMin)
+        val f2 = mm(focalMax)
+        val a1 = ap(apMin)
+        val a2 = ap(apMax)
+        val focal = when {
+            f1 != null && f2 != null && f1 != f2 -> "$f1–$f2 mm"
+            f1 != null -> "$f1 mm"
+            f2 != null -> "$f2 mm"
+            else -> null
+        }
+        val aperture = when {
+            a1 != null && a2 != null && a1 != a2 -> if (a1 == a2) a1 else "$a1–$a2"
+            a1 != null -> a1
+            a2 != null -> a2
+            else -> null
+        }
+        return listOfNotNull(focal, aperture).joinToString(" · ").ifBlank { "未读到" }
     }
 
     /**

@@ -43,7 +43,8 @@ object SetupMenu {
             ),
             SetupItem(
                 PtpConstants.PROP_NIKON_AF_TUNE_LENS_NO, "镜头号",
-                hint = "这条注册记录对应的镜头编号（机身内部编号，不是焦距）"
+                hint = "这条注册记录对应的镜头编号。机身只给编号，不给型号名 —— " +
+                    "型号对照见「机身信息」页（那里有镜头标识 + 按焦距/光圈推断的规格）"
             ),
             SetupItem(
                 PtpConstants.PROP_NIKON_AF_TUNE_INDEX_NUM, "已注册数量",

@@ -299,6 +299,9 @@ class MainActivity : AppCompatActivity(), SheetHost {
     private lateinit var meteringRowView: View
     private lateinit var flashCompRow: SheetValueRow
     private lateinit var imageQualityRow: SheetValueRow
+
+    /** 「JPEG 压缩」（0x5004）：基本 / 标准 / 精细，管压缩率不管尺寸 */
+    private lateinit var compressionRow: SheetValueRow
     private lateinit var mediaRow: SheetValueRow
     @Volatile private var currentMetering = -999999
     @Volatile private var currentFlashComp = -999999
@@ -6890,6 +6893,19 @@ class MainActivity : AppCompatActivity(), SheetHost {
     private fun imageSizeLabel(v: Long): String = "值 $v"
 
     /**
+     * JPEG 压缩等级（0x5004）。
+     *
+     * 用标准 PTP 的取值（0 基本 / 1 标准 / 2 精细）；机身若用别的编码，
+     * 会显示成 `0x%04X` 原始值 —— 宁可露出看不懂的数字，也不硬套一个可能错的中文名。
+     */
+    private fun compressionLabel(v: Long): String = when (v.toInt() and 0xFFFF) {
+        0 -> "基本（压缩最狠）"
+        1 -> "标准"
+        2 -> "精细（压缩最轻）"
+        else -> "0x%04X".format(v.toInt() and 0xFFFF)
+    }
+
+    /**
      * 通用「枚举型机身属性」二级页。
      *
      * 流程：读描述符 → 按机身自述的合法值出档位块 → 点选写入 → 回读校验。
@@ -7019,6 +7035,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
             }
             val flash = flashDesc?.currentValue ?: -999999L
             val size = ptpConnection?.getDevicePropValue(PtpConstants.PROP_IMAGE_SIZE) ?: -999999
+            val compression = ptpConnection?.getDevicePropValue(PtpConstants.PROP_COMPRESSION_SETTING) ?: -999999
             val media = ptpConnection?.getDevicePropValue(PtpConstants.PROP_NIKON_RECORDING_MEDIA) ?: -999999
             currentMetering = meter
             currentFlashComp = if (flash == -999999L) -999999 else flash.toInt()
@@ -7029,6 +7046,10 @@ class MainActivity : AppCompatActivity(), SheetHost {
                     meteringValue.text = if (meter == -999999) "不支持" else meteringLabel(meter.toLong())
                     flashCompRow.value.text = if (flash == -999999L) "不支持" else flashCompLabel(flash)
                     imageQualityRow.value.text = if (size == -999999) "不支持" else imageSizeLabel(size.toLong())
+                    if (::compressionRow.isInitialized) {
+                        compressionRow.value.text =
+                            if (compression == -999999) "不支持" else compressionLabel(compression.toLong())
+                    }
                     mediaRow.value.text = if (media == -999999) "不支持" else mediaLabel(media.toLong())
                 }
             }
@@ -7093,6 +7114,16 @@ class MainActivity : AppCompatActivity(), SheetHost {
             true
         }
 
+        // ---- 镜头（0xD0E0–0xD0E6，官方属性表里那组只读 lens 属性）----
+        // 规格书只给了码和名字，**没写单位**。按尼康惯例焦距是 mm×100、光圈是 f×100，
+        // 折算后如果明显不合常理（<1mm 或 >2000mm）就退回显示原始值 —— 宁可不折算，
+        // 也不把 2.4mm 那种数字当成事实证明给用户看。
+        val lensCard = sheetCard(page.content, "镜头")
+        val (lensIdRow, lensIdValue) = sheetInfoRow("镜头标识", "读取中…")
+        val (lensFocalRow, lensFocalValue) = sheetInfoRow("焦距范围", "读取中…")
+        val (lensApertureRow, lensApertureValue) = sheetInfoRow("光圈范围", "读取中…")
+        lensCard.addView(lensIdRow); lensCard.addView(lensFocalRow); lensCard.addView(lensApertureRow)
+
         val card2 = sheetCard(page.content, "当前连接")
         val (makerRow, makerValue) = sheetInfoRow("厂商", deviceInfoCache?.manufacturer ?: "NIKON CORPORATION")
         // 值列很窄，长句会被裁掉（"机身需设为 MTP/P"），协议名只写短的，细节放下面的提示
@@ -7129,6 +7160,42 @@ class MainActivity : AppCompatActivity(), SheetHost {
                     makerValue.text = info.manufacturer.ifBlank { "--" }
                 }
             }
+
+            // ---- 镜头信息（只读，读不到就写"不支持"，不猜）----
+            val lensId = ptpConnection?.getDevicePropValue(PtpConstants.PROP_NIKON_LENS_ID) ?: -999999
+            val focalMin = ptpConnection?.getDevicePropValue(PtpConstants.PROP_NIKON_LENS_FOCAL_MIN) ?: -999999
+            val focalMax = ptpConnection?.getDevicePropValue(PtpConstants.PROP_NIKON_LENS_FOCAL_MAX) ?: -999999
+            val apMin = ptpConnection?.getDevicePropValue(PtpConstants.PROP_NIKON_LENS_APERTURE_MIN) ?: -999999
+            val apMax = ptpConnection?.getDevicePropValue(PtpConstants.PROP_NIKON_LENS_APERTURE_MAX) ?: -999999
+            runOnUiThread {
+                lensIdValue.text = if (lensId == -999999) "不支持" else "0x%04X".format(lensId)
+                lensFocalValue.text = lensRange(focalMin, focalMax, isFocal = true)
+                lensApertureValue.text = lensRange(apMin, apMax, isFocal = false)
+            }
+        }
+    }
+
+    /**
+     * 镜头焦距 / 光圈范围的显示文本。
+     *
+     * 原始值是 mm×100 / f×100（尼康惯例）。折算结果落在合理区间才显示折算值，
+     * 否则原样显示 —— 单位猜错时让人看到 2400 这种原始数字，比看到"2.4 mm"更好判断。
+     */
+    private fun lensRange(min: Int, max: Int, isFocal: Boolean): String {
+        if (min == -999999 && max == -999999) return "不支持"
+        fun one(v: Int): String {
+            if (v == -999999 || v <= 0) return "?"
+            val scaled = v / 100f
+            val sane = if (isFocal) scaled in 1f..2000f else scaled in 0.5f..128f
+            if (!sane) return v.toString()
+            return if (isFocal) "%.0f".format(scaled) else "f/%.1f".format(scaled)
+        }
+        val a = one(min)
+        val b = one(max)
+        return when {
+            min == max -> if (isFocal) "$a mm" else a
+            isFocal -> "$a–$b mm"
+            else -> "$a–$b"
         }
     }
 
@@ -7600,6 +7667,19 @@ class MainActivity : AppCompatActivity(), SheetHost {
             ) { label -> imageQualityRow.value.text = label }
         }
         eqList.addView(imageQualityRow.view)
+
+        // JPEG 压缩等级（0x5004）：和上一行不是一回事 ——
+        // 0x5003 管"多大 + 什么格式"，这一项管"JPEG 压得多狠"。
+        // 只对 JPEG 生效，RAW 的压缩方式在「拍摄菜单」里另有一项（0xD016）。
+        compressionRow = sheetValueRow("JPEG 压缩", "待读取") { _ ->
+            if (!isConnected) toast("请先连接相机") else showEnumPropSheet(
+                "JPEG 压缩", "0x5004 · 基本 / 标准 / 精细",
+                PtpConstants.PROP_COMPRESSION_SETTING, ::compressionLabel,
+                "只管 JPEG 的压缩率，不影响尺寸（尺寸在上面的「图像质量」里）。" +
+                    "拍 RAW 时这一项不起作用。"
+            ) { label -> compressionRow.value.text = label }
+        }
+        eqList.addView(compressionRow.view)
 
         // 记录媒介：官方规格书明文——这个属性**只影响"用手按机身快门"时照片去哪**；
         // 用命令拍摄时（0x100E）恒定落卡，与它无关。所以这一行不是"App 拍照的开关"，

@@ -202,6 +202,28 @@ object PtpConstants {
     const val PROP_IMAGE_SIZE = 0x5003
 
     /**
+     * CompressionSetting（0x5004）—— **JPEG 压缩等级**（基本 / 标准 / 精细）。
+     *
+     * 标准 PTP 取值：0=JPEG Basic、1=JPEG Normal、2=JPEG Fine、0x0010=TIFF。
+     * 与 0x5003（画质/尺寸档）是两件事：0x5003 管"多大 + 什么格式"，这一项管
+     * "JPEG 压得多狠"。D300 机身上对应「JPEG 压缩」那一项。
+     */
+    const val PROP_COMPRESSION_SETTING = 0x5004
+
+    // ---- 镜头信息（官方 197 项属性里 menu=- 的那组，全只读）----
+    //
+    // 规格书只给了码和名字，**没写单位**。按尼康惯例焦距是 mm×100（2400 → 24mm）、
+    // 光圈是 f×100（280 → f/2.8），但这台机身没实测过，所以界面上一律先显示原始值，
+    // 折算值放在括号里当参考 —— 免得单位猜错时把"24mm"写成"2.4mm"还一本正经。
+    const val PROP_NIKON_LENS_ID = 0xD0E0          // 镜头标识（机身内部编号）
+    const val PROP_NIKON_LENS_SORT = 0xD0E1        // 镜头类别
+    const val PROP_NIKON_LENS_TYPE = 0xD0E2        // 镜头类型（G/D 等）
+    const val PROP_NIKON_LENS_FOCAL_MIN = 0xD0E3   // 最短焦距
+    const val PROP_NIKON_LENS_FOCAL_MAX = 0xD0E4   // 最长焦距
+    const val PROP_NIKON_LENS_APERTURE_MIN = 0xD0E5 // 最大光圈（数值最小）
+    const val PROP_NIKON_LENS_APERTURE_MAX = 0xD0E6 // 最小光圈（数值最大）
+
+    /**
      * ExposureMeteringMode（0x500B）—— 测光模式。
      *
      * 标准 PTP 段里 D300 报的是 0x0002/0x0003/0x0005 这类标准值

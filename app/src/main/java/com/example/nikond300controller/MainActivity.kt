@@ -18,6 +18,7 @@ import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.EditText
+import android.text.InputFilter
 import androidx.appcompat.app.AlertDialog
 import android.graphics.Canvas
 import android.graphics.ColorFilter
@@ -2351,6 +2352,22 @@ class MainActivity : AppCompatActivity(), SheetHost {
             }
         }
 
+        // 拍摄菜单库名（0xD011–0xD014）也是字符串属性，单独入口
+        val bankCard = sheetCard(page.content, "库名（文字）")
+        bankCard.addView(sheetHint("四个拍摄菜单库各有一个名字，也是字符串属性，用文字编辑页改。"))
+        val editBank = sheetValueRow("编辑拍摄菜单库名", "A / B / C / D") { _ ->
+            pickBankThenEditName(
+                "拍摄菜单",
+                listOf(
+                    PtpConstants.PROP_NIKON_SHOOTING_BANK_NAME_A,
+                    PtpConstants.PROP_NIKON_SHOOTING_BANK_NAME_B,
+                    PtpConstants.PROP_NIKON_SHOOTING_BANK_NAME_C,
+                    PtpConstants.PROP_NIKON_SHOOTING_BANK_NAME_D
+                )
+            )
+        }
+        bankCard.addView(editBank.view)
+
         val wasPaused = isPollingPaused
         isPollingPaused = true
         thread {
@@ -2431,6 +2448,34 @@ class MainActivity : AppCompatActivity(), SheetHost {
                 setupRows[item] = row
             }
         }
+
+        // 版权信息是**字符串属性**（0xD090），走不了上面那套数值档位页，单独给入口
+        val textCard = sheetCard(page.content, "版权信息（文字）")
+        textCard.addView(sheetHint(
+            "版权注释是字符串属性，数值型写入会被机身拒绝，所以用这个文字编辑页写。" +
+                "「附加版权信息」开关在上面「拍摄信息」组里。"
+        ))
+        val editComment = sheetValueRow("编辑版权注释", "点击编辑") { _ ->
+            showTextPropSheet(
+                "版权注释", PtpConstants.PROP_NIKON_COMMENT,
+                "写进照片的拍摄者 / 版权文字", 36
+            )
+        }
+        textCard.addView(editComment.view)
+
+        // 个人设定库名（0xD041–0xD044）同样是字符串属性，入口一并放这里
+        val editCsmBank = sheetValueRow("编辑个人设定库名", "A / B / C / D") { _ ->
+            pickBankThenEditName(
+                "个人设定",
+                listOf(
+                    PtpConstants.PROP_NIKON_CUSTOM_BANK_NAME_A,
+                    PtpConstants.PROP_NIKON_CUSTOM_BANK_NAME_B,
+                    PtpConstants.PROP_NIKON_CUSTOM_BANK_NAME_C,
+                    PtpConstants.PROP_NIKON_CUSTOM_BANK_NAME_D
+                )
+            )
+        }
+        textCard.addView(editCsmBank.view)
 
         val wasPaused = isPollingPaused
         isPollingPaused = true
@@ -7075,6 +7120,83 @@ class MainActivity : AppCompatActivity(), SheetHost {
                 }
             }
         }
+    }
+
+    /**
+     * 字符串属性的编辑页：版权注释（0xD090）、拍摄菜单库名（0xD011–0xD014）、
+     * 个人设定库名（0xD041–0xD044）。
+     *
+     * 这几个属性是 PTP 的 **string 类型**（描述符 dataType = 0xFFFF），走数值写入
+     * 一律回 Invalid_Prop_Format —— 必须用 [PtpUsbConnection.setDevicePropString]。
+     * 写完回读比对：机身可能截断或改写（比如长度上限比界面短），不一致就照实说。
+     */
+    private fun showTextPropSheet(title: String, propCode: Int, hintText: String, maxChars: Int = 36) {
+        if (!isConnected) { toast("请先连接相机"); return }
+        val page = buildSheetPage(title, "0x%04X · 字符串属性".format(propCode))
+        val card = sheetCard(page.content, "当前值")
+        val status = sheetStatusText("正在读取…")
+        card.addView(status)
+        val input = EditText(this).apply {
+            setSingleLine()
+            setTextColor(getColor(R.color.text_primary))
+            setHintTextColor(getColor(R.color.text_disabled))
+            hint = hintText
+            filters = arrayOf<InputFilter>(InputFilter.LengthFilter(maxChars))
+        }
+        card.addView(input)
+        if (hintText.isNotBlank()) card.addView(sheetHint(hintText))
+        val saveBtn = sheetPrimaryButton("写入机身")
+        page.content.addView(saveBtn)
+        page.show()
+
+        thread {
+            val cur = ptpConnection?.getDevicePropString(propCode)
+            runOnUiThread {
+                status.text = when {
+                    cur == null -> "机身不支持这一项（读不到值）"
+                    cur.isEmpty() -> "当前为空"
+                    else -> "当前：$cur"
+                }
+                input.setText(cur ?: "")
+            }
+        }
+
+        saveBtn.setOnClickListener {
+            val text = input.text.toString()
+            saveBtn.isEnabled = false
+            thread {
+                val ok = ptpConnection?.setDevicePropString(propCode, text) ?: false
+                Thread.sleep(300)
+                val back = ptpConnection?.getDevicePropString(propCode)
+                runOnUiThread {
+                    saveBtn.isEnabled = true
+                    when {
+                        !ok -> status.text = "写入失败：机身拒绝了这段文字"
+                        back == null -> status.text = "已发出，但回读失败 —— 无法确认是否真的写进去了"
+                        back == text -> {
+                            status.text = "已写入：$back"
+                            log("$title 已更新：$back")
+                        }
+                        else -> status.text = "写入后读回的是「$back」，与输入不一致（机身可能截断或改写了）"
+                    }
+                }
+            }
+        }
+    }
+
+    /** 选一个菜单库（拍摄 A–D / 个人设定 A–D），然后编辑它的名字 */
+    private fun pickBankThenEditName(kind: String, codes: List<Int>) {
+        val names = listOf("A", "B", "C", "D")
+        AlertDialog.Builder(this)
+            .setTitle("编辑$kind 库名")
+            .setItems(names.map { "$kind ${it} 库" }.toTypedArray()) { _, which ->
+                showTextPropSheet(
+                    "$kind ${names[which]} 库名",
+                    codes[which],
+                    "机身里这个库的名字（最多 20 个字符左右，超出会被机身截断）"
+                )
+            }
+            .show()
     }
 
     /** 写一个属性并回读校验；回读不一致要如实报，别让用户以为改成功了 */

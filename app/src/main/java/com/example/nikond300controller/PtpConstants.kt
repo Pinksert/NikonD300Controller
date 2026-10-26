@@ -229,6 +229,18 @@ object PtpConstants {
     // ---------------------------------------------------------------------
     /** 拍摄菜单库（0..3 = A/B/C/D） */
     const val PROP_NIKON_SHOOTING_BANK = 0xD010
+
+    // 四个拍摄菜单库的名字（字符串属性，走 setDevicePropString）
+    const val PROP_NIKON_SHOOTING_BANK_NAME_A = 0xD011
+    const val PROP_NIKON_SHOOTING_BANK_NAME_B = 0xD012
+    const val PROP_NIKON_SHOOTING_BANK_NAME_C = 0xD013
+    const val PROP_NIKON_SHOOTING_BANK_NAME_D = 0xD014
+
+    // 四个个人设定库的名字（字符串属性）
+    const val PROP_NIKON_CUSTOM_BANK_NAME_A = 0xD041
+    const val PROP_NIKON_CUSTOM_BANK_NAME_B = 0xD042
+    const val PROP_NIKON_CUSTOM_BANK_NAME_C = 0xD043
+    const val PROP_NIKON_CUSTOM_BANK_NAME_D = 0xD044
     /** RAW 压缩类型（无损 / 压缩 / 未压缩，具体编码由机身报） */
     const val PROP_NIKON_RAW_COMPRESSION = 0xD016
 

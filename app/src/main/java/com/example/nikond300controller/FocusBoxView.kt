@@ -7,6 +7,7 @@ import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.RectF
 import android.util.AttributeSet
+import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
 import android.widget.ImageView
@@ -168,6 +169,23 @@ class FocusBoxView(context: Context, attrs: AttributeSet?) : View(context, attrs
 
     fun zoomScaleNow(): Float = zoomScale
 
+    /**
+     * 松手前把"待确认框"吸到最近的对焦点上（手持 51 点模式为 true）。
+     *
+     * 手持的 51 点是相位检测固定点位，机身只认那 51 个 id；手指落点在两点之间时，
+     * 先画在手指处、等帧头回来再一跳，看起来像"点歪了又自己纠正"。
+     * 这里干脆在松手瞬间就画到真正的点上。三脚架模式设 false（AF 框能自由挪）。
+     */
+    var snapPreviewToPoints = false
+
+    /** 手指还按在画面上（拖动选点进行中） */
+    private var dragging = false
+    private var dragX = 0f
+    private var dragY = 0f
+
+    /** 拖动中吸附到的对焦点；null = 没吸到（点阵没显示 / 离得太远） */
+    private var dragCandidate: AfPoint? = null
+
     /** 显示坐标（屏幕上的 0..1）→ 整幅画面坐标 */
     private fun displayToFull(x: Float, y: Float): Pair<Float, Float> {
         if (zoomScale <= 1f) return Pair(x, y)
@@ -208,6 +226,32 @@ class FocusBoxView(context: Context, attrs: AttributeSet?) : View(context, attrs
         color = Color.parseColor("#FF9F0A")
         style = Paint.Style.FILL_AND_STROKE
         strokeWidth = resources.displayMetrics.density * 1.5f
+    }
+
+    /**
+     * 取景画面上「没被选中」的对焦点：画成**很淡的小实心点**。
+     *
+     * 51 点在屏幕上只隔 0.05（约 18dp），画成一圈圈空心圆会连成一张网，
+     * 既挡住画面又让人分不清选了哪个。淡点 + 当前点高亮，画面干净得多，
+     * 手指也不用再去"戳中"某个点 —— 见 [onTouchEvent] 的拖动选点。
+     */
+    private val pointFaintPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#59FFFFFF")
+        style = Paint.Style.FILL
+    }
+
+    /** 拖动过程中手指"吸"到的那个点：半透明橙圈，松手才生效 */
+    private val pointCandidatePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#B3FF9F0A")
+        style = Paint.Style.STROKE
+        strokeWidth = resources.displayMetrics.density * 2f
+    }
+
+    /** 当前点外面再套一圈白环：51 个点里一眼就能找到"现在对的是哪" */
+    private val pointRingPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(230, 255, 255, 255)
+        style = Paint.Style.STROKE
+        strokeWidth = resources.displayMetrics.density * 1.2f
     }
 
     private val gridPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -354,47 +398,125 @@ class FocusBoxView(context: Context, attrs: AttributeSet?) : View(context, attrs
         )
     }
 
+    /**
+     * 触摸：**按下 → 拖动换点 → 松手才落点**。
+     *
+     * 为什么要拖动：51 个点在手机上彼此只隔约 18dp，比指尖小得多 ——
+     * 直接"点中想要的那个点"几乎不可能，一按就吸到隔壁去了。
+     * 改成按下去先给个候选（半透明橙圈），拖着走候选跟着换，
+     * 松手那一刻才算数、才写机身。跟相机上用方向键挪对焦点是一个手感。
+     *
+     * 只有 0.2 秒以内的点按和长拖没有区别：按哪儿、松手就算哪儿，
+     * 所以老用户"点一下"的习惯不受影响。
+     */
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        if (event.action != MotionEvent.ACTION_UP) return true
         if (!isEnabled) return false
-        val (nx, ny) = toNormalized(event.x, event.y)
-        if (mode == Mode.LIVE) {
-            // ★ 顺序：先看"有没有接管整块画面点击的回调"，没有才退回点阵逐点选。
-            //
-            // 三脚架模式、或手持模式下开了触摸对焦时，点画面**任意位置**都该有反应
-            // （手持会把点击吸附到最近那个对焦点）。以前是先走点阵命中判定，
-            // 命中半径（51 点时只有 0.06）之外的点击直接 return false ——
-            // 用户看到的就是"开了触摸对焦，点画面却毫无反应"。
-            val cb = onAreaPicked
-            if (cb != null) {
-                showPendingBox(nx, ny)
-                cb(nx, ny)
+
+        // 对焦屏（POINTS）：点一下就选，不需要拖动
+        if (mode != Mode.LIVE) {
+            if (event.actionMasked == MotionEvent.ACTION_UP) {
+                val (nx, ny) = toNormalized(event.x, event.y)
+                val p = nearestPoint(nx, ny) ?: return true
+                selectedId = p.id
+                highlightId = p.id
+                postInvalidate()
+                onPointPicked?.invoke(p.id)
+                performClick()
+            }
+            return true
+        }
+
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                dragging = true
+                dragX = event.x
+                dragY = event.y
+                updateDragCandidate()
+                postInvalidate()
+                return true
+            }
+
+            MotionEvent.ACTION_MOVE -> {
+                if (!dragging) return true
+                dragX = event.x
+                dragY = event.y
+                updateDragCandidate()
+                postInvalidate()
+                return true
+            }
+
+            MotionEvent.ACTION_UP -> {
+                if (!dragging) return true
+                dragging = false
+                dragX = event.x
+                dragY = event.y
+                updateDragCandidate()
+                commitPick()
+                hapticTap()
+                dragCandidate = null
+                postInvalidate()
                 performClick()
                 return true
             }
-            // 没接管时按点选：手持模式下这才是真能生效的那条路
-            if (pointsOverlay) {
-                val p = nearestPoint(nx, ny)
-                if (p != null) {
-                    selectedId = p.id
-                    highlightId = p.id
-                    postInvalidate()
-                    onPointPicked?.invoke(p.id)
-                    performClick()
-                    return true
-                }
+
+            MotionEvent.ACTION_CANCEL -> {
+                dragging = false
+                dragCandidate = null
+                postInvalidate()
+                return true
             }
-            return false
-        } else {
-            val p = nearestPoint(nx, ny) ?: return true
-            selectedId = p.id
-            highlightId = p.id
-            postInvalidate()
-            onPointPicked?.invoke(p.id)
         }
-        // 轻微触感反馈，让"选中了"这件事不只在屏幕上
-        performClick()
         return true
+    }
+
+    /** 手指位置 → 最近的对焦点（点阵没显示时不做吸附） */
+    private fun updateDragCandidate() {
+        if (!pointsOverlay || points.isEmpty()) {
+            dragCandidate = null
+            return
+        }
+        val (nx, ny) = toNormalized(dragX, dragY)
+        // 拖动时不设命中半径：落在网格外的画面里，"最近的点"依旧是机身会选的那个
+        dragCandidate = nearestPoint(nx, ny, anyDistance = true)
+    }
+
+    /**
+     * 松手：把这一次选择交给宿主。
+     *
+     * 有 [onAreaPicked]（开了触摸对焦 / 三脚架）就交归一化坐标 —— 由宿主决定
+     * 是"手持吸附到对焦点写 0xD108"还是"三脚架发 0x9205 绝对坐标"；
+     * 没有就退回点阵逐点选。
+     */
+    private fun commitPick() {
+        val (nx, ny) = toNormalized(dragX, dragY)
+        val cb = onAreaPicked
+        if (cb != null) {
+            // 手持：先把待确认框摆到真正的对焦点上，避免"框先画在手指处、随后跳一下"
+            val snap = if (snapPreviewToPoints) dragCandidate else null
+            if (snap != null) {
+                selectedId = snap.id
+                showPendingBox(snap.nx, snap.ny)
+                cb(snap.nx, snap.ny)
+            } else {
+                showPendingBox(nx, ny)
+                cb(nx, ny)
+            }
+            return
+        }
+        // 没接管整块画面（没开触摸对焦）：退回点阵命中，点空了就当没点
+        val p = dragCandidate ?: nearestPoint(nx, ny) ?: return
+        selectedId = p.id
+        highlightId = p.id
+        onPointPicked?.invoke(p.id)
+    }
+
+    /** 松手时的轻微触感：确认"这一下生效了"，不必盯着屏幕找反馈 */
+    private fun hapticTap() {
+        try {
+            performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+        } catch (_: Throwable) {
+            // 有的机型关掉了触感反馈，忽略
+        }
     }
 
     override fun performClick(): Boolean {
@@ -402,8 +524,13 @@ class FocusBoxView(context: Context, attrs: AttributeSet?) : View(context, attrs
         return true
     }
 
-    /** 取最近的一个点；离得太远（点在画幅外）就不选中 */
-    private fun nearestPoint(nx: Float, ny: Float): AfPoint? {
+    /**
+     * 取最近的一个点。
+     *
+     * @param anyDistance true = 不设命中半径，永远返回最近的那个（拖动选点用：
+     *   手指可能落在网格外，但"最近的点"始终有意义，跟机身行为一致）
+     */
+    private fun nearestPoint(nx: Float, ny: Float, anyDistance: Boolean = false): AfPoint? {
         if (points.isEmpty()) return null
         var best: AfPoint? = null
         var bestD = Float.MAX_VALUE
@@ -411,9 +538,11 @@ class FocusBoxView(context: Context, attrs: AttributeSet?) : View(context, attrs
             val d = (p.nx - nx) * (p.nx - nx) + (p.ny - ny) * (p.ny - ny)
             if (d < bestD) { bestD = d; best = p }
         }
+        if (anyDistance) return best
         // 命中半径要跟点阵密度走：51 点的相邻间距只有 0.05，
-        // 沿用 11 点的 0.18 会变成"点哪儿都中"
-        val threshold = if (points.size > 20) 0.06f else 0.18f
+        // 沿用 11 点的 0.18 会变成"点哪儿都中"；放宽到 0.09 是"一格半"，
+        // 手指偏半格以内仍能选中想选的那个
+        val threshold = if (points.size > 20) 0.09f else 0.18f
         return if (bestD <= threshold * threshold) best else null
     }
 
@@ -494,8 +623,12 @@ class FocusBoxView(context: Context, attrs: AttributeSet?) : View(context, attrs
             }
         }
         // 51 个点同屏时点要画小一点，否则连成一片分不出选了哪个
-        val base = w.coerceAtMost(h) * if (points.size > 20) 0.022f else 0.035f
+        val dense = points.size > 20
+        val base = w.coerceAtMost(h) * if (dense) 0.022f else 0.035f
         val r = base.coerceAtLeast(resources.displayMetrics.density * 3f)
+        // 叠在实时画面上（liveView）时点要更淡更小 —— 它是"可选位置"的提示，
+        // 不该盖住构图；对焦屏（grid=true）里没有画面，照旧画满。
+        val onLive = !grid
         for (p in points) {
             // 放大时点阵要跟着画面一起放大：把整幅坐标换算成"当前屏幕上"的位置，
             // 被推出可视区的点直接不画（画在框外会让人以为机身还能选到那儿）
@@ -503,10 +636,16 @@ class FocusBoxView(context: Context, attrs: AttributeSet?) : View(context, attrs
             val cx = displayRect.left + d.first * w
             val cy = displayRect.top + d.second * h
             val active = p.id == selectedId
-            if (active) {
-                canvas.drawCircle(cx, cy, r * 1.5f, pointActivePaint)
-            } else {
-                canvas.drawCircle(cx, cy, r, pointPaint)
+            val candidate = dragging && p.id == dragCandidate?.id
+            when {
+                active -> {
+                    // 当前点：实心橙点 + 白环，51 个点里一眼能找到
+                    canvas.drawCircle(cx, cy, r * 1.3f, pointActivePaint)
+                    canvas.drawCircle(cx, cy, r * 1.85f, pointRingPaint)
+                }
+                candidate -> canvas.drawCircle(cx, cy, r * 1.6f, pointCandidatePaint)
+                onLive -> canvas.drawCircle(cx, cy, (r * 0.5f).coerceAtLeast(1.6f), pointFaintPaint)
+                else -> canvas.drawCircle(cx, cy, r, pointPaint)
             }
         }
     }

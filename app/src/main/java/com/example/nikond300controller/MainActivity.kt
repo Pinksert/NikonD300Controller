@@ -3081,6 +3081,9 @@ class MainActivity : AppCompatActivity(), SheetHost {
         // 画面任意位置拖动（0x9205 绝对定位）只在「取景中·三脚架」才挂回调，
         // 见上面的 onAreaPicked。这两件事别混在一个条件里，否则未取景点画面会白发命令。
         focusBox.pointsOverlay = !live || handheld
+        // 手持是固定点位：松手瞬间就把待确认框摆到真正的对焦点上，别画在手指处再跳一下。
+        // 三脚架能自由挪，框就落在手指位置。
+        focusBox.snapPreviewToPoints = handheld
         focusBox.setAfPoints(currentAfPoints(), currentAfPointId)
         renderAfPointRow()
         // 模式一变，LV 按钮上的图标也跟着换（人拿相机 / 三脚架）

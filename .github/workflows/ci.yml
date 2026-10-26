@@ -21,13 +21,23 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: 装 Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: 装 NDK 与 CMake（NEF 解码要用）
+      # ⚠️ 不要用 android-actions/setup-android@v3：它内部会跑 `sdkmanager tools`，
+      #    而新 cmdline-tools(16.0) 里 legacy `tools` 包已经下架 →
+      #    "Warning: Failed to find package 'tools'" + exit 1，整个 job 卡在第一步。
+      #    ubuntu-latest 镜像本来就带 Android SDK 与 cmdline-tools，直接用即可。
+      - name: 装 Android SDK 组件
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager --install "ndk;28.2.13676358" "cmake;3.22.1"
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          SDKM="$(ls -d "$SDK_ROOT"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | sort -V | tail -1 || true)"
+          if [ ! -x "$SDKM" ]; then echo "::error::找不到 sdkmanager（$SDK_ROOT）"; exit 1; fi
+          echo "SDK_ROOT=$SDK_ROOT / sdkmanager=$SDKM"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          yes | "$SDKM" --licenses > /dev/null 2>&1 || true
+          # compileSdk=36；NEF 解码要 NDK+CMake（build.gradle.kts 里 cmake 版本写死 3.22.1）
+          "$SDKM" --install "platforms;android-36" "build-tools;36.0.0" "platform-tools" \
+                             "ndk;28.2.13676358" "cmake;3.22.1"
 
       - uses: gradle/actions/setup-gradle@v4
 

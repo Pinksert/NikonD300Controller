@@ -1186,7 +1186,11 @@ class PtpUsbConnection(
      * 多一次 0x90C2 往返就是多两秒。
      */
     fun setPropInHostMode(code: Int, value: Int, size: Int? = null): Boolean {
-        val enter = setControlMode(1)
+        // ★ 切模式前必须等机身空闲：官方原文说"取景/曝光过程中切会回
+        //   Change_Cameramode_Failed（0xA003）"。真机日志里就撞到过 —— 拍完立刻恢复模式，
+        //   机身还在写卡，0x90C2(1) 直接回 0xA003，于是释放模式停在 Mup 没恢复。
+        waitForIdle(3000)
+        val enter = setControlModeWithRetry(1)
         if (enter != PtpConstants.RESP_OK) {
             logger(
                 "切主机模式失败（${if (enter < 0) "TIMEOUT" else "0x" + Integer.toHexString(enter).uppercase()}）" +
@@ -1202,6 +1206,35 @@ class PtpUsbConnection(
         } finally {
             exitHostMode()
         }
+    }
+
+    /**
+     * 0x90C2 切换控制模式，失败重试。
+     *
+     * `Change_Cameramode_Failed (0xA003)` 的真机诱因是"机身还在干活"，
+     * 所以每次重试前都等一次 DeviceReady。这是**必须**的：切不回去的后果是
+     * 机身停在主机模式 / 停在 Mup，用户按快门会没反应。
+     */
+    private fun setControlModeWithRetry(mode: Int, attempts: Int = 4): Int {
+        var last = -1
+        repeat(attempts) { i ->
+            waitForIdle(2500)
+            last = setControlMode(mode)
+            if (last == PtpConstants.RESP_OK) return last
+            if (i < attempts - 1) {
+                logger(
+                    "0x90C2($mode) 失败（${if (last < 0) "TIMEOUT" else "0x" + Integer.toHexString(last).uppercase()}），" +
+                        "等机身空闲后重试"
+                )
+                try {
+                    Thread.sleep(500)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return last
+                }
+            }
+        }
+        return last
     }
 
     /**
@@ -1229,23 +1262,16 @@ class PtpUsbConnection(
 
     /**
      * 切回机身模式。**必须**执行：主机模式是全局状态，留在里面机身拨盘/按钮的响应
-     * 会跟平时不一样。失败重试两次，仍失败就把这句话记进日志（界面上的日志页能查到）。
+     * 会跟平时不一样。走 [setControlModeWithRetry]（含等就绪 + 重试 4 次）。
      */
     private fun exitHostMode() {
-        repeat(3) { i ->
-            if (setControlMode(0) == PtpConstants.RESP_OK) {
-                if (i > 0) logger("已切回机身模式（第 ${i + 1} 次尝试）")
-                return
-            }
-            logger("切回机身模式失败（第 ${i + 1} 次）")
-            try {
-                Thread.sleep(200)
-            } catch (_: InterruptedException) {
-                Thread.currentThread().interrupt()
-                return
-            }
+        val code = setControlModeWithRetry(0)
+        if (code != PtpConstants.RESP_OK) {
+            logger(
+                "⚠️ 切回机身模式失败（${if (code < 0) "TIMEOUT" else "0x" + Integer.toHexString(code).uppercase()}）" +
+                    "—— 机身可能仍停在主机模式，拔插一次 USB 可复位"
+            )
         }
-        logger("⚠️ 连续 3 次切回机身模式失败 —— 机身可能仍停在主机模式，拔插 USB 可复位")
     }
 
     /** 自拍延时秒数（0xD063）。普通可写属性，不走主机模式。 */

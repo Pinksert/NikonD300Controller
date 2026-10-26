@@ -223,6 +223,9 @@ class MainActivity : AppCompatActivity(), SheetHost {
     private var afPointCountBox: View? = null
     private lateinit var lvGridRow: SheetValueRow
 
+    /** 参数页「触摸对焦」行：与取景画面左上角那枚 chip 是同一个开关 */
+    private lateinit var touchAfRow: SheetValueRow
+
     // ---- 51 点标定结果（只读）----
     // 0xD108 的 51 点 id→坐标映射官方从未公开，是早年在这台机身上逐个写 id、
     // 读取景帧头的 AF 框位置实测出来的，存在 SharedPreferences（af51_calib）。
@@ -4644,6 +4647,14 @@ class MainActivity : AppCompatActivity(), SheetHost {
             if (touchAfEnabled) "触摸对焦已开启：点画面任意位置即对焦（三脚架下机身自己会对，不再叠加）"
             else "触摸对焦已关闭"
         )
+        // 未取景时点这个开关只是改设置，得说清楚"现在还没生效"，别让人以为坏了
+        toast(
+            when {
+                !touchAfEnabled -> "触摸对焦已关闭"
+                isLiveViewRunning -> "触摸对焦已开启：点画面任意位置即对焦"
+                else -> "触摸对焦已开启 —— 进入实时取景后生效"
+            }
+        )
     }
 
     private fun renderTouchAfButton() {
@@ -4651,8 +4662,16 @@ class MainActivity : AppCompatActivity(), SheetHost {
         touchAfButton.setTextColor(
             if (touchAfEnabled) getColor(R.color.accent_amber) else getColor(R.color.text_disabled)
         )
-        // 只对实时画面有意义 —— 没开取景就没有画面可点，chip 露着只会让人白点
-        touchAfButton.visibility = if (isLiveViewRunning) View.VISIBLE else View.GONE
+        // ★ 它是**设置项**，不是"取景时才出现的操作按钮"：未取景时也留着。
+        //   早先只在 isLiveViewRunning 时可见，结果"想先打开开关、再进画面"的人
+        //   在取景外根本找不到入口。参数页另有一份同样的入口（touchAfRow）。
+        touchAfButton.visibility = View.VISIBLE
+        if (::touchAfRow.isInitialized) {
+            touchAfRow.value.text = if (touchAfEnabled) "开启" else "关闭"
+            touchAfRow.value.setTextColor(
+                if (touchAfEnabled) getColor(R.color.accent_amber) else getColor(R.color.text_disabled)
+            )
+        }
     }
 
     /**
@@ -4872,7 +4891,8 @@ class MainActivity : AppCompatActivity(), SheetHost {
                         liveViewPlaceholder.visibility = View.GONE
                         recButton.visibility = View.GONE
                         peakButton.visibility = View.GONE
-                        touchAfButton.visibility = View.GONE
+                        // 触摸对焦开关**不跟着取景隐藏**：它是个设置项，界面上要一直能找到
+                        renderTouchAfButton()
                         renderLiveViewMode(currentLiveViewMode)
                         log("Live View 启动失败：${result.reason}")
 
@@ -5980,6 +6000,11 @@ class MainActivity : AppCompatActivity(), SheetHost {
         if (!conn.setStillCaptureMode(back)) {
             runOnUiThread {
                 log("恢复机身释放模式失败（原值 0x${Integer.toHexString(back).uppercase()}）")
+                Toast.makeText(
+                    this@MainActivity,
+                    "释放模式没能自动切回（机身停在自拍挡）—— 请在机身上把释放模式拨回去",
+                    Toast.LENGTH_LONG
+                ).show()
             }
         }
     }
@@ -6889,10 +6914,23 @@ class MainActivity : AppCompatActivity(), SheetHost {
             if (viaCamera) log("释放模式已切到 Mup（机内设定，原值 ${origMode.hexMode()}）")
             else log("机身不接受 Mup 模式（0x5013=0x8012）—— 按「拨盘已在 Mup」继续")
         }
+        // 模式刚变的那一下机身还在消化，立刻发快门会回 0x2002 Device_Busy（真机日志如此）
+        if (viaCamera) Thread.sleep(400)
 
         try {
             log("反光板预升：第 1 次快门（抬起反光板）")
-            val first = conn.capture(afAlreadyLocked = false)
+            var first = conn.capture(afAlreadyLocked = false)
+            if (first == PtpConstants.RESP_DEVICE_BUSY) {
+                // 抬板被"机身忙"挡回来是常态（尤其前一步刚跑完 AF）：等一会儿再发一次，
+                // 别一被拒就判失败 —— 用户看到的是"反光板预升失败"，其实只是没等够
+                log("反光板预升：机身忙，等 1.5 秒重发第一次快门")
+                Thread.sleep(1500)
+                for (i in 1..4) {
+                    if (conn.deviceReady() == true) break
+                    Thread.sleep(300)
+                }
+                first = conn.capture(afAlreadyLocked = false)
+            }
             if (first != PtpConstants.RESP_OK) {
                 log(
                     "反光板预升：抬板被拒（${first.hex()}）" +
@@ -6924,6 +6962,13 @@ class MainActivity : AppCompatActivity(), SheetHost {
             if (viaCamera && origMode >= 0) {
                 if (!conn.setStillCaptureMode(origMode)) {
                     log("恢复释放模式失败（原值 ${origMode.hexMode()}）—— 机身会停在 Mup")
+                    runOnUiThread {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "释放模式没能自动切回（机身停在 Mup）—— 请在机身上把释放模式拨回去",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
                 }
             }
         }
@@ -7354,6 +7399,12 @@ class MainActivity : AppCompatActivity(), SheetHost {
         val (lensApertureRow, lensApertureValue) = sheetInfoRow("光圈范围", "读取中…")
         lensCard.addView(lensIdRow); lensCard.addView(lensFocalRow); lensCard.addView(lensApertureRow)
 
+        // 释放模式（0x5013）：自拍 / Mup / 取景 用 App 改完之后，这里能确认机身到底停在哪一挡。
+        // 反光板预升改走机内设定之后，这一行就是"有没有恢复成功"的照妖镜。
+        val modeCard = sheetCard(page.content, "释放模式")
+        val (scRow, scValue) = sheetInfoRow("当前释放模式", "读取中…")
+        modeCard.addView(scRow)
+
         val card2 = sheetCard(page.content, "当前连接")
         val (makerRow, makerValue) = sheetInfoRow("厂商", deviceInfoCache?.manufacturer ?: "NIKON CORPORATION")
         // 值列很窄，长句会被裁掉（"机身需设为 MTP/P"），协议名只写短的，细节放下面的提示
@@ -7401,6 +7452,22 @@ class MainActivity : AppCompatActivity(), SheetHost {
                 lensIdValue.text = if (lensId == -999999) "不支持" else "0x%04X".format(lensId)
                 lensFocalValue.text = lensRange(focalMin, focalMax, isFocal = true)
                 lensApertureValue.text = lensRange(apMin, apMax, isFocal = false)
+            }
+
+            // 释放模式：确认 App 改完之后机身停在哪一挡（尤其是"有没有从 Mup 恢复回来"）
+            val scMode = try {
+                ptpConnection?.getStillCaptureMode() ?: -999999
+            } catch (_: Exception) {
+                -999999
+            }
+            runOnUiThread {
+                scValue.text = scMode.hexMode()
+                if (scMode == PtpConstants.STILL_CAPTURE_MIRROR_UP ||
+                    scMode == PtpConstants.STILL_CAPTURE_SELF_TIMER
+                ) {
+                    // 停在 Mup / 自拍挡多半是上一次自动恢复没成功，标红提醒
+                    scValue.setTextColor(ContextCompat.getColor(this, R.color.accent_red))
+                }
             }
         }
     }
@@ -7946,6 +8013,13 @@ class MainActivity : AppCompatActivity(), SheetHost {
             showLvGridSheet()
         }
         gridHost.addView(lvGridRow.view)
+
+        // 触摸对焦：取景画面左上角有一枚同样的 chip，但"未取景时那块是空的"，
+        // 想先设好再进取景的人就找不到入口。参数页给一份常驻的，两处状态同步。
+        touchAfRow = sheetValueRow("触摸对焦", if (touchAfEnabled) "开启" else "关闭") { _ ->
+            toggleTouchAf()
+        }
+        gridHost.addView(touchAfRow.view)
         renderAfPointRow()
 
         // ---- 存储（机身信息已经挪到左上角机型名，不再占一行）----

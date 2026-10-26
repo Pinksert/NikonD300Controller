@@ -15,6 +15,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Windows 上提交的 gradlew 常常没带可执行位（git 记的是 100644）→
+      # CI 里直接 "./gradlew: Permission denied" (exit 126)。仓库里已改成 100755，
+      # 这里再保底一次（fork 来的 PR 也一样能跑）
+      - name: 让 gradlew 可执行
+        run: chmod +x gradlew
+
       - name: 装 JDK
         uses: actions/setup-java@v4
         with:

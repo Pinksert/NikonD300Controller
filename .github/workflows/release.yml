@@ -24,6 +24,10 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
+      # Windows 提交的 gradlew 可能丢可执行位 → "./gradlew: Permission denied"（exit 126）
+      - name: 让 gradlew 可执行
+        run: chmod +x gradlew
+
       - name: 装 JDK
         uses: actions/setup-java@v4
         with:

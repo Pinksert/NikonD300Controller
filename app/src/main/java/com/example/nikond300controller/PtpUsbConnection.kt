@@ -504,6 +504,27 @@ class PtpUsbConnection(
     /** 本会话还能不能试 0x9207（没试过 = 能试一次） */
     fun lvCaptureToCardMayTry(): Boolean = lvCaptureToCardUsable != false
 
+    /**
+     * 0x90C0 InitiateCaptureRecInSdram，`P1 = CaptureSort`。
+     *
+     * 官方规格书 §4.4：
+     * - `P1 = 0xFFFFFFFF` → 正常拍摄（[captureNoAf] 走的就是这条）
+     * - `P1 = 0x00000000 – 0x00000004` → **白平衡预设测量**：把当前实测增益
+     *   存进 d-1…d-5 那一槽（0 对应 d-1）
+     *
+     * ⚠️ 这两件事共用同一个操作码，只靠 P1 区分 —— 所以调用方必须明确自己要哪个，
+     * 别把"测量"当"拍摄"发出去（虽然都不伤机器，但会白拍一张）。
+     */
+    fun initiateSdram(sort: Int, timeoutMs: Int = CAPTURE_RESP_TIMEOUT_MS): Int =
+        synchronized(usbLock) {
+            drain()
+            if (!waitForIdle(2500)) {
+                clearPipe()
+                drain()
+            }
+            executeSingleCaptureAttempt(PtpConstants.OP_NIKON_INITIATE_CAPTURE, timeoutMs, sort)
+        }
+
     fun captureNoAf(): Int = synchronized(usbLock) {
         drain()
         if (!waitForIdle(2500)) {

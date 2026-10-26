@@ -8558,6 +8558,18 @@ class MainActivity : AppCompatActivity(), SheetHost {
         card.addView(gridRef!!.view)
         card.addView(sheetHint("「手动色温」接着让你输 K 值；「预设」切到机身里存好的手动白平衡（d-0 … d-4）。"))
 
+        // 白平衡预设测量：官方支持的"对白纸测一次"（0x90C0 的 P1 传 0…4）
+        val measureCard = sheetCard(page.content, "预设测量")
+        val measureRow = sheetValueRow("测量自定义白平衡", "对准白纸再点") { _ ->
+            showWbMeasureSheet()
+        }
+        measureCard.addView(measureRow.view)
+        measureCard.addView(sheetHint(
+            "把相机对准白纸或灰卡（占满画面中心），再点这一项 —— " +
+                "机身在取景状态下测一次现场光，把结果写进预设槽 d-1…d-5。" +
+                "官方规格书 §4.4：这是 0x90C0 的 P1 传 0…4 的用途（P1=0xFFFFFFFF 才是正常拍摄）。"
+        ))
+
         page.show()
 
         thread {
@@ -8569,8 +8581,72 @@ class MainActivity : AppCompatActivity(), SheetHost {
         }
     }
 
-    private fun showColorTempDialog() {
-        val page = buildSheetPage("手动色温", "手动白平衡 · K 值")
+    /**
+     * 白平衡预设测量（官方 §4.4：0x90C0 的 P1 传 0x00000000–0x00000004 即「预设测量释放」）。
+     *
+     * 流程：对准白纸 → 选目标槽（d-1…d-5 对应 P1=0…4）→ 发 0x90C0(P1) →
+     * 轮询 0x90C8 等机身测完 → 报结果。
+     *
+     * **不接 0x90C9 SetPreWbData**：那个接口要同时传增益值和最多 13440 B 的缩略图，
+     * App 侧没有可靠的缩略图来源，硬造一份会把预设写坏。机身自己测出来的值它自己会存。
+     */
+    private fun showWbMeasureSheet() {
+        if (!isConnected) { toast("请先连接相机"); return }
+        val page = buildSheetPage("白平衡预设测量", "0x90C0 P1=0…4 · 先对准白纸再点槽位")
+        val card = sheetCard(page.content, "写到哪个预设槽")
+        val slots = listOf(0 to "d-1", 1 to "d-2", 2 to "d-3", 3 to "d-4", 4 to "d-5")
+        var gridRef: SheetTileGrid? = null
+        gridRef = sheetTileGrid(3, slots.map { it.second }) { idx ->
+            gridRef?.select(idx)
+            val pair = slots[idx]
+            val conn = ptpConnection
+            if (conn != null) {
+                thread {
+                    isPollingPaused = true
+                    try {
+                        runOnUiThread { log("正在测量白平衡 → ${pair.second} …（保持白纸占满画面中心）") }
+                        val code = conn.initiateSdram(pair.first, 20000)
+                        if (code != PtpConstants.RESP_OK) {
+                            val hex = if (code < 0) "TIMEOUT" else "0x" + Integer.toHexString(code).uppercase()
+                            runOnUiThread { log("测量被拒：$hex") }
+                            return@thread
+                        }
+                        // 命令回 OK 只代表"开始了"，真正测完要问 DeviceReady
+                        var ready = false
+                        for (i in 0 until 60) {
+                            if (!isConnected) break
+                            if (conn.deviceReady() == true) { ready = true; break }
+                            Thread.sleep(200)
+                        }
+                        Thread.sleep(400)
+                        val wb = conn.getDevicePropValue(PtpConstants.PROP_WHITE_BALANCE)
+                        runOnUiThread {
+                            log(
+                                if (ready) "白平衡测量完成 → ${pair.second}（机身白平衡现在 = ${wbLabel(wb)}）"
+                                else "白平衡测量未在 12 秒内完成，多半是没对准白纸 —— 可以再试一次"
+                            )
+                            toast(if (ready) "${pair.second} 已测量" else "测量超时")
+                        }
+                    } catch (e: Exception) {
+                        runOnUiThread { log("白平衡测量出错：${e.message}") }
+                    } finally {
+                        isPollingPaused = false
+                    }
+                }
+            }
+        }
+        card.addView(gridRef.view)
+        card.addView(sheetHint(
+            "用法：让白纸或灰卡占满画面中心 → 点一个槽。\n\n" +
+                "· 测完存进那个槽；之后把白平衡切到「预设」并选同一个 d-× 就能用\n" +
+                "· 光太暗、或画面里混进别的颜色，测出来会偏 —— 重新测一次覆盖即可\n" +
+                "· 这里只做测量。增益回写（0x90C9）没接：它要求同时传 13440 B 缩略图，" +
+                "App 造不出来，硬写会把预设弄坏"
+        ))
+        page.show()
+    }
+
+    private fun showColorTempDialog() {        val page = buildSheetPage("手动色温", "手动白平衡 · K 值")
 
         val cardInput = sheetCard(page.content, "目标色温")
         val input = sheetNumberInput("2500 – 10000", "5000")

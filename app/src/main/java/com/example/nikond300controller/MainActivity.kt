@@ -5356,10 +5356,18 @@ class MainActivity : AppCompatActivity(), SheetHost {
         stopAllRequested = false
         ptpConnection?.abortRequested = false
 
-        // 自拍延时：站到相机前那几秒就靠这个倒计时。
-        // 间隔拍摄时只在第一张前等（之后每张的间隔由间隔时长控制，
+        // 自拍延时：**走机内设定**（2026-10-26 改）。
+        // 以前是 App 自己数秒再发快门 —— 数的时候机身并不知道要拍照，抢在倒计时末尾
+        // 拧对焦环、换构图都不算数，而且不会响机身的提示音。
+        // 现在写 0xD063（时长）+ 0x5013=0x8011（自拍模式），发一次快门后
+        // 由机身自己倒计时、自己释放；机内不接受时再退回 App 内倒计时。
+        // 间隔拍摄时只在第一张前挂（之后每张的间隔由间隔时长控制，
         // 再叠一次自拍会让实际间隔比设定值多出好几秒）
-        if (applySelfTimer && selfTimerSec > 0) runCountdown(selfTimerSec)
+        var selfTimerArmed = false
+        if (applySelfTimer && selfTimerSec > 0) {
+            selfTimerArmed = armCameraSelfTimer()
+            if (!selfTimerArmed) runCountdown(selfTimerSec)
+        }
 
         // 拍前是否在取景：拍完要自动恢复回来（见函数末尾）
         val wasInLiveView = isLiveViewRunning
@@ -5603,7 +5611,8 @@ class MainActivity : AppCompatActivity(), SheetHost {
         if (!shotInLiveView) {
             if (mirrorUpEnabled) {
                 // ---- 反光板预升：连按两次快门 ----
-                // 前置条件（界面上已提示并要确认）：机身释放模式拨盘已转到 Mup。
+                // 释放模式由 mirrorUpCapture 自己切到 Mup（0x5013=0x8012），不再要求手动拨盘；
+                // 机身不接受时才退回"用户手动转 Mup"的老办法，错误提示里会说清是哪一种。
                 // 若正在取景，反光板本就是抬起的，这里先落下来再走流程。
                 if (isLiveViewRunning) {
                     runOnUiThread { log("反光板预升：先退出取景落下反光板…") }
@@ -5622,7 +5631,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
                     runOnUiThread {
                         Toast.makeText(
                             this@MainActivity,
-                            "反光板预升失败：请确认机身释放模式拨盘已转到 Mup",
+                            "反光板预升失败：机身拒绝了第一次快门（失败原因见日志页）",
                             Toast.LENGTH_LONG
                         ).show()
                     }
@@ -5656,8 +5665,15 @@ class MainActivity : AppCompatActivity(), SheetHost {
             }
         }
 
-        // 机身写卡需要时间，紧接着发下一条命令容易撞上 DeviceBusy
-        if (success && !stopAllRequested) Thread.sleep(3000)
+        // 机身写卡需要时间，紧接着发下一条命令容易撞上 DeviceBusy。
+        // 走机内自拍时，快门响应只代表"开始倒计时"，真正的曝光在 N 秒之后，
+        // 所以要按自拍时长多等，否则后面"重开会话列照片"会跑在照片落卡之前。
+        if (success && !stopAllRequested) {
+            Thread.sleep(if (selfTimerArmed) selfTimerSec * 1000L + 3000 else 3000)
+        }
+
+        // 自拍拍完把释放模式放回去，别让机身一直停在自拍挡
+        if (selfTimerArmed) disarmCameraSelfTimer()
 
         // ★ 拍完把会话重开一次，让机身重新列一遍照片。
         //
@@ -5787,6 +5803,53 @@ class MainActivity : AppCompatActivity(), SheetHost {
      * 自拍倒计时：把数字铺在取景框中间（那个占位标签平时是 GONE 的，
      * 这里临时借用，倒计时结束再收回去）。
      */
+    /** 挂自拍之前机身的释放模式，拍完照它还原；-999999 = 没挂过 / 读不到 */
+    private var selfTimerOrigMode = -999999
+
+    /**
+     * 把自拍延时交给机身：写 0xD063（时长）+ 0x5013=0x8011（自拍模式）。
+     *
+     * 成功后必须**只发一次**快门 —— 机身在倒计时结束时自己释放，
+     * App 再补一次就变成连拍两张。拍完调 [disarmCameraSelfTimer] 还原释放模式。
+     *
+     * @return true = 机身已经进入自拍待发状态；false = 没走成，调用方退回 App 内倒计时
+     */
+    private fun armCameraSelfTimer(): Boolean {
+        val conn = ptpConnection ?: return false
+        val origMode = conn.getStillCaptureMode()
+        val origDelay = conn.getSelfTimerDelay()
+        if (!conn.setSelfTimerDelay(selfTimerSec)) {
+            runOnUiThread { log("机身不接受自拍时长（0xD063），改用 App 内倒计时") }
+            return false
+        }
+        if (!conn.setStillCaptureMode(PtpConstants.STILL_CAPTURE_SELF_TIMER)) {
+            // ★ 回滚：自拍模式没切进去，机身 c3 却已经被改成 App 的秒数了。
+            //   留着它，用户下次用手按机身快门会莫名其妙多等几秒。
+            if (origDelay in 0..20) conn.setSelfTimerDelay(origDelay)
+            runOnUiThread { log("机身不接受自拍模式（0x5013=0x8011），改用 App 内倒计时") }
+            return false
+        }
+        selfTimerOrigMode = origMode
+        runOnUiThread {
+            log("自拍 ${selfTimerSec} 秒由机身执行（0xD063 + 0x5013=0x8011），倒计时结束机身自己释放")
+            showTransientStatus("机身自拍倒计时 ${selfTimerSec} 秒…")
+        }
+        return true
+    }
+
+    /** 自拍拍完把释放模式放回去（机身不该一直停在自拍挡） */
+    private fun disarmCameraSelfTimer() {
+        val conn = ptpConnection ?: return
+        val back = selfTimerOrigMode
+        selfTimerOrigMode = -999999
+        if (back < 0) return
+        if (!conn.setStillCaptureMode(back)) {
+            runOnUiThread {
+                log("恢复机身释放模式失败（原值 0x${Integer.toHexString(back).uppercase()}）")
+            }
+        }
+    }
+
     private fun runCountdown(seconds: Int) {
         for (s in seconds downTo 1) {
             if (!isConnected) break
@@ -6568,7 +6631,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
     private fun showMirrorUpSheet() {
         val page = buildSheetPage(
             "反光板预升",
-            "0x100E × 2 · 需要先把机身释放模式拨盘转到 Mup"
+            "机内释放模式 0x5013=0x8012 · 0x100E × 2"
         )
 
         // ---- 开关 ----
@@ -6578,7 +6641,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
             saveWorkflowSettings()
             refreshWorkflowRows()
             if (checked) {
-                log("反光板预升已开启 —— 请确认机身释放模式拨盘已转到 Mup")
+                log("反光板预升已开启 —— 拍摄时 App 会临时把机身释放模式切到 Mup，拍完自动切回")
             }
         }
         onCard.addView(swRow)
@@ -6599,17 +6662,16 @@ class MainActivity : AppCompatActivity(), SheetHost {
         // ---- 说明 ----
         val hintCard = sheetCard(page.content, "这条命令到底在干什么")
         hintCard.addView(sheetHint(
-            "D300 没有专门的「抬起反光板」PTP 指令（私有操作码表里没有，" +
-                "libgphoto2 里的 MirrorUp 系列只挂在 D780 / D6 上）。\n\n" +
-                "所以走的是机身的 Mup 释放模式：把释放模式拨盘转到 Mup 之后，" +
-                "第一次按快门抬反光板、第二次按才真正曝光。" +
-                "PTP 里一次 0x100E 就等于按一次快门，于是这里连发两次、中间等一段时间。\n\n" +
-                "· 前置：手动把释放模式拨盘转到 Mup —— App 改不了这个拨盘\n" +
-                "· 等待：抬板后到释放之间的间隔，长曝 / 微距建议 3 秒以上\n" +
+            "D300 没有「抬起反光板」这种专门指令，但机身自己的**释放模式**里有一档叫 Mup，" +
+                "它就是干这个的：第一下抬反光板、第二下才曝光。\n\n" +
+                "这个释放模式是 PTP 属性 0x5013（StillCaptureMode），以前写它一律被拒，" +
+                "是因为要先发 0x90C2(1) 切进主机模式它才可写。现在 App 自己就会做这件事：\n\n" +
+                "· 拍摄时临时把机身释放模式切到 Mup（0x8012），拍完自动切回你原来的挡位\n" +
+                "· 中间发两次 0x100E，分别对应「抬板」和「释放曝光」，间隔就是上面选的等待时长\n" +
                 "· 反光板抬起后取景器全黑，是 Mup 的正常现象\n" +
-                "· 第二次命令没发出去时，机身约 30 秒会自己把反光板放下，不用手动救\n\n" +
-                "不想动拨盘的话，也可以用机身自定义设定 d9「曝光延迟模式」—— " +
-                "它与 Mup 效果相同，但延迟由机身固定（约 1 秒），且对所有拍摄生效。"
+                "· 第二次没发出去时，机身约 30 秒会自己把反光板放下，不用手动救\n\n" +
+                "如果机身拒绝了模式切换（日志会写明原因），就退回老办法：需要你手动把" +
+                "释放模式拨盘转到 Mup，App 只做连按两次快门。"
         ))
 
         // ---- 立刻试一张 ----
@@ -6683,31 +6745,63 @@ class MainActivity : AppCompatActivity(), SheetHost {
             Thread.sleep(250)
         }
 
-        log("反光板预升：第 1 次快门（抬起反光板）")
-        val first = conn.capture(afAlreadyLocked = false)
-        if (first != PtpConstants.RESP_OK) {
-            log("反光板预升：抬板被拒（${first.hex()}）—— 确认释放模式拨盘已转到 Mup")
-            return MirrorUpResult(first, -1)
+        // ★ 走机内设定：把释放模式临时切到 Mup（0x5013 = 0x8012）。
+        //   官方路径 = 0x90C2(1) 主机模式 → 写 0x5013 → 切回机身模式（都在 setStillCaptureMode 里）。
+        //   这就不需要用户手动把机身的释放模式拨盘转到 Mup 了 —— 以前那条"App 改不了拨盘"
+        //   的说法，是当时没意识到 0x5013 在主机模式下可写。
+        val origMode = conn.getStillCaptureMode()
+        val viaCamera = conn.setStillCaptureMode(PtpConstants.STILL_CAPTURE_MIRROR_UP)
+        runOnUiThread {
+            if (viaCamera) log("释放模式已切到 Mup（机内设定，原值 ${origMode.hexMode()}）")
+            else log("机身不接受 Mup 模式（0x5013=0x8012）—— 按「拨盘已在 Mup」继续")
         }
 
-        // 抬板后等机震消散。分段睡：中途点「停止」能立刻撤
-        val settle = mirrorUpDelaySec.coerceIn(1, 30) * 1000L
-        log("反光板预升：反光板已抬起，等 ${mirrorUpDelaySec} 秒让机震消散")
-        val step = 250L
-        var waited = 0L
-        while (waited < settle) {
-            if (stopAllRequested || conn.abortRequested) {
-                log("反光板预升：等待中被中止 —— 机身会自行放下反光板")
+        try {
+            log("反光板预升：第 1 次快门（抬起反光板）")
+            val first = conn.capture(afAlreadyLocked = false)
+            if (first != PtpConstants.RESP_OK) {
+                log(
+                    "反光板预升：抬板被拒（${first.hex()}）" +
+                        if (viaCamera) "—— 机身刚接受 Mup 模式却拒绝了快门" else "—— 确认释放模式拨盘已转到 Mup"
+                )
                 return MirrorUpResult(first, -1)
             }
-            Thread.sleep(step.coerceAtMost(settle - waited))
-            waited += step
-        }
 
-        log("反光板预升：第 2 次快门（释放曝光）")
-        val second = conn.capture(afAlreadyLocked = true)
-        log("反光板预升：曝光 ${second.hex()}")
-        return MirrorUpResult(first, second)
+            // 抬板后等机震消散。分段睡：中途点「停止」能立刻撤
+            val settle = mirrorUpDelaySec.coerceIn(1, 30) * 1000L
+            log("反光板预升：反光板已抬起，等 ${mirrorUpDelaySec} 秒让机震消散")
+            val step = 250L
+            var waited = 0L
+            while (waited < settle) {
+                if (stopAllRequested || conn.abortRequested) {
+                    log("反光板预升：等待中被中止 —— 机身会自行放下反光板")
+                    return MirrorUpResult(first, -1)
+                }
+                Thread.sleep(step.coerceAtMost(settle - waited))
+                waited += step
+            }
+
+            log("反光板预升：第 2 次快门（释放曝光）")
+            val second = conn.capture(afAlreadyLocked = true)
+            log("反光板预升：曝光 ${second.hex()}")
+            return MirrorUpResult(first, second)
+        } finally {
+            // 释放模式放回去：机身不该一直停在 Mup
+            if (viaCamera && origMode >= 0) {
+                if (!conn.setStillCaptureMode(origMode)) {
+                    log("恢复释放模式失败（原值 ${origMode.hexMode()}）—— 机身会停在 Mup")
+                }
+            }
+        }
+    }
+
+    /** 释放模式值 → 人话，日志里用 */
+    private fun Int.hexMode(): String = when (this) {
+        PtpConstants.STILL_CAPTURE_SELF_TIMER -> "自拍 0x8011"
+        PtpConstants.STILL_CAPTURE_MIRROR_UP -> "Mup 0x8012"
+        PtpConstants.STILL_CAPTURE_LIVE_VIEW -> "取景 0x8013"
+        -999999 -> "读不到"
+        else -> "0x${Integer.toHexString(this).uppercase()}"
     }
 
     // =====================================================================
@@ -7628,6 +7722,12 @@ class MainActivity : AppCompatActivity(), SheetHost {
             selfTimerSec = SELF_TIMER_OPTIONS[pos]
             saveWorkflowSettings()
             refreshWorkflowRows()
+            // 自拍是**机身**执行的：0xD063 写时长、0x5013=0x8011 切自拍模式，
+            // 拍完自动恢复 —— 所以机身会在倒计时期间响提示音、闪对焦辅助灯。
+            log(
+                if (selfTimerSec > 0) "自拍延时 ${selfTimerSec} 秒 —— 由机身执行（0xD063 + 0x5013=0x8011），拍完恢复原释放模式"
+                else "自拍延时已关闭"
+            )
         }
         selfTimerBox = timerBox
         selfTimerGrid = timerGrid

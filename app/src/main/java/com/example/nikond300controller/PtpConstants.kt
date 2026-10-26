@@ -163,7 +163,27 @@ object PtpConstants {
      * 拍摄前临时写成 1，机身在 0x100E 的释放序列里就不会再自动对焦。
      */
     const val FOCUS_MODE_MF = 1
+
+    /**
+     * **释放模式** StillCaptureMode（0x5013）。
+     *
+     * 名字里的 LIVE_VIEW 是历史误命名：它不是"取景开关"，而是机身上那个
+     * 释放模式拨盘（单张 / CH / CL / 自拍 / 反光板预升 / 取景）。
+     *
+     * ⚠️ 官方 §2.4⑤：这个属性的 GetSet 位默认是**只读**，必须先发 `0x90C2(1)`
+     * 切进主机模式才变可写，切回 0 又变回只读。三个被解锁的属性里就有它。
+     * 所以写之前要走 [PtpUsbConnection.setStillCaptureMode]（内含主机模式进出），
+     * 不要直接 setDevicePropValue。
+     */
     const val PROP_NIKON_LIVE_VIEW = 0x5013
+
+    // 0x5013 StillCaptureMode 的取值（官方规格书 §2.4④⑤）
+    const val STILL_CAPTURE_SELF_TIMER = 0x8011   // 自拍
+    const val STILL_CAPTURE_MIRROR_UP = 0x8012    // 反光板预升（Mup）
+    const val STILL_CAPTURE_LIVE_VIEW = 0x8013    // 取景中拍摄（0x90C0 的要求）
+
+    /** 自拍延时秒数（0xD063 SelfTimerDelay，个人设定 c3），普通可写属性 */
+    const val PROP_NIKON_SELF_TIMER_DELAY = 0xD063
     const val PROP_NIKON_SHUTTER_SPEED = 0xD100
 
     // ---------------------------------------------------------------------

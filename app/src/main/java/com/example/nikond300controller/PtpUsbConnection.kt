@@ -1145,6 +1145,106 @@ class PtpUsbConnection(
     var lastEndLiveViewCode: Int = -1
         private set
 
+    // ------------------------------------------------------------------
+    // 释放模式 0x5013（自拍 / 反光板预升 / 取景）
+    //
+    // 官方规格书 §2.4⑤：0x500B / 0x5013 / 0x501C 这三个属性的 GetSet 位
+    // 默认都是**只读**，只有先 0x90C2(1) 切进主机模式才翻成可写，切回 0 又变回只读。
+    // 这就是以前"写 0x5013 一律回 0xA005 Invalid Status"的原因 ——
+    // 不是码写错了，是当时没进主机模式。
+    // ------------------------------------------------------------------
+
+    /** 读释放模式（0x5013）。返回 -999999 = 机身没答。 */
+    fun getStillCaptureMode(): Int = getDevicePropValue(PtpConstants.PROP_NIKON_LIVE_VIEW)
+
+    /**
+     * 写释放模式：**短暂进入主机模式 → 写 0x5013 → 立刻切回机身模式**。
+     *
+     * 值写进去之后即使切回机身模式也还在（那只是把 get/set 位收回只读，
+     * 不是把值恢复），所以调用方写完就能继续发快门。
+     * 需要复原时，自己记下 [getStillCaptureMode] 的返回值再调一次本方法。
+     *
+     * @return true = 写入成功且已成功切回机身模式
+     */
+    fun setStillCaptureMode(mode: Int): Boolean {
+        val enter = setControlMode(1)
+        if (enter != PtpConstants.RESP_OK) {
+            logger(
+                "切主机模式失败（${if (enter < 0) "TIMEOUT" else "0x" + Integer.toHexString(enter).uppercase()}）" +
+                    "—— 0x5013 仍是只读，这一项只能靠机身拨盘"
+            )
+            return false
+        }
+        var ok = false
+        try {
+            ok = setDevicePropValue(
+                PtpConstants.PROP_NIKON_LIVE_VIEW, mode, 2,
+                "释放模式 0x5013 → 0x${Integer.toHexString(mode).uppercase()}", 2
+            )
+            val hex = "0x${Integer.toHexString(mode).uppercase()}"
+            if (ok) {
+                logger("释放模式已设为 $hex")
+            } else {
+                logger(
+                    "写 0x5013=$hex 失败（机身回 " +
+                        "${if (lastSetPropError == 0) "无" else "0x" + Integer.toHexString(lastSetPropError).uppercase()}）"
+                )
+            }
+        } finally {
+            exitHostMode()
+        }
+        return ok
+    }
+
+    /**
+     * 切回机身模式。**必须**执行：主机模式是全局状态，留在里面机身拨盘/按钮的响应
+     * 会跟平时不一样。失败重试两次，仍失败就把这句话记进日志（界面上的日志页能查到）。
+     */
+    private fun exitHostMode() {
+        repeat(3) { i ->
+            if (setControlMode(0) == PtpConstants.RESP_OK) {
+                if (i > 0) logger("已切回机身模式（第 ${i + 1} 次尝试）")
+                return
+            }
+            logger("切回机身模式失败（第 ${i + 1} 次）")
+            try {
+                Thread.sleep(200)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return
+            }
+        }
+        logger("⚠️ 连续 3 次切回机身模式失败 —— 机身可能仍停在主机模式，拔插 USB 可复位")
+    }
+
+    /** 自拍延时秒数（0xD063）。普通可写属性，不走主机模式。 */
+    fun setSelfTimerDelay(seconds: Int): Boolean {
+        val v = seconds.coerceIn(0, 20)
+        // 宽度跟描述符走：同一台机身不同固件对 0xD063 可能报 UINT8 也可能报 UINT16，
+        // 按错的宽度写轻则被拒、重则只写进低字节。读不到描述符就按 UINT8（0..20 秒够用）。
+        val size = try {
+            when (readPropDesc(PtpConstants.PROP_NIKON_SELF_TIMER_DELAY)?.dataType) {
+                0x0001, 0x0002 -> 1
+                0x0003, 0x0004 -> 2
+                null -> 1
+                else -> 4
+            }
+        } catch (_: Exception) {
+            1
+        }
+        val ok = setDevicePropValue(
+            PtpConstants.PROP_NIKON_SELF_TIMER_DELAY, v, size,
+            "自拍延迟 0xD063 → $v 秒（按 $size 字节写）", 2
+        )
+        logger(
+            if (ok) "机身自拍延迟已设为 $v 秒（0xD063）"
+            else "写机身自拍延迟失败（0xD063=$v，${size} 字节）"
+        )
+        return ok
+    }
+
+    fun getSelfTimerDelay(): Int = getDevicePropValue(PtpConstants.PROP_NIKON_SELF_TIMER_DELAY)
+
     /**
      * 开完会话后预先把"取景前置条件"补上。
      *

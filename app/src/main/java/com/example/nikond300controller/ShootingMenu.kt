@@ -31,11 +31,27 @@ object ShootingMenu {
     /** 按机身上「拍摄菜单」的分组顺序排列 */
     val groups: List<Pair<String, List<Item>>> = listOf(
 
+        "拍摄菜单库" to listOf(
+            // 机身上那 4 个拍摄菜单库（A/B/C/D）。切库会连带换掉一整组拍摄设置，
+            // 所以给个说明，别让人以为只是改个名字。
+            Item(
+                PtpConstants.PROP_NIKON_SHOOTING_BANK, "拍摄菜单库",
+                hint = "A/B/C/D 四个库，切换会整套换掉拍摄设置",
+                options = mapOf(0L to "A", 1L to "B", 2L to "C", 3L to "D")
+            )
+        ),
+
         "画质与色彩" to listOf(
             Item(
                 0xD032, "色彩空间",
                 // 真机取值：0 = Adobe RGB、1 = sRGB（D300 只有这两档）
                 options = mapOf(0L to "Adobe RGB", 1L to "sRGB")
+            ),
+            // RAW 压缩方式：D300 只有「无损压缩 / 压缩 / 未压缩」三档，
+            // 但具体编码由机身报，这里只把常见值翻译出来，其余显原始值。
+            Item(
+                PtpConstants.PROP_NIKON_RAW_COMPRESSION, "NEF 压缩类型",
+                hint = "无损压缩 / 压缩 / 未压缩；档位以机身自述为准"
             ),
             Item(
                 0xD14E, "动态 D-Lighting",
@@ -53,6 +69,31 @@ object ShootingMenu {
                 hint = "NEF (RAW) 记录的位深",
                 options = mapOf(0L to "12 bit", 1L to "14 bit")
             )
+        ),
+
+        "白平衡微调" to listOf(
+            // 每个白平衡预设各自有一份微调（琥珀-蓝 / 绿-品红两轴）。
+            // 编码机身自报，界面按值域列档，不硬写"±3"这种名字。
+            Item(PtpConstants.PROP_NIKON_WB_TUNE_AUTO, "自动", hint = "自动白平衡的微调"),
+            Item(PtpConstants.PROP_NIKON_WB_TUNE_INCANDESCENT, "白炽灯"),
+            Item(PtpConstants.PROP_NIKON_WB_TUNE_FLUORESCENT, "荧光灯"),
+            Item(PtpConstants.PROP_NIKON_WB_TUNE_SUNNY, "晴天"),
+            Item(PtpConstants.PROP_NIKON_WB_TUNE_FLASH, "闪光灯"),
+            Item(PtpConstants.PROP_NIKON_WB_TUNE_CLOUDY, "阴天"),
+            Item(PtpConstants.PROP_NIKON_WB_TUNE_SHADE, "阴影"),
+            Item(
+                PtpConstants.PROP_NIKON_WB_TUNE_FLUOR_TYPE, "荧光灯类型",
+                hint = "荧光灯微调的前置子项（灯管类型）"
+            ),
+            Item(
+                PtpConstants.PROP_NIKON_WB_TUNE_COLOR_TEMP, "色温微调",
+                hint = "选择色温（K）时的微调"
+            ),
+            Item(PtpConstants.PROP_NIKON_WB_TUNE_PRESET0, "预设 d-1"),
+            Item(PtpConstants.PROP_NIKON_WB_TUNE_PRESET1, "预设 d-2"),
+            Item(PtpConstants.PROP_NIKON_WB_TUNE_PRESET2, "预设 d-3"),
+            Item(PtpConstants.PROP_NIKON_WB_TUNE_PRESET3, "预设 d-4"),
+            Item(PtpConstants.PROP_NIKON_WB_TUNE_PRESET4, "预设 d-5")
         ),
 
         "降噪" to listOf(

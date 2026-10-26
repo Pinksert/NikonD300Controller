@@ -223,6 +223,72 @@ object PtpConstants {
     const val PROP_NIKON_LENS_APERTURE_MIN = 0xD0E5 // 最大光圈（数值最小）
     const val PROP_NIKON_LENS_APERTURE_MAX = 0xD0E6 // 最小光圈（数值最大）
 
+    // ---------------------------------------------------------------------
+    // 拍摄菜单里的其余项（官方属性表 menu=Shooting，逐个来自 197 项清单）
+    // 值一律走"读描述符 → 按机身自述的合法值出档 → 写 → 回读"，不硬编档位。
+    // ---------------------------------------------------------------------
+    /** 拍摄菜单库（0..3 = A/B/C/D） */
+    const val PROP_NIKON_SHOOTING_BANK = 0xD010
+    /** RAW 压缩类型（无损 / 压缩 / 未压缩，具体编码由机身报） */
+    const val PROP_NIKON_RAW_COMPRESSION = 0xD016
+
+    // 白平衡微调：每个预设各一项，值形如 ±n（琥珀-蓝 / 绿-品红两轴，编码由机身给）
+    const val PROP_NIKON_WB_TUNE_AUTO = 0xD017
+    const val PROP_NIKON_WB_TUNE_INCANDESCENT = 0xD018
+    const val PROP_NIKON_WB_TUNE_FLUORESCENT = 0xD019
+    const val PROP_NIKON_WB_TUNE_SUNNY = 0xD01A
+    const val PROP_NIKON_WB_TUNE_FLASH = 0xD01B
+    const val PROP_NIKON_WB_TUNE_CLOUDY = 0xD01C
+    const val PROP_NIKON_WB_TUNE_SHADE = 0xD01D
+    /** 荧光灯类型（白平衡微调里的子项） */
+    const val PROP_NIKON_WB_TUNE_FLUOR_TYPE = 0xD14F
+    /** 色温直接设定时的微调 */
+    const val PROP_NIKON_WB_TUNE_COLOR_TEMP = 0xD150
+    /** 5 个自定义白平衡预设各自的微调 */
+    const val PROP_NIKON_WB_TUNE_PRESET0 = 0xD151
+    const val PROP_NIKON_WB_TUNE_PRESET1 = 0xD152
+    const val PROP_NIKON_WB_TUNE_PRESET2 = 0xD153
+    const val PROP_NIKON_WB_TUNE_PRESET3 = 0xD154
+    const val PROP_NIKON_WB_TUNE_PRESET4 = 0xD155
+
+    // ---------------------------------------------------------------------
+    // 设置菜单（Setup）：机身「设置菜单」里那批，含 AF 微调
+    // ---------------------------------------------------------------------
+    /** 版权信息 / 拍摄者注释（**字符串属性**，读写走 setDevicePropString） */
+    const val PROP_NIKON_COMMENT = 0xD090
+    /** 是否把上面的注释写进照片 */
+    const val PROP_NIKON_COMMENT_ENABLE = 0xD091
+    /** 方向传感器（自动旋转） */
+    const val PROP_NIKON_ORIENTATION_SENSOR = 0xD092
+    /** 非 CPU 镜头的手动焦距设定 */
+    const val PROP_NIKON_MANUAL_LENS_NO = 0xD093
+
+    // AF 微调（AF Tune）：D300 的招牌功能，逐镜头校正跑焦。
+    // ⚠️ 这一组是「按镜头注册」的：先选镜头号、再写微调量、再保存。
+    //    直接乱写会改变对焦精度，所以界面上把「当前值」和「注册/删除」分开摆。
+    const val PROP_NIKON_AF_TUNE_ENABLE = 0xD094          // 总开关
+    const val PROP_NIKON_AF_TUNE_UNREG_LENS = 0xD095      // 未注册镜头的默认微调
+    const val PROP_NIKON_AF_TUNE_REG_LENS = 0xD096        // 已注册镜头的微调
+    const val PROP_NIKON_AF_TUNE_LENS_INDEX = 0xD097      // 当前镜头在表中的序号
+    const val PROP_NIKON_AF_TUNE_LENS_NO = 0xD098         // 镜头号
+    const val PROP_NIKON_AF_TUNE_INDEX_NUM = 0xD099       // 表里已注册的数量
+    const val PROP_NIKON_AF_TUNE_INDEX_NOW = 0xD09A       // 正在编辑的序号
+    const val PROP_NIKON_AF_TUNE_LENS_DELETE = 0xD09B     // 删除某条注册
+
+    // ---------------------------------------------------------------------
+    // 曝光显示 / 锁定类状态（官方 menu=- 组）
+    // ---------------------------------------------------------------------
+    /** 柔性程序：P 挡下程序线的偏移量 */
+    const val PROP_NIKON_FLEXIBLE_PROGRAM = 0xD109
+    /** 光圈锁定（AE-L 按钮 / 拨盘锁定） */
+    const val PROP_NIKON_FNUMBER_LOCK = 0xD110
+    /** 快门速度锁定 */
+    const val PROP_NIKON_SHUTTER_SPEED_LOCK = 0xD111
+    /** AE-L 状态（只读，1 = 已锁定） */
+    const val PROP_NIKON_AE_LOCK_STATUS = 0xD105
+    /** FV-L 状态（只读，1 = 已锁定） */
+    const val PROP_NIKON_FV_LOCK_STATUS = 0xD106
+
     /**
      * ExposureMeteringMode（0x500B）—— 测光模式。
      *

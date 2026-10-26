@@ -2303,6 +2303,9 @@ class MainActivity : AppCompatActivity(), SheetHost {
     /** 拍摄菜单二级页里每一项的取值视图，键是清单里的项 */
     private val shootRows = LinkedHashMap<ShootingMenu.Item, SheetValueRow>()
 
+    /** 设置菜单的行缓存（结构同 [shootRows]，两个菜单各自独立） */
+    private val setupRows = LinkedHashMap<ShootingMenu.Item, SheetValueRow>()
+
     /**
      * 拍摄菜单（二级页）。
      *
@@ -2382,6 +2385,86 @@ class MainActivity : AppCompatActivity(), SheetHost {
                         "机身一项都没应答（多半正忙，或没在 PC 控制模式），连上后重开一次。"
                     } else {
                         "机身应答 $supported/${ShootingMenu.items.size} 项（可写 $writable 项）· 点一项改档位"
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 设置菜单（Setup）：与拍摄菜单同一套渲染方式 —— 逐项读描述符，
+     * 点一行进通用属性页改档位。含 AF 微调那一组（8 项）。
+     */
+    private fun showSetupMenuSheet() {
+        if (!isConnected) { toast("请先连接相机"); return }
+        val page = buildSheetPage(
+            "设置菜单",
+            "机身上「设置菜单」里的项 · ${SetupMenu.items.size} 项"
+        )
+        val sheetStatus = sheetStatusText("正在读取机身设置…")
+        page.content.addView(sheetStatus)
+        page.show()
+
+        setupRows.clear()
+        for ((title, list) in SetupMenu.groups) {
+            val card = sheetCard(page.content, title)
+            for (item in list) {
+                var rowRef: SheetValueRow? = null
+                val row = sheetValueRow(item.name, "…") { _ ->
+                    if (!isConnected) {
+                        toast("请先连接相机")
+                    } else {
+                        showEnumPropSheet(
+                            item.name,
+                            "0x%04X · 机身「设置菜单」".format(item.code),
+                            item.code,
+                            { v -> SetupMenu.label(item, v) },
+                            item.hint
+                        ) { label -> rowRef?.value?.text = label }
+                    }
+                }
+                rowRef = row
+                card.addView(row.view)
+                setupRows[item] = row
+            }
+        }
+
+        val wasPaused = isPollingPaused
+        isPollingPaused = true
+        thread {
+            var supported = 0
+            var writable = 0
+            try {
+                for (item in SetupMenu.items) {
+                    if (!isConnected) break
+                    val desc = try {
+                        ptpConnection?.readPropDesc(item.code)
+                    } catch (_: Exception) {
+                        null
+                    }
+                    if (desc != null) {
+                        supported++
+                        if (desc.writable) writable++
+                    }
+                    runOnUiThread {
+                        val row = setupRows[item] ?: return@runOnUiThread
+                        if (desc == null) {
+                            row.value.text = "不支持"
+                            row.view.alpha = 0.5f
+                        } else {
+                            val suffix = if (desc.writable) "" else " · 只读"
+                            row.value.text = SetupMenu.label(item, desc.currentValue) + suffix
+                            row.view.alpha = if (desc.writable) 1f else 0.7f
+                        }
+                    }
+                }
+            } finally {
+                isPollingPaused = wasPaused
+                runOnUiThread {
+                    sheetStatus.text = if (supported == 0) {
+                        "机身一项都没应答（多半正忙，或没在 PC 控制模式），连上后重开一次。"
+                    } else {
+                        "机身应答 $supported/${SetupMenu.items.size} 项（可写 $writable 项）· 点一项改档位"
                     }
                 }
             }
@@ -7740,6 +7823,12 @@ class MainActivity : AppCompatActivity(), SheetHost {
             if (!isConnected) toast("请先连接相机") else showShootingMenuSheet()
         }
         csmEntryHost.addView(shootEntry.view)
+
+        // 设置菜单：版权 / 方向传感器 / 非 CPU 镜头 / AF 微调 / 柔性程序 / 光圈快门锁定 / AE-L 状态
+        val setupEntry = sheetValueRow("设置菜单", "${SetupMenu.items.size} 项") { _ ->
+            if (!isConnected) toast("请先连接相机") else showSetupMenuSheet()
+        }
+        csmEntryHost.addView(setupEntry.view)
 
         // ---- NCP 滤镜导入 ----
         // 尼康的「个人设定优化校准」就是装在卡根目录 PICCON01…99.NCP 上的滤镜文件，

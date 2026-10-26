@@ -340,7 +340,12 @@ class GalleryActivity : AppCompatActivity() {
     private val previewCache = object : android.util.LruCache<Int, Bitmap>(
         (Runtime.getRuntime().maxMemory() / 1024 / 8).toInt().coerceAtLeast(16 * 1024)
     ) {
-        override fun sizeOf(key: Int, value: Bitmap): Int = (value.byteCount / 1024).coerceAtLeast(1)
+        // ★ 用尺寸算，不用 byteCount：位图被 recycle 之后 byteCount 归零，
+        // sizeOf 前后返回值不一致，LruCache 会抛
+        // "sizeOf() is reporting inconsistent results"（真机崩过两次）。
+        // width/height 在 recycle 后仍然有效，算出来的值恒定。
+        override fun sizeOf(key: Int, value: Bitmap): Int =
+            (value.width.toLong() * value.height * 4 / 1024).toInt().coerceAtLeast(1)
     }
     private val previewLock = Any()
 
@@ -1496,8 +1501,14 @@ class GalleryActivity : AppCompatActivity() {
         // 预览缓存里存的都是解码后的位图，一张几百 KB 到几 MB，
         // Activity 走了就得还给系统，不能靠 GC 慢慢收
         synchronized(previewLock) {
-            for (b in previewCache.snapshot().values) b.recycle()
+            // ★ 顺序不能反：`evictAll()` 会重新调用 sizeOf 结算占用，而 recycle 过的位图
+            // byteCount 会变成 0 —— 先回收再清空，LruCache 会发现"记录的大小"和
+            // "现在算出来的大小"对不上，直接抛
+            // "sizeOf() is reporting inconsistent results" 把 Activity 销毁流程打断
+            // （真机 23:12 / 23:28 各崩一次）。所以先清表、后回收。
+            val victims = previewCache.snapshot().values.toList()
             previewCache.evictAll()
+            for (b in victims) if (!b.isRecycled) b.recycle()
         }
         // 缩略图缓存同理（注意：网格里的 Entry 引用的是同一批位图对象，
         // 这里整页都要走了才回收，不能在切换相册时清）

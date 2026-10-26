@@ -265,6 +265,14 @@ class PtpUsbConnection(
 
     private val usbLock = Any()
 
+    /**
+     * 每个字符串属性该用哪种编码（true = PTP 标准的 UTF-16LE，false = 裸 ASCII）。
+     *
+     * 读的时候探测出来就记下来，写的时候照着用 —— 免得每次都"先试错再成功"，
+     * 在机身上留下一次无谓的失败响应。D300 的 0x5011 实测是 UTF-16LE。
+     */
+    private val stringIsUtf16 = HashMap<Int, Boolean>()
+
     init {
         connection.claimInterface(usbInterface, true)
         for (i in 0 until usbInterface.endpointCount) {
@@ -765,22 +773,72 @@ class PtpUsbConnection(
     /**
      * 写**字符串**类型的设备属性（PTP DataType = String）—— 最典型的就是 0x5011 DateTime。
      *
-     * 编码是「1 字节字符数 + ASCII + 结尾 0x00」，而**字符数要把结尾那个 null 算进去**；
-     * 空串则是单独一个 0x00。机身缓冲区有限，超长只会换来一个看不懂的回码，这里直接拒掉。
+     * 编码有两种可能，机身之间不统一：
+     *  - **PTP 标准**：1 字节字符数（含结尾 null）+ UTF-16LE 字符（D300 实测就是这种）
+     *  - 少数机身：1 字节字符数 + 裸 ASCII
+     *
+     * 真机日志（2026-10-26 23:38）读 0x5011 回来的是 `"2\0 0\0 2\0 6\0…"` ——
+     * 标准 UTF-16LE 被当 ASCII 解，才会显示成一串乱码、时间解析失败。
+     * 所以这里默认按标准 UTF-16LE 写；失败且该属性还没有编码记录时，退回 ASCII 再试一次，
+     * 成功的那种编码会被记住（[stringIsUtf16]），后续读写都走同一条路。
      */
     fun setDevicePropString(propCode: Int, text: String, maxRetries: Int = 2): Boolean {
-        val ascii = text.toByteArray(Charsets.US_ASCII)
         val codeHex = Integer.toHexString(propCode).uppercase()
-        if (ascii.isEmpty() || ascii.size > 60) {
-            logger("字符串属性 0x$codeHex：长度 ${ascii.size} 不合法，放弃写入")
+        if (text.isEmpty() || text.length > 60) {
+            logger("字符串属性 0x$codeHex：长度 ${text.length} 不合法，放弃写入")
             return false
         }
-        val bytes = ByteArray(1 + ascii.size + 1)
-        bytes[0] = (ascii.size + 1).toByte()     // 含结尾 null 的字符数
-        System.arraycopy(ascii, 0, bytes, 1, ascii.size)
-        bytes[bytes.size - 1] = 0
-        return setDevicePropBytes(propCode, bytes, "Set Prop 0x$codeHex (String)", maxRetries, "\"$text\"")
+        // 有记录就只试那一种；没有记录则标准优先、ASCII 兜底
+        val known = stringIsUtf16[propCode]
+        val order = when (known) {
+            true -> listOf(true)
+            false -> listOf(false)
+            null -> listOf(true, false)
+        }
+        for (utf16 in order) {
+            val bytes = encodePtpString(text, utf16) ?: return false
+            val ok = setDevicePropBytes(
+                propCode, bytes,
+                "Set Prop 0x$codeHex (String ${if (utf16) "UTF-16LE" else "ASCII"})",
+                maxRetries, "\"$text\""
+            )
+            if (ok) {
+                stringIsUtf16[propCode] = utf16
+                return true
+            }
+            if (order.size > 1) {
+                logger("0x$codeHex 按 ${if (utf16) "UTF-16LE" else "ASCII"} 写失败，换另一种编码再试")
+            }
+        }
+        return false
     }
+
+    /**
+     * 按 PTP 规范编码一个 String 属性值：首字节 = 字符数（把结尾 null 算进去）。
+     * 空串返回 null（调用方已挡掉）。
+     */
+    private fun encodePtpString(text: String, utf16: Boolean): ByteArray? {
+        if (text.isEmpty()) return null
+        return if (utf16) {
+            val b = ByteArray(1 + (text.length + 1) * 2)
+            b[0] = (text.length + 1).toByte()
+            for (i in text.indices) {
+                val c = text[i].code
+                b[1 + i * 2] = (c and 0xFF).toByte()
+                b[2 + i * 2] = ((c shr 8) and 0xFF).toByte()
+            }
+            b
+        } else {
+            val ascii = text.toByteArray(Charsets.US_ASCII)
+            val b = ByteArray(1 + ascii.size + 1)
+            b[0] = (ascii.size + 1).toByte()
+            System.arraycopy(ascii, 0, b, 1, ascii.size)
+            b
+        }
+    }
+
+    private fun looksLikeText(s: String): Boolean =
+        s.isNotBlank() && s.none { it.code < 0x20 || it == '\uFFFD' }
 
     /**
      * 读**字符串**类型的设备属性。读不到或者根本不是字符串返回 null。
@@ -806,14 +864,29 @@ class PtpUsbConnection(
             data.get(raw)
 
             val declared = raw[0].toInt() and 0xFF
-            if (declared > 0 && declared <= n - 1) {
-                // declared 个字符里最后一个是 null 终止符，去掉
-                val s = String(raw, 1, declared - 1, Charsets.US_ASCII)
-                if (s.isNotBlank()) {
-                    android.util.Log.d("PTP_RX_PROP", "Prop 0x$codeHex = \"$s\"")
+
+            // ① PTP 标准：首字节 = 字符数（含 null），字符是 UTF-16LE
+            //    长度对得上就按 UTF-16 解 —— D300 的 0x5011 走这条
+            if (declared >= 2 && 1 + declared * 2 <= n) {
+                val s = String(raw, 1, (declared - 1) * 2, Charsets.UTF_16LE)
+                if (looksLikeText(s)) {
+                    stringIsUtf16[propCode] = true
+                    android.util.Log.d("PTP_RX_PROP", "Prop 0x$codeHex = \"$s\"（UTF-16LE）")
                     return s
                 }
             }
+
+            // ② 少数机身直接发 ASCII（字符占 1 字节）
+            if (declared >= 1 && declared <= n - 1) {
+                val s = String(raw, 1, declared - 1, Charsets.US_ASCII)
+                if (looksLikeText(s)) {
+                    stringIsUtf16[propCode] = false
+                    android.util.Log.d("PTP_RX_PROP", "Prop 0x$codeHex = \"$s\"（ASCII）")
+                    return s
+                }
+            }
+
+            // ③ 连长度前缀都没有：裸 ASCII + 0 结尾
             var end = raw.size
             while (end > 0 && raw[end - 1] == 0.toByte()) end--
             val bare = String(raw, 0, end, Charsets.US_ASCII)

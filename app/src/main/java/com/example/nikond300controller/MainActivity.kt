@@ -4095,7 +4095,8 @@ class MainActivity : AppCompatActivity(), SheetHost {
             renderPeakButton()
             log("取景辅助：${modeLabels[idx]}")
         }.view)
-        page.content.addView(modeCard)
+        // sheetCard 自己就把卡片挂进 page.content 了，再 addView 一次会抛
+        // "The specified child already has a parent"（真机 23:12 崩过）
 
         val thrCard = sheetCard(page.content, "阈值")
         thrCard.addView(sliderRow("峰值灵敏度", peakingView.threshold, 20, 240) { v ->
@@ -4106,7 +4107,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
             peakingView.zebraThreshold = v
             prefs.edit().putInt(ZEBRA_THRESHOLD_KEY, v).apply()
         })
-        page.content.addView(thrCard)
+
 
         val colorCard = sheetCard(page.content, "颜色")
         val colors = listOf("红", "黄", "绿", "青", "白")
@@ -4119,7 +4120,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
             prefs.edit().putInt(PEAK_COLOR_KEY, cvals[idx]).apply()
             log("取景辅助颜色：${colors[idx]}")
         }.view)
-        page.content.addView(colorCard)
+
 
         page.content.addView(
             sheetHint("峰值灵敏度调低 → 连弱边缘也上色（但噪点也会一起亮）；调高 → 只留最锐的轮廓。斑马纹亮度调到 255 就是只标死白，245 会提前两档提醒。")
@@ -4193,21 +4194,28 @@ class MainActivity : AppCompatActivity(), SheetHost {
      *
      * 折算很关键：机身给的是"它的墙上时间 + 它的时区"，手机给的是 UTC 瞬时，
      * 两边直接比字符串没有意义，也不该假设机身就是本地时区。
+     *
+     * ⚠️ 但 D300 实测（2026-10-26 23:43 真机日志）返回的是 **`20261026T234309`，
+     * 尾部没有时区**。以前一律按 UTC 解释，于是机身明明跟手机同步，界面却报
+     * "机身时钟快 7 小时"（差的就是 UTC+8）。所以：**带时区才按偏移折算，不带就按本地时区**。
      */
     private fun parsePtpDateTime(raw: String): Long? {
         val s = raw.trim()
         if (s.length < 15) return null
         return try {
-            val cal = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"))
+            var i = 15
+            while (i < s.length && s[i] != '+' && s[i] != '-' && s[i] != 'Z') i++
+            val hasOffset = i < s.length
+            val tz = if (hasOffset) java.util.TimeZone.getTimeZone("UTC")
+            else java.util.TimeZone.getDefault()
+            val cal = java.util.Calendar.getInstance(tz)
             cal.clear()
             cal.set(
                 s.substring(0, 4).toInt(), s.substring(4, 6).toInt() - 1, s.substring(6, 8).toInt(),
                 s.substring(9, 11).toInt(), s.substring(11, 13).toInt(), s.substring(13, 15).toInt()
             )
             var ms = cal.timeInMillis
-            var i = 15
-            while (i < s.length && s[i] != '+' && s[i] != '-' && s[i] != 'Z') i++
-            if (i < s.length && s[i] != 'Z') {
+            if (hasOffset && s[i] != 'Z') {
                 val sign = if (s[i] == '-') -1 else 1
                 val rest = s.substring(i + 1).split(":")
                 val oh = rest.getOrNull(0)?.toIntOrNull() ?: 0
@@ -4248,7 +4256,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
         val (phoneRow, phoneValue) = sheetInfoRow("手机时间", "")
         val (diffRow, diffValue) = sheetInfoRow("偏差", "--")
         card.addView(bodyRow); card.addView(phoneRow); card.addView(diffRow)
-        page.content.addView(card)
+
 
         phoneValue.text = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
             .format(java.util.Date())
@@ -4559,7 +4567,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
             val n = getSharedPreferences(name, Context.MODE_PRIVATE).all.size
             card.addView(sheetInfoRow(desc, "$n 项").first)
         }
-        page.content.addView(card)
+
 
         val exportRow = sheetValueRow("导出备份", "存成 .json") { _ ->
             runCatching { backupExportLauncher.launch("D300备份_${

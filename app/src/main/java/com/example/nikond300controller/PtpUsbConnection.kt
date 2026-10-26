@@ -1396,25 +1396,6 @@ class PtpUsbConnection(
         return ok
     }
 
-    /** AF 区域模式 0..5：单点 / 动态9 / 动态21 / 动态51 / 3D跟踪 / 自动区域 */
-    fun setAfAreaMode(mode: Int): Boolean {
-        val ok = setNikonProp(PtpConstants.PROP_NIKON_AF_AREA_MODE, mode.coerceIn(0, 5))
-        logger("设置 AF 区域模式=$mode ${if (ok) "成功" else "失败（0x${Integer.toHexString(lastSetPropError).uppercase()}）"}")
-        return ok
-    }
-
-    /**
-     * 把对焦相关属性的描述符读成人话，一行一个。
-     *
-     * 0xD08E 是按"紧邻 0xD08D + 值域 6 档"推出来的，官方模块里没有字符串直接指认它。
-     * 真机跑一次这个探测，看机身自己报的值域对不对得上，就能复核。
-     */
-    fun probeAfProperties(): List<String> = listOf(
-        "0xD108 对焦点" to PtpConstants.PROP_NIKON_AF_AREA_POINT,
-        "0xD08D AF点数" to PtpConstants.PROP_NIKON_AF_POINT_COUNT,
-        "0xD08E AF区域模式" to PtpConstants.PROP_NIKON_AF_AREA_MODE
-    ).map { (name, code) -> "$name：${describeProp(code)}" }
-
     /**
      * 读实时取景模式（手持 / 三脚架）。
      *

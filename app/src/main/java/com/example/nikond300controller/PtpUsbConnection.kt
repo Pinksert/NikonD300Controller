@@ -1158,6 +1158,32 @@ class PtpUsbConnection(
     fun getStillCaptureMode(): Int = getDevicePropValue(PtpConstants.PROP_NIKON_LIVE_VIEW)
 
     /**
+     * 在**主机模式**下写任意属性，写完立刻切回机身模式。
+     *
+     * 官方 §2.4⑤ 里那三个默认只读的属性（0x500B 测光 / 0x5013 释放模式 /
+     * 0x501C AF 区域模式）都走这条路。其它属性也能用，但没必要 ——
+     * 多一次 0x90C2 往返就是多两秒。
+     */
+    fun setPropInHostMode(code: Int, value: Int, size: Int? = null): Boolean {
+        val enter = setControlMode(1)
+        if (enter != PtpConstants.RESP_OK) {
+            logger(
+                "切主机模式失败（${if (enter < 0) "TIMEOUT" else "0x" + Integer.toHexString(enter).uppercase()}）" +
+                    "—— 0x${Integer.toHexString(code).uppercase()} 仍是只读"
+            )
+            return false
+        }
+        try {
+            return setDevicePropValue(
+                code, value, size,
+                "主机模式写 0x${Integer.toHexString(code).uppercase()} = $value", 2
+            )
+        } finally {
+            exitHostMode()
+        }
+    }
+
+    /**
      * 写释放模式：**短暂进入主机模式 → 写 0x5013 → 立刻切回机身模式**。
      *
      * 值写进去之后即使切回机身模式也还在（那只是把 get/set 位收回只读，
@@ -1167,31 +1193,15 @@ class PtpUsbConnection(
      * @return true = 写入成功且已成功切回机身模式
      */
     fun setStillCaptureMode(mode: Int): Boolean {
-        val enter = setControlMode(1)
-        if (enter != PtpConstants.RESP_OK) {
+        val ok = setPropInHostMode(PtpConstants.PROP_NIKON_LIVE_VIEW, mode, 2)
+        val hex = "0x${Integer.toHexString(mode).uppercase()}"
+        if (ok) {
+            logger("释放模式已设为 $hex")
+        } else {
             logger(
-                "切主机模式失败（${if (enter < 0) "TIMEOUT" else "0x" + Integer.toHexString(enter).uppercase()}）" +
-                    "—— 0x5013 仍是只读，这一项只能靠机身拨盘"
+                "写 0x5013=$hex 失败（机身回 " +
+                    "${if (lastSetPropError == 0) "无" else "0x" + Integer.toHexString(lastSetPropError).uppercase()}）"
             )
-            return false
-        }
-        var ok = false
-        try {
-            ok = setDevicePropValue(
-                PtpConstants.PROP_NIKON_LIVE_VIEW, mode, 2,
-                "释放模式 0x5013 → 0x${Integer.toHexString(mode).uppercase()}", 2
-            )
-            val hex = "0x${Integer.toHexString(mode).uppercase()}"
-            if (ok) {
-                logger("释放模式已设为 $hex")
-            } else {
-                logger(
-                    "写 0x5013=$hex 失败（机身回 " +
-                        "${if (lastSetPropError == 0) "无" else "0x" + Integer.toHexString(lastSetPropError).uppercase()}）"
-                )
-            }
-        } finally {
-            exitHostMode()
         }
         return ok
     }

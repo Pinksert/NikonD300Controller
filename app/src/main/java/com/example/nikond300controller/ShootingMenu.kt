@@ -25,7 +25,13 @@ object ShootingMenu {
         val name: String,
         /** 说明 / 单位提示，显示在二级页的副标题里 */
         val hint: String = "",
-        val options: Map<Long, String> = emptyMap()
+        val options: Map<Long, String> = emptyMap(),
+        /**
+         * 这一项默认报只读，**要先切主机模式才可写**（官方 §2.4⑤ 那三个属性：
+         * 0x500B 测光 / 0x5013 释放模式 / 0x501C AF 区域模式）。
+         * 为 true 时写入会走 0x90C2(1) → 写 → 0x90C2(0)。
+         */
+        val hostMode: Boolean = false
     )
 
     /** 按机身上「拍摄菜单」的分组顺序排列 */
@@ -94,6 +100,16 @@ object ShootingMenu {
             Item(PtpConstants.PROP_NIKON_WB_TUNE_PRESET2, "预设 d-3"),
             Item(PtpConstants.PROP_NIKON_WB_TUNE_PRESET3, "预设 d-4"),
             Item(PtpConstants.PROP_NIKON_WB_TUNE_PRESET4, "预设 d-5")
+        ),
+
+        "自动对焦" to listOf(
+            // AF 区域模式：官方码是标准 PTP 的 0x501C（不是那个已证伪的 0xD08E）。
+            // 它默认报只读，写入要先切主机模式 —— hostMode = true 就是让 App 自己切。
+            Item(
+                PtpConstants.PROP_FOCUS_METERING_MODE, "AF 区域模式",
+                hint = "单点 / 动态区域 / 自动区域。写入时 App 会自动切主机模式（0x90C2(1)）再切回",
+                hostMode = true
+            )
         ),
 
         "降噪" to listOf(

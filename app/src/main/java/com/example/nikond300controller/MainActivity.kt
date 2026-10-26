@@ -2339,7 +2339,9 @@ class MainActivity : AppCompatActivity(), SheetHost {
                             item.name,
                             "0x%04X · 机身「拍摄菜单」".format(item.code),
                             item.code,
-                            { v -> ShootingMenu.label(item, v) }
+                            { v -> ShootingMenu.label(item, v) },
+                            item.hint,
+                            item.hostMode
                         ) { label -> rowRef?.value?.text = label }
                     }
                 }
@@ -2419,7 +2421,8 @@ class MainActivity : AppCompatActivity(), SheetHost {
                             "0x%04X · 机身「设置菜单」".format(item.code),
                             item.code,
                             { v -> SetupMenu.label(item, v) },
-                            item.hint
+                            item.hint,
+                            item.hostMode
                         ) { label -> rowRef?.value?.text = label }
                     }
                 }
@@ -6928,20 +6931,22 @@ class MainActivity : AppCompatActivity(), SheetHost {
                 thread {
                     try {
                         isPollingPaused = true
-                        val ok = ptpConnection?.setDevicePropValue(
-                            PtpConstants.PROP_METERING_MODE, code, size = 2
+                        // 测光模式 0x500B 默认报只读，官方 §2.4⑤ 说切主机模式后可写 ——
+                        // 写的时候临时 0x90C2(1)，写完立刻切回，机身状态不会被留在主机模式
+                        val ok = ptpConnection?.setPropInHostMode(
+                            PtpConstants.PROP_METERING_MODE, code, 2
                         ) ?: false
                         runOnUiThread {
                             if (ok) {
                                 status.text = "已设为 $label"
-                                log("测光模式已设为 $label")
+                                log("测光模式已设为 $label（主机模式写入）")
                                 meteringValue.text = label
                                 currentMetering = code
                                 page.dialog.dismiss()
                             } else {
-                                // 只读是这台机身的常态：把"该去哪儿改"说清楚，别让人反复点
-                                status.text = "机身没有接受 $label —— 测光模式请用机身上的测光选择转盘切换"
-                                log("测光模式写入被机身拒绝（0x500B 只读）")
+                                // 主机模式也不行才退回到"用转盘"，别让人反复点
+                                status.text = "机身没有接受 $label —— 已尝试切主机模式仍被拒，请用机身上的测光选择转盘"
+                                log("测光模式写入被拒（主机模式下 0x500B 仍不可写）")
                             }
                         }
                         Thread.sleep(300)
@@ -6956,9 +6961,9 @@ class MainActivity : AppCompatActivity(), SheetHost {
         )
         page.content.addView(status)
         page.content.addView(
-            sheetHint("这台 D300 通过 PTP 把测光模式（0x500B）报成只读，App 改不了档 —— " +
-                "这一页只用来看清机身现在是哪一档。要切换请拨机身上的测光选择转盘，" +
-                "机身一变，参数页和这里都会跟着更新。")
+            sheetHint("测光模式（0x500B）默认报只读，但官方规格书 §2.4⑤ 写明：切进主机模式" +
+                "（0x90C2(1)）之后它就可写。所以点一档时 App 会临时切主机模式写入、写完立刻切回。" +
+                "如果仍被机身拒绝，就只能拨机身上的测光选择转盘 —— 转盘一动，这里和参数页都会跟着更新。")
         )
         page.show()
     }
@@ -7001,6 +7006,11 @@ class MainActivity : AppCompatActivity(), SheetHost {
         labeler: (Long) -> String,
         /** 底部说明；空串表示不显示（不是每项都需要一段解释） */
         hint: String = "",
+        /**
+         * 写入时先切主机模式（0x90C2(1)）。0x500B 测光 / 0x501C AF 区域模式
+         * 这两个属性默认报只读，只有主机模式下才可写 —— 官方 §2.4⑤。
+         */
+        hostMode: Boolean = false,
         onCurrentLabel: (String) -> Unit
     ) {
         if (!isConnected) { toast("请先连接相机"); return }
@@ -7042,16 +7052,26 @@ class MainActivity : AppCompatActivity(), SheetHost {
                     labels = values.map { labeler(it) },
                     initialSelected = values.indexOf(desc.currentValue)
                 ) { idx ->
-                    if (!desc.writable) {
+                    if (!desc.writable && !hostMode) {
                         toast("机身把这一项标为只读，只能在机身上改")
                     } else {
-                        writePropValue(propCode, values[idx], size, labeler(values[idx]), sheetStatus, onCurrentLabel)
+                        writePropValue(
+                            propCode, values[idx], size, labeler(values[idx]),
+                            sheetStatus, onCurrentLabel, hostMode
+                        )
                     }
                 }
                 gridHost.addView(grid.view)
                 // 只读项要明说：否则用户会一直点档位、以为 App 坏了
                 if (!desc.writable) {
-                    card.addView(sheetHint("⚠️ 机身把这项标为只读（GetSet=只读）：这里只能显示当前档位，改档请用机身上的拨盘/按键。"))
+                    if (hostMode) {
+                        card.addView(sheetHint(
+                            "机身把这一项默认报只读 —— 写入时 App 会自动切到主机模式" +
+                                "（0x90C2(1)）、写完立刻切回。若仍被拒，说明这台机身不允许远程改，请用机身上的按键。"
+                        ))
+                    } else {
+                        card.addView(sheetHint("⚠️ 机身把这项标为只读（GetSet=只读）：这里只能显示当前档位，改档请用机身上的拨盘/按键。"))
+                    }
                 }
             }
         }
@@ -7064,7 +7084,8 @@ class MainActivity : AppCompatActivity(), SheetHost {
         size: Int,
         label: String,
         sheetStatus: TextView,
-        onCurrentLabel: (String) -> Unit
+        onCurrentLabel: (String) -> Unit,
+        hostMode: Boolean = false
     ) {
         /** 这行状态文字平时是隐藏的（档位块已经标了当前值），只在写的时候冒出来 */
         fun show(msg: String) {
@@ -7074,8 +7095,12 @@ class MainActivity : AppCompatActivity(), SheetHost {
             }
         }
         thread {
-            show("正在写入 $label …")
-            val ok = ptpConnection?.setDevicePropValue(code, value.toInt(), size = size) ?: false
+            show(if (hostMode) "正在切主机模式并写入 $label …" else "正在写入 $label …")
+            val ok = if (hostMode) {
+                ptpConnection?.setPropInHostMode(code, value.toInt(), size) ?: false
+            } else {
+                ptpConnection?.setDevicePropValue(code, value.toInt(), size = size) ?: false
+            }
             Thread.sleep(300)
             val readBack = ptpConnection?.getDevicePropValue(code) ?: -999999
             // getDevicePropValue 一律按无符号还原（1 字节 0..255），

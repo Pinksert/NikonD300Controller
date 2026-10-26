@@ -116,8 +116,9 @@ class FocusBoxView(context: Context, attrs: AttributeSet?) : View(context, attrs
     /**
      * 构图网格（「取景框显示」）：叠在实时取景画面上的辅助线。
      *
-     * 纯 App 侧的显示设置 —— 机身那条（个人设定 d2「取景器网格显示」）的属性码
-     * 至今没确认下来（d 区几个候选码互相撞车），所以这里不碰机身，只画在画面上。
+     * **纯 App 侧的叠加层，协议里没有对应能力。** 别跟机身那个「取景器网格显示」混为一谈：
+     * 后者是个人设定 d2 = **0xD16C GridDisplay**（官方属性表 menu=d2），管的是**光学取景器**
+     * 里那几条刻线，跟这里画在手机屏幕上的线是两套东西，App 也不去写它。
      */
     enum class GridStyle { OFF, THIRDS, THIRDS_CENTER, DENSE }
 

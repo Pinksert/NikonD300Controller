@@ -7507,14 +7507,16 @@ class MainActivity : AppCompatActivity(), SheetHost {
         }
         eqList.addView(imageQualityRow.view)
 
-        // 记录媒介：拍完的照片到底写卡还是留在机身缓存，用户得能看见、能切
+        // 记录媒介：官方规格书明文——这个属性**只影响"用手按机身快门"时照片去哪**；
+        // 用命令拍摄时（0x100E）恒定落卡，与它无关。所以这一行不是"App 拍照的开关"，
+        // 早先的说明写成"切完拍一张看不到就换一档"，是把原因和结果搞反了，已改。
         mediaRow = sheetValueRow("记录媒介", "待读取") { _ ->
             if (!isConnected) toast("请先连接相机") else showEnumPropSheet(
-                "记录媒介", "0xD10B · 照片写卡还是留在机身缓存",
+                "记录媒介", "0xD10B · 只管机身快门，管不到 App 拍摄",
                 PtpConstants.PROP_NIKON_RECORDING_MEDIA, ::mediaLabel,
-                "1 = 存储卡（实测落卡）；0 = 机身缓存。" +
-                    "如果切完拍一张、回到相册看不到新照片，就把这一项切到另一个值再试 —— " +
-                    "排查\"拍了但卡里没有\"时先看这里。"
+                "官方规格书：这一项只在你「用手按机身快门」时决定照片写哪儿。" +
+                    "App 里按快门走 0x100E，恒定写存储卡，切换它不会改变 App 拍的照片去向。" +
+                    "所以别再拿它当「拍了但卡里没有」的开关 —— 那种情况先查卡是否写满、是否写保护。"
             ) { label -> mediaRow.value.text = label }
         }
         eqList.addView(mediaRow.view)

@@ -876,7 +876,42 @@ class PtpUsbConnection(
                 }
             }
 
-            // ② 少数机身直接发 ASCII（字符占 1 字节）
+            // ② 字符数含 null、但机身**没发**结尾那两个 0 字节（0xD406 会话发起者版本就是这种：
+            //    48 字符的串只有 97 字节里的前 96 个，按 ① 判定会差两个字节，于是掉进 ASCII 分支
+            //    解出一串"0W纮i纮n…"的乱码）。
+            if (declared >= 2 && 1 + (declared - 1) * 2 <= n) {
+                val s = String(raw, 1, (declared - 1) * 2, Charsets.UTF_16LE)
+                if (looksLikeText(s)) {
+                    stringIsUtf16[propCode] = true
+                    android.util.Log.d("PTP_RX_PROP", "Prop 0x$codeHex = \"$s\"（UTF-16LE，无结尾 null）")
+                    return s
+                }
+            }
+
+            // ③ 有些字段把长度写成**字节数**、而且写得比真实内容还短（0xD406 会话发起者版本：
+            //    声明 48，实际后面跟着一整串 UTF-16），前三条都判不过，最后掉进 ASCII 分支
+            //    把 UTF-16 的字节当字符解，得到一个带乱码的串。
+            //    做法：把长度前缀之后的**全部**字节按 UTF-16LE 解，去掉结尾的 0 字符，
+            //    再确认高位字节基本为 0（说明确实是 UTF-16 而不是二进制垃圾）才算数。
+            if (declared >= 4 && declared % 2 == 0 && 1 + declared <= n) {
+                val body = raw.copyOfRange(1, n)
+                var end = body.size
+                while (end >= 2 && body[end - 1] == 0.toByte() && body[end - 2] == 0.toByte()) end -= 2
+                val pairCnt = end / 2
+                if (pairCnt >= 4) {
+                    val zeroHigh = (0 until pairCnt).count { body[it * 2 + 1] == 0.toByte() }
+                    if (zeroHigh >= pairCnt - 1) {
+                        val s = String(body, 0, pairCnt * 2, Charsets.UTF_16LE).trim('\u0000', ' ')
+                        if (looksLikeText(s)) {
+                            stringIsUtf16[propCode] = true
+                            android.util.Log.d("PTP_RX_PROP", "Prop 0x$codeHex = \"$s\"（UTF-16LE，长度按字节数）")
+                            return s
+                        }
+                    }
+                }
+            }
+
+            // ④ 少数机身直接发 ASCII（字符占 1 字节）
             if (declared >= 1 && declared <= n - 1) {
                 val s = String(raw, 1, declared - 1, Charsets.US_ASCII)
                 if (looksLikeText(s)) {
@@ -886,10 +921,26 @@ class PtpUsbConnection(
                 }
             }
 
-            // ③ 连长度前缀都没有：裸 ASCII + 0 结尾
+            // ⑤ 连长度前缀都没有：先看字节像不像 UTF-16LE（高位字节几乎全是 0x00），
+            //    像就按 UTF-16 解 —— 直接当 ASCII 解会得到"字母+空字符"交错的乱码，看着像乱码串，
+            //    但 looksLikeText 会放过它（里面没有控制字符），所以这个判断顺序很重要。
+            val pairs = raw.size / 2
+            if (pairs >= 4) {
+                val zeroHigh = (0 until pairs).count { raw[it * 2 + 1] == 0.toByte() }
+                if (zeroHigh >= pairs - 1) {
+                    val s = String(raw, 0, pairs * 2, Charsets.UTF_16LE).trim('\u0000', ' ')
+                    if (looksLikeText(s)) {
+                        stringIsUtf16[propCode] = true
+                        android.util.Log.d("PTP_RX_PROP", "Prop 0x$codeHex = \"$s\"（裸 UTF-16LE）")
+                        return s
+                    }
+                }
+            }
+
+            // ⑥ 最后才当裸 ASCII + 0 结尾
             var end = raw.size
             while (end > 0 && raw[end - 1] == 0.toByte()) end--
-            val bare = String(raw, 0, end, Charsets.US_ASCII)
+            val bare = String(raw, 0, end, Charsets.US_ASCII).trim('\u0000')
             android.util.Log.d("PTP_RX_PROP", "Prop 0x$codeHex（裸 ASCII）= \"$bare\"")
             return bare.ifBlank { null }
         } catch (e: Exception) {

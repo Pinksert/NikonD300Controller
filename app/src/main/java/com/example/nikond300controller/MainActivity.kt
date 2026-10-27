@@ -7549,16 +7549,35 @@ class MainActivity : AppCompatActivity(), SheetHost {
     /**
      * 「机身状态」页的条目：标签 + 属性码 + 值格式化。
      *
-     * 全部是官方属性表里「菜单归属」为空的那批只读状态量。官方只给名字、不给值域，
-     * 所以除了两个明确是布尔的存在位（外接闪光灯 / 外接电源），其余一律显示机身原始值 ——
-     * 猜错一个状态码的含义，比露出一个数字更容易误导人。
+     * 值表全部来自官方规格书 `_sdk/txt/D300UsbPtpE_01.txt` 的 5.5.x 各节 ——
+     * **不是猜的**：闪光同步 §5.5.1.9、机身方向 §5.5.6.1、曝光显示 §5.5.6.12、
+     * 曝光指示 §5.5.6.13、信息屏错误 §5.5.6.16、闪光灯 §5.5.8.1–5.5.8.5、
+     * CCD §5.5.11.1、USB 速度 §5.5.12.1、设备类型 §5.5.15.2。
+     * 只有表外的值才露原始码 —— 那说明我们对协议的假设错了，该看见。
+     *
+     * @param stringProp 字符串属性（CCD 编号、会话发起者版本）走 0x1015 的字符串通道，
+     *   按数值读会一律得到 -999999，伪装成「不支持」。
      */
-    private val bodyStatusItems: List<Triple<String, Int, (Int) -> String>> by lazy {
-        val rawFmt: (Int) -> String = { v -> "值 $v" }
+    private data class BodyStatusItem(
+        val label: String,
+        val code: Int,
+        val stringProp: Boolean = false,
+        val fmt: (Int) -> String = { v -> "值 $v" }
+    )
+
+    /** 1/6 EV 为单位的补正值 → "+0.3 EV" 这种（官方 §5.5.6.13 / §5.5.8.5 都写明 1/6 EV） */
+    private fun sixthEv(v: Int): String {
+        // 这两条属性都是 INT8。0x1015 读回来的字节没有类型信息，负值会变成 250 这类无符号数，
+        // 直接除 6 就成了 +41.7 EV —— 先按有符号字节还原再换算。
+        val signed = if (v in 128..255) v - 256 else v
+        val ev = signed / 6.0
+        return (if (ev > 0) "+%.1f" else "%.1f").format(ev) + " EV"
+    }
+
+    private val bodyStatusItems: List<BodyStatusItem> by lazy {
         listOf(
-            // 闪光同步模式：官方 §5.5.1.9 给了完整值表（0x0004 / 0x8010–0x8013），
-            // 真机默认就是 0x8010（普通），照表译成中文
-            Triple("闪光模式", PtpConstants.PROP_FLASH_MODE) { v ->
+            // ---- 闪光灯（§5.5.1.9 / §5.5.8.x）----
+            BodyStatusItem("闪光模式", PtpConstants.PROP_FLASH_MODE) { v ->
                 when (v) {
                     0x0004 -> "防红眼"
                     0x8010 -> "普通（前帘同步）"
@@ -7568,24 +7587,97 @@ class MainActivity : AppCompatActivity(), SheetHost {
                     else -> "值 $v"
                 }
             },
-            Triple("外接闪光灯", PtpConstants.PROP_NIKON_EXT_SPEEDLIGHT_EXIST) { v ->
-                if (v == 0) "未接" else "已接（闪光灯）"
+            BodyStatusItem("外接闪光灯", PtpConstants.PROP_NIKON_EXT_SPEEDLIGHT_EXIST) { v ->
+                when (v) {
+                    0 -> "未接"
+                    1 -> "已接（闪光灯）"
+                    else -> "值 $v"
+                }
             },
-            Triple("闪光灯状态", PtpConstants.PROP_NIKON_EXT_SPEEDLIGHT_STATUS, rawFmt),
-            Triple("闪光灯种类", PtpConstants.PROP_NIKON_EXT_SPEEDLIGHT_SORT, rawFmt),
-            Triple("闪光补偿（0xD124）", PtpConstants.PROP_NIKON_FLASH_COMPENSATION, rawFmt),
-            Triple("闪光灯工作模式", PtpConstants.PROP_NIKON_NEW_EXT_SPEEDLIGHT_MODE, rawFmt),
-            Triple("机身方向", PtpConstants.PROP_NIKON_ORIENTATION, rawFmt),
-            Triple("缓冲区可拍", PtpConstants.PROP_BURST_NUMBER) { v -> "$v 张" },
-            Triple("外接电源", PtpConstants.PROP_NIKON_EXTERNAL_DC_IN) { v ->
-                if (v == 0) "未接（用电池）" else "已接外接电源"
+            BodyStatusItem("闪光灯就绪", PtpConstants.PROP_NIKON_EXT_SPEEDLIGHT_STATUS) { v ->
+                when (v) {
+                    0 -> "未充电"
+                    1 -> "就绪"
+                    else -> "值 $v"
+                }
             },
-            Triple("曝光显示状态", PtpConstants.PROP_NIKON_EXPOSURE_DISPLAY_STATUS, rawFmt),
-            Triple("曝光指示状态", PtpConstants.PROP_NIKON_EXPOSURE_INDICATE_STATUS, rawFmt),
-            Triple("信息屏错误", PtpConstants.PROP_NIKON_INFO_DISPLAY_ERROR, rawFmt),
-            Triple("USB 速度", PtpConstants.PROP_NIKON_USB_SPEED, rawFmt),
-            Triple("CCD 编号", PtpConstants.PROP_NIKON_CCD_NUMBER, rawFmt),
-            Triple("设备类型", PtpConstants.PROP_NIKON_PERCEIVED_DEVICE_TYPE, rawFmt)
+            BodyStatusItem("闪光灯通信", PtpConstants.PROP_NIKON_EXT_SPEEDLIGHT_SORT) { v ->
+                when (v) {
+                    0 -> "非通信"
+                    1 -> "保留（D300 不用）"
+                    2 -> "新通信"
+                    else -> "值 $v"
+                }
+            },
+            BodyStatusItem("闪光补偿", PtpConstants.PROP_NIKON_FLASH_COMPENSATION) { v -> sixthEv(v) },
+            BodyStatusItem("闪光灯模式", PtpConstants.PROP_NIKON_NEW_EXT_SPEEDLIGHT_MODE) { v ->
+                when (v) {
+                    0 -> "关闭"
+                    1 -> "i-TTL-BL"
+                    2 -> "i-TTL"
+                    3 -> "光圈联动自动"
+                    4 -> "外置自动"
+                    5 -> "手动（距离优先）"
+                    6 -> "手动"
+                    7 -> "多灯闪光"
+                    else -> "值 $v"
+                }
+            },
+
+            // ---- 机身姿态与供电 ----
+            BodyStatusItem("机身方向", PtpConstants.PROP_NIKON_ORIENTATION) { v ->
+                when (v) {
+                    0 -> "横拍（或未固定）"
+                    1 -> "竖拍（手柄朝上）"
+                    2 -> "竖拍（手柄朝下）"
+                    3 -> "横拍（倒置）"
+                    else -> "值 $v"
+                }
+            },
+            BodyStatusItem("缓冲区可拍", PtpConstants.PROP_BURST_NUMBER) { v -> "$v 张" },
+            BodyStatusItem("外接电源", PtpConstants.PROP_NIKON_EXTERNAL_DC_IN) { v ->
+                when (v) {
+                    0 -> "未接（用电池）"
+                    1 -> "已接外接电源"
+                    else -> "值 $v"
+                }
+            },
+
+            // ---- 曝光显示（§5.5.6.12）：值是「快门状态 × 光圈状态」的 3×3 组合 ----
+            BodyStatusItem("曝光显示", PtpConstants.PROP_NIKON_EXPOSURE_DISPLAY_STATUS) { v ->
+                val shutter = listOf("正常", "偏低", "偏高")
+                val aperture = listOf("正常", "偏低", "偏高")
+                if (v in 0..8) {
+                    "快门${shutter[v / 3]} · 光圈${aperture[v % 3]}"
+                } else {
+                    "值 $v"
+                }
+            },
+            BodyStatusItem("曝光指示", PtpConstants.PROP_NIKON_EXPOSURE_INDICATE_STATUS) { v -> sixthEv(v) },
+            BodyStatusItem("信息屏报错", PtpConstants.PROP_NIKON_INFO_DISPLAY_ERROR) { v ->
+                when (v) {
+                    0 -> "无"
+                    1 -> "有错误提示"
+                    else -> "值 $v"
+                }
+            },
+
+            // ---- 连接与身份 ----
+            BodyStatusItem("USB 速度", PtpConstants.PROP_NIKON_USB_SPEED) { v ->
+                when (v) {
+                    0 -> "全速（12 Mbps）"
+                    1 -> "高速（480 Mbps）"
+                    else -> "值 $v"
+                }
+            },
+            BodyStatusItem("CCD 编号", PtpConstants.PROP_NIKON_CCD_NUMBER, stringProp = true),
+            BodyStatusItem("设备类型", PtpConstants.PROP_NIKON_PERCEIVED_DEVICE_TYPE) { v ->
+                when (v) {
+                    1 -> "数码相机"
+                    else -> "值 $v"
+                }
+            },
+            BodyStatusItem("会话发起者", PtpConstants.PROP_NIKON_SESSION_INITIATOR_VERSION, stringProp = true)
         )
     }
 
@@ -7604,14 +7696,14 @@ class MainActivity : AppCompatActivity(), SheetHost {
         val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val valueViews = ArrayList<TextView>()
         for (item in bodyStatusItems) {
-            val (row, value) = sheetInfoRow(item.first, "…")
+            val (row, value) = sheetInfoRow(item.label, "…")
             list.addView(row)
             valueViews.add(value)
         }
         card.addView(list)
         card.addView(sheetHint(
-            "这些是机身自己报的状态，改不了。除了「外接闪光灯 / 外接电源」两个存在位，" +
-                "其余显示的都是机身原始值 —— 官方协议只给了属性名，没给每个数值的含义。\n" +
+            "这些是机身自己报的状态，改不了。每个数值的中文含义都取自官方规格书的值表，" +
+                "表外的值才显示原始码。\n" +
                 "读不到写「不支持」，说明这台机身不应答那个码。"
         ))
         page.show()
@@ -7623,17 +7715,14 @@ class MainActivity : AppCompatActivity(), SheetHost {
             try {
                 for ((idx, item) in bodyStatusItems.withIndex()) {
                     if (!isConnected) break
-                    val code = item.second
-                    val fmt = item.third
                     val text = try {
-                        // 0xD406 是版本信息，多半是字符串属性 —— 先按字符串读，读不到再按数值
-                        if (code == PtpConstants.PROP_NIKON_SESSION_INITIATOR_VERSION) {
-                            ptpConnection?.getDevicePropString(code)?.takeIf { it.isNotBlank() }
-                                ?: ptpConnection?.getDevicePropValue(code)?.let { fmt(it) }
+                        if (item.stringProp) {
+                            // 字符串属性（CCD 编号 / 会话发起者版本）：按数值读永远拿不到值
+                            ptpConnection?.getDevicePropString(item.code)?.trim()?.takeIf { it.isNotEmpty() }
                                 ?: "不支持"
                         } else {
-                            val v = ptpConnection?.getDevicePropValue(code) ?: -999999
-                            if (v == -999999) "不支持" else fmt(v)
+                            val v = ptpConnection?.getDevicePropValue(item.code) ?: -999999
+                            if (v == -999999) "不支持" else item.fmt(v)
                         }
                     } catch (_: Exception) {
                         "读取失败"
@@ -7702,7 +7791,8 @@ class MainActivity : AppCompatActivity(), SheetHost {
         // 机身状态：15 条只读状态量单独一页（一次要问机身十几趟，不该拖慢这一页）
         val statEntry = sheetValueRow(
             "机身状态（只读）",
-            "闪光灯 / 方向 / 缓冲 · ${bodyStatusItems.size} 项"
+            // 值列很窄，写「闪光灯 / 方向 / 缓冲 · 16 项」会被截成「… · 16」
+            "${bodyStatusItems.size} 项 · 只读"
         ) { _ ->
             if (!isConnected) toast("请先连接相机") else showBodyStatusSheet()
         }

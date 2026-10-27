@@ -309,7 +309,6 @@ class MainActivity : AppCompatActivity(), SheetHost {
     private lateinit var mediaRow: SheetValueRow
     @Volatile private var currentMetering = -999999
     @Volatile private var currentFlashComp = -999999
-    @Volatile private var currentImageSize = -999999
 
     // ---- 参数页 · 机身与存储 ----
     private lateinit var storageRow: SheetValueRow
@@ -7036,13 +7035,35 @@ class MainActivity : AppCompatActivity(), SheetHost {
         }
     }
 
-    /** 释放模式值 → 人话，日志里用 */
+    /** 释放模式值 → 人话，日志里用（带原始码，方便对日志） */
     private fun Int.hexMode(): String = when (this) {
+        PtpConstants.STILL_CAPTURE_SINGLE -> "单张（S） 0x0001"
+        PtpConstants.STILL_CAPTURE_CONT_HIGH -> "高速连拍（CH） 0x0002"
+        PtpConstants.STILL_CAPTURE_CONT_LOW -> "低速连拍（CL） 0x8010"
         PtpConstants.STILL_CAPTURE_SELF_TIMER -> "自拍 0x8011"
-        PtpConstants.STILL_CAPTURE_MIRROR_UP -> "Mup 0x8012"
-        PtpConstants.STILL_CAPTURE_LIVE_VIEW -> "取景 0x8013"
+        PtpConstants.STILL_CAPTURE_MIRROR_UP -> "反光板预升（Mup） 0x8012"
+        PtpConstants.STILL_CAPTURE_LIVE_VIEW -> "取景（LV） 0x8013"
         -999999 -> "读不到"
         else -> "0x${Integer.toHexString(this).uppercase()}"
+    }
+
+    /**
+     * 释放模式值 → 界面上显示的中文（不露原始码）。
+     *
+     * 六挡全部来自官方规格书 §5.5.1.15 的值表：0x0001 单张 / 0x0002 CH /
+     * 0x8010 CL / 0x8011 自拍 / 0x8012 反光板预升 / 0x8013 取景。
+     * 机身报出表外的值时照实显示原始码 —— 那种情况说明我们对协议的假设错了，
+     * 遮起来反而更难发现。
+     */
+    private fun releaseModeLabel(v: Int): String = when (v) {
+        PtpConstants.STILL_CAPTURE_SINGLE -> "单张"
+        PtpConstants.STILL_CAPTURE_CONT_HIGH -> "高速连拍"
+        PtpConstants.STILL_CAPTURE_CONT_LOW -> "低速连拍"
+        PtpConstants.STILL_CAPTURE_SELF_TIMER -> "自拍"
+        PtpConstants.STILL_CAPTURE_MIRROR_UP -> "反光板预升"
+        PtpConstants.STILL_CAPTURE_LIVE_VIEW -> "取景"
+        -999999 -> "读取失败"
+        else -> "0x${Integer.toHexString(v).uppercase()}"
     }
 
     // =====================================================================
@@ -7129,19 +7150,116 @@ class MainActivity : AppCompatActivity(), SheetHost {
         return (if (ev > 0) "+%.1f" else "%.1f").format(ev) + " EV"
     }
 
-    /** PTP 没给画质档位起名，这里只报原始值，别编一套假名字 */
-    private fun imageSizeLabel(v: Long): String = "值 $v"
+    /**
+     * 影像尺寸（0x5003 ImageSize）的三档。
+     *
+     * ⚠️ 这一项**不是数值枚举**：官方规格书 §5.5.1.2 写明 DataType = String，
+     * 值就是 `4288x2848` / `3216x2136` / `2144x1424` 这种"宽x高"字符串。
+     * 以前把它当数值属性读（readPropDesc 对字符串类型直接返回 null），界面上就变成
+     * "机身不支持该属性"—— 那是假的，机身支持得很。
+     */
+    private val imageSizeOptions = listOf(
+        "4288x2848" to "大 · 4288×2848",
+        "3216x2136" to "中 · 3216×2136",
+        "2144x1424" to "小 · 2144×1424"
+    )
+
+    /** 机器报的尺寸字符串 → 人话；表外的值原样露出，别硬套 */
+    private fun imageSizeText(raw: String?): String {
+        val v = raw?.trim().orEmpty()
+        if (v.isEmpty()) return "读取失败"
+        return imageSizeOptions.firstOrNull { it.first.equals(v, ignoreCase = true) }?.second ?: v
+    }
 
     /**
-     * JPEG 压缩等级（0x5004）。
+     * 影像尺寸二级页：字符串属性的三档选择。
      *
-     * 用标准 PTP 的取值（0 基本 / 1 标准 / 2 精细）；机身若用别的编码，
-     * 会显示成 `0x%04X` 原始值 —— 宁可露出看不懂的数字，也不硬套一个可能错的中文名。
+     * 走字符串通道（0x1015 读 / 0x1016 写），不能用普通数值枚举那一套；
+     * 写完回读比对，机身改写或截断都照实报。
+     */
+    private fun showImageSizeSheet() {
+        if (!isConnected) { toast("请先连接相机"); return }
+        val page = buildSheetPage("影像尺寸", "0x5003 · 字符串属性")
+        val card = sheetCard(page.content, "可选尺寸")
+        val status = sheetStatusText("正在读取…")
+        card.addView(status)
+        val gridHost = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        card.addView(gridHost)
+        card.addView(sheetHint(
+            "机身把这一项当成字符串报（例如 “4288x2848”），不是 0/1/2 那种数值档位，" +
+                "所以读写都走字符串通道。三个尺寸来自官方规格书 §5.5.1.2。"
+        ))
+        page.show()
+
+        thread {
+            val cur = try {
+                ptpConnection?.getDevicePropString(PtpConstants.PROP_IMAGE_SIZE)
+            } catch (_: Exception) {
+                null
+            }
+            runOnUiThread {
+                status.text = if (cur.isNullOrBlank()) "读取失败（机身没回值）" else "当前：${imageSizeText(cur)}"
+                if (!cur.isNullOrBlank()) imageQualityRow.value.text = imageSizeText(cur)
+                val selected = imageSizeOptions.indexOfFirst { it.first.equals(cur?.trim(), true) }
+                // 回调里要能回高亮自己 —— 局部变量不能在初始化式里引用自己，走 gridRef 两步赋值
+                var gridRef: SheetTileGrid? = null
+                val grid = sheetTileGrid(
+                    columns = 3,
+                    labels = imageSizeOptions.map { it.second },
+                    initialSelected = selected
+                ) { pick ->
+                    val target = imageSizeOptions[pick].first
+                    status.text = "正在写入 ${imageSizeOptions[pick].second} …"
+                    thread {
+                        val ok = try {
+                            ptpConnection?.setDevicePropString(PtpConstants.PROP_IMAGE_SIZE, target) ?: false
+                        } catch (_: Exception) {
+                            false
+                        }
+                        Thread.sleep(300)
+                        val back = try {
+                            ptpConnection?.getDevicePropString(PtpConstants.PROP_IMAGE_SIZE)
+                        } catch (_: Exception) {
+                            null
+                        }
+                        runOnUiThread {
+                            when {
+                                !ok -> status.text = "写入失败：机身拒绝了 $target"
+                                back == null -> status.text = "已发出，但回读失败 —— 无法确认是否真的改掉了"
+                                back.trim().equals(target, ignoreCase = true) -> {
+                                    status.text = "已写入：${imageSizeText(back)}"
+                                    imageQualityRow.value.text = imageSizeText(back)
+                                    gridRef?.select(pick)
+                                    log("影像尺寸已写入：$target")
+                                }
+                                else -> status.text = "回读是「$back」，与写入值不一致（机身可能改写了）"
+                            }
+                        }
+                    }
+                }
+                gridRef = grid
+                gridHost.addView(grid.view)
+            }
+        }
+    }
+
+    /**
+     * JPEG 压缩等级 / 画质模式（0x5004 CompressionSetting）。
+     *
+     * 八挡全部照官方规格书 §5.5.1.3 的值表译，一个都不留原始码：
+     * 0x00 BASIC / 0x01 NORMAL / 0x02 FINE / 0x03 TIFF(RGB) /
+     * 0x04 RAW / 0x05 RAW+BASIC / 0x06 RAW+NORMAL / 0x07 RAW+FINE。
+     * 机身报出表外的值才显示原始码 —— 那说明我们对档位的假设错了，该看见。
      */
     private fun compressionLabel(v: Long): String = when (v.toInt() and 0xFFFF) {
-        0 -> "基本（压缩最狠）"
-        1 -> "标准"
-        2 -> "精细（压缩最轻）"
+        0x00 -> "JPEG 基本"
+        0x01 -> "JPEG 标准"
+        0x02 -> "JPEG 精细"
+        0x03 -> "TIFF（RGB）"
+        0x04 -> "RAW"
+        0x05 -> "RAW + JPEG 基本"
+        0x06 -> "RAW + JPEG 标准"
+        0x07 -> "RAW + JPEG 精细"
         else -> "0x%04X".format(v.toInt() and 0xFFFF)
     }
 
@@ -7371,18 +7489,22 @@ class MainActivity : AppCompatActivity(), SheetHost {
                 flashDesc = ptpConnection?.readPropDesc(PtpConstants.PROP_NIKON_FLASH_COMP)
             }
             val flash = flashDesc?.currentValue ?: -999999L
-            val size = ptpConnection?.getDevicePropValue(PtpConstants.PROP_IMAGE_SIZE) ?: -999999
+            // 0x5003 是**字符串**属性（"4288x2848"），按数值读永远是 -999999
+            val size = try {
+                ptpConnection?.getDevicePropString(PtpConstants.PROP_IMAGE_SIZE)
+            } catch (_: Exception) {
+                null
+            }
             val compression = ptpConnection?.getDevicePropValue(PtpConstants.PROP_COMPRESSION_SETTING) ?: -999999
             val media = ptpConnection?.getDevicePropValue(PtpConstants.PROP_NIKON_RECORDING_MEDIA) ?: -999999
             currentMetering = meter
             currentFlashComp = if (flash == -999999L) -999999 else flash.toInt()
-            currentImageSize = size
             runOnUiThread {
                 if (::meteringValue.isInitialized) {
                     currentMetering = meter
                     meteringValue.text = if (meter == -999999) "不支持" else meteringLabel(meter.toLong())
                     flashCompRow.value.text = if (flash == -999999L) "不支持" else flashCompLabel(flash)
-                    imageQualityRow.value.text = if (size == -999999) "不支持" else imageSizeLabel(size.toLong())
+                    imageQualityRow.value.text = imageSizeText(size)
                     if (::compressionRow.isInitialized) {
                         compressionRow.value.text =
                             if (compression == -999999) "不支持" else compressionLabel(compression.toLong())
@@ -7424,6 +7546,117 @@ class MainActivity : AppCompatActivity(), SheetHost {
         }
     }
 
+    /**
+     * 「机身状态」页的条目：标签 + 属性码 + 值格式化。
+     *
+     * 全部是官方属性表里「菜单归属」为空的那批只读状态量。官方只给名字、不给值域，
+     * 所以除了两个明确是布尔的存在位（外接闪光灯 / 外接电源），其余一律显示机身原始值 ——
+     * 猜错一个状态码的含义，比露出一个数字更容易误导人。
+     */
+    private val bodyStatusItems: List<Triple<String, Int, (Int) -> String>> by lazy {
+        val rawFmt: (Int) -> String = { v -> "值 $v" }
+        listOf(
+            // 闪光同步模式：官方 §5.5.1.9 给了完整值表（0x0004 / 0x8010–0x8013），
+            // 真机默认就是 0x8010（普通），照表译成中文
+            Triple("闪光模式", PtpConstants.PROP_FLASH_MODE) { v ->
+                when (v) {
+                    0x0004 -> "防红眼"
+                    0x8010 -> "普通（前帘同步）"
+                    0x8011 -> "慢速同步"
+                    0x8012 -> "后帘同步"
+                    0x8013 -> "防红眼 + 慢速"
+                    else -> "值 $v"
+                }
+            },
+            Triple("外接闪光灯", PtpConstants.PROP_NIKON_EXT_SPEEDLIGHT_EXIST) { v ->
+                if (v == 0) "未接" else "已接（闪光灯）"
+            },
+            Triple("闪光灯状态", PtpConstants.PROP_NIKON_EXT_SPEEDLIGHT_STATUS, rawFmt),
+            Triple("闪光灯种类", PtpConstants.PROP_NIKON_EXT_SPEEDLIGHT_SORT, rawFmt),
+            Triple("闪光补偿（0xD124）", PtpConstants.PROP_NIKON_FLASH_COMPENSATION, rawFmt),
+            Triple("闪光灯工作模式", PtpConstants.PROP_NIKON_NEW_EXT_SPEEDLIGHT_MODE, rawFmt),
+            Triple("机身方向", PtpConstants.PROP_NIKON_ORIENTATION, rawFmt),
+            Triple("缓冲区可拍", PtpConstants.PROP_BURST_NUMBER) { v -> "$v 张" },
+            Triple("外接电源", PtpConstants.PROP_NIKON_EXTERNAL_DC_IN) { v ->
+                if (v == 0) "未接（用电池）" else "已接外接电源"
+            },
+            Triple("曝光显示状态", PtpConstants.PROP_NIKON_EXPOSURE_DISPLAY_STATUS, rawFmt),
+            Triple("曝光指示状态", PtpConstants.PROP_NIKON_EXPOSURE_INDICATE_STATUS, rawFmt),
+            Triple("信息屏错误", PtpConstants.PROP_NIKON_INFO_DISPLAY_ERROR, rawFmt),
+            Triple("USB 速度", PtpConstants.PROP_NIKON_USB_SPEED, rawFmt),
+            Triple("CCD 编号", PtpConstants.PROP_NIKON_CCD_NUMBER, rawFmt),
+            Triple("设备类型", PtpConstants.PROP_NIKON_PERCEIVED_DEVICE_TYPE, rawFmt)
+        )
+    }
+
+    /**
+     * 机身状态（只读）二级页：进页面就把 15 条状态读一遍，一条一条填。
+     *
+     * 这些码官方只给名字、不给值域，也可能这台机身根本不应答 —— 读不到就写「不支持」，
+     * 不猜、不隐藏。行先全部铺出来再逐条填值，避免读的过程中页面一路往下长。
+     */
+    private fun showBodyStatusSheet() {
+        if (!isConnected) { toast("请先连接相机"); return }
+        val page = buildSheetPage("机身状态", "${bodyStatusItems.size} 项 · 全部只读")
+        val card = sheetCard(page.content, "机身自报状态")
+        val statusText = sheetStatusText("正在读取…")
+        card.addView(statusText)
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val valueViews = ArrayList<TextView>()
+        for (item in bodyStatusItems) {
+            val (row, value) = sheetInfoRow(item.first, "…")
+            list.addView(row)
+            valueViews.add(value)
+        }
+        card.addView(list)
+        card.addView(sheetHint(
+            "这些是机身自己报的状态，改不了。除了「外接闪光灯 / 外接电源」两个存在位，" +
+                "其余显示的都是机身原始值 —— 官方协议只给了属性名，没给每个数值的含义。\n" +
+                "读不到写「不支持」，说明这台机身不应答那个码。"
+        ))
+        page.show()
+
+        val wasPaused = isPollingPaused
+        isPollingPaused = true
+        thread {
+            var answered = 0
+            try {
+                for ((idx, item) in bodyStatusItems.withIndex()) {
+                    if (!isConnected) break
+                    val code = item.second
+                    val fmt = item.third
+                    val text = try {
+                        // 0xD406 是版本信息，多半是字符串属性 —— 先按字符串读，读不到再按数值
+                        if (code == PtpConstants.PROP_NIKON_SESSION_INITIATOR_VERSION) {
+                            ptpConnection?.getDevicePropString(code)?.takeIf { it.isNotBlank() }
+                                ?: ptpConnection?.getDevicePropValue(code)?.let { fmt(it) }
+                                ?: "不支持"
+                        } else {
+                            val v = ptpConnection?.getDevicePropValue(code) ?: -999999
+                            if (v == -999999) "不支持" else fmt(v)
+                        }
+                    } catch (_: Exception) {
+                        "读取失败"
+                    }
+                    if (text != "不支持" && text != "读取失败") answered++
+                    runOnUiThread {
+                        val value = valueViews[idx]
+                        value.text = text
+                        if (text == "不支持" || text == "读取失败") {
+                            value.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_disabled))
+                        }
+                        statusText.text = "已读 ${idx + 1}/${bodyStatusItems.size} 项…"
+                    }
+                }
+            } finally {
+                isPollingPaused = wasPaused
+                runOnUiThread {
+                    statusText.text = "应答 $answered/${bodyStatusItems.size} 项"
+                }
+            }
+        }
+    }
+
     private fun showDeviceInfoSheet() {
         if (!isConnected) { toast("请先连接相机"); return }
         // 副标题原来写「型号 / 固件 / 序列号 / 快门数」，和下面四行逐字重复，删掉
@@ -7451,21 +7684,21 @@ class MainActivity : AppCompatActivity(), SheetHost {
             true
         }
 
-        // ---- 镜头（0xD0E0–0xD0E6，官方属性表里那组只读 lens 属性）----
+        // ---- 镜头（0xD0E3–0xD0E6，焦距/光圈范围）----
         // 规格书只给了码和名字，**没写单位**。按尼康惯例焦距是 mm×100、光圈是 f×100，
         // 折算后如果明显不合常理（<1mm 或 >2000mm）就退回显示原始值 —— 宁可不折算，
         // 也不把 2.4mm 那种数字当成事实证明给用户看。
+        //
+        // 界面上只留一行「规格」：镜头标识编号（0xD0E0）和 mm×100 的原始值对拍照没用，
+        // 只有排错时才需要，放在这里等于让人多读两行看不懂的数字。
         val lensCard = sheetCard(page.content, "镜头")
-        val (lensIdRow, lensIdValue) = sheetInfoRow("镜头标识", "读取中…")
-        val (lensSpecRow, lensSpecValue) = sheetInfoRow("规格（推断）", "读取中…")
-        val (lensRawRow, lensRawValue) = sheetInfoRow("原始值", "读取中…")
-        lensCard.addView(lensIdRow); lensCard.addView(lensSpecRow); lensCard.addView(lensRawRow)
+        val (lensSpecRow, lensSpecValue) = sheetInfoRow("规格", "读取中…")
+        lensCard.addView(lensSpecRow)
         lensCard.addView(sheetHint(
-            "PTP 协议里**没有**「镜头型号」这种字符串字段，机身只给：镜头标识编号（0xD0E0）、" +
-                "焦距范围（0xD0E3/E4）、光圈范围（0xD0E5/E6）。\n\n" +
-                "所以「规格」这一行是按焦距+光圈范围拼出来的（24–70 mm · f/2.8 这种），" +
-                "**不是**机身报的型号名。要显示「AF-S 24-70mm f/2.8G ED」这种，得内置一张" +
-                "「编号 → 型号」对照表 —— 那份表不在协议里，是厂商内部数据（ExifTool 等社区表可参考）。"
+            "按机身报的焦距范围（0xD0E3/E4）+ 光圈范围（0xD0E5/E6）拼出来的规格，" +
+                "例如「24–70 mm · f/2.8」。\n\n" +
+                "PTP 协议里没有「镜头型号」这种字符串字段，所以这里给不出「AF-S 24-70mm f/2.8G ED」" +
+                "那种型号名 —— 那要靠内置一张「编号 → 型号」对照表，而那张表不在协议里。"
         ))
 
         // 释放模式（0x5013）：自拍 / Mup / 取景 用 App 改完之后，这里能确认机身到底停在哪一挡。
@@ -7474,80 +7707,18 @@ class MainActivity : AppCompatActivity(), SheetHost {
         val (scRow, scValue) = sheetInfoRow("当前释放模式", "读取中…")
         modeCard.addView(scRow)
 
-        // ---- 机身状态（只读）：官方属性表里「菜单归属」为空的那批 ----
+        // ---- 机身状态：**单独一页** ----
         //
-        // 这些码官方只给名字、不给值域，也可能这台机身根本不应答，所以**不自动读**：
-        // 十几条一次问下来机身要忙一会儿，等用户主动点再问，读不到就明写「不支持」。
-        val statCard = sheetCard(page.content, "机身状态（只读）")
-        statCard.addView(sheetHint(
-            "闪光灯是否接着、机身方向、连拍缓冲、曝光指示…这些是机身自己报的状态，改不了。\n" +
-                "读不到就写「不支持」—— 官方表给了名字，不代表这台机身一定应答。"
-        ))
-        val rawFmt: (Int) -> String = { v -> "值 $v" }
-        val stats = listOf<Triple<String, Int, (Int) -> String>>(
-            Triple("闪光模式", PtpConstants.PROP_FLASH_MODE, rawFmt),
-            Triple("外接闪光灯", PtpConstants.PROP_NIKON_EXT_SPEEDLIGHT_EXIST) { v ->
-                if (v == 0) "未接" else "已接（闪光灯）"
-            },
-            Triple("闪光灯状态", PtpConstants.PROP_NIKON_EXT_SPEEDLIGHT_STATUS, rawFmt),
-            Triple("闪光灯种类", PtpConstants.PROP_NIKON_EXT_SPEEDLIGHT_SORT, rawFmt),
-            Triple("闪光补偿（0xD124）", PtpConstants.PROP_NIKON_FLASH_COMPENSATION, rawFmt),
-            Triple("闪光灯工作模式", PtpConstants.PROP_NIKON_NEW_EXT_SPEEDLIGHT_MODE, rawFmt),
-            Triple("机身方向", PtpConstants.PROP_NIKON_ORIENTATION, rawFmt),
-            Triple("缓冲区可拍", PtpConstants.PROP_BURST_NUMBER) { v -> "$v 张" },
-            Triple("外接电源", PtpConstants.PROP_NIKON_EXTERNAL_DC_IN) { v ->
-                if (v == 0) "未接（用电池）" else "已接外接电源"
-            },
-            Triple("曝光显示状态", PtpConstants.PROP_NIKON_EXPOSURE_DISPLAY_STATUS, rawFmt),
-            Triple("曝光指示状态", PtpConstants.PROP_NIKON_EXPOSURE_INDICATE_STATUS, rawFmt),
-            Triple("信息屏错误", PtpConstants.PROP_NIKON_INFO_DISPLAY_ERROR, rawFmt),
-            Triple("USB 速度", PtpConstants.PROP_NIKON_USB_SPEED, rawFmt),
-            Triple("CCD 编号", PtpConstants.PROP_NIKON_CCD_NUMBER, rawFmt),
-            Triple("设备类型", PtpConstants.PROP_NIKON_PERCEIVED_DEVICE_TYPE, rawFmt)
-        )
-        val statList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        // 回调里要用这一行自己的值视图 —— 局部变量不能在自己的初始化式里引用自己，
-        // 所以走 rowRef 两步赋值（shooting/csm 菜单页也是这个写法）
-        var statRowRef: SheetValueRow? = null
-        val statRowView = sheetValueRow("读取机身状态", "${stats.size} 项 · 只读") { _ ->
-            if (!isConnected) { toast("请先连接相机"); return@sheetValueRow }
-            statRowRef?.value?.text = "读取中…"
-            thread {
-                val results = ArrayList<Pair<String, String>>()
-                for ((label, code, fmt) in stats) {
-                    if (!isConnected) break
-                    val text = try {
-                        // 0xD406 是版本信息，多半是字符串属性 —— 先按字符串读，读不到再按数值
-                        if (code == PtpConstants.PROP_NIKON_SESSION_INITIATOR_VERSION) {
-                            ptpConnection?.getDevicePropString(code)?.takeIf { it.isNotBlank() }
-                                ?: ptpConnection?.getDevicePropValue(code)?.let { fmt(it) }
-                                ?: "不支持"
-                        } else {
-                            val v = ptpConnection?.getDevicePropValue(code) ?: -999999
-                            if (v == -999999) "不支持" else fmt(v)
-                        }
-                    } catch (_: Exception) {
-                        "读取失败"
-                    }
-                    results.add(label to text)
-                }
-                runOnUiThread {
-                    statList.removeAllViews()
-                    for ((label, text) in results) {
-                        val (row, value) = sheetInfoRow(label, text)
-                        if (text == "不支持" || text == "读取失败") {
-                            value.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_disabled))
-                        }
-                        statList.addView(row)
-                    }
-                    val okCount = results.count { it.second != "不支持" && it.second != "读取失败" }
-                    statRowRef?.value?.text = "应答 $okCount/${stats.size} 项"
-                }
-            }
+        // 十五行只读状态直接摊在机身信息里，会把固件 / 序列号 / 镜头这些常用项挤到很下面，
+        // 而且它们一次要问机身十几趟。所以这里只留一个入口，点进去才读。
+        val statCard = sheetCard(page.content, "机身状态")
+        val statEntry = sheetValueRow(
+            "机身状态（只读）",
+            "闪光灯 / 方向 / 缓冲 · ${bodyStatusItems.size} 项"
+        ) { _ ->
+            if (!isConnected) toast("请先连接相机") else showBodyStatusSheet()
         }
-        statRowRef = statRowView
-        statCard.addView(statRowView.view)
-        statCard.addView(statList)
+        statCard.addView(statEntry.view)
 
         val card2 = sheetCard(page.content, "当前连接")
         val (makerRow, makerValue) = sheetInfoRow("厂商", deviceInfoCache?.manufacturer ?: "NIKON CORPORATION")
@@ -7586,20 +7757,13 @@ class MainActivity : AppCompatActivity(), SheetHost {
                 }
             }
 
-            // ---- 镜头信息（只读，读不到就写"不支持"，不猜）----
-            val lensId = ptpConnection?.getDevicePropValue(PtpConstants.PROP_NIKON_LENS_ID) ?: -999999
+            // ---- 镜头规格（只读，读不到就写"不支持"，不猜）----
             val focalMin = ptpConnection?.getDevicePropValue(PtpConstants.PROP_NIKON_LENS_FOCAL_MIN) ?: -999999
             val focalMax = ptpConnection?.getDevicePropValue(PtpConstants.PROP_NIKON_LENS_FOCAL_MAX) ?: -999999
             val apMin = ptpConnection?.getDevicePropValue(PtpConstants.PROP_NIKON_LENS_APERTURE_MIN) ?: -999999
             val apMax = ptpConnection?.getDevicePropValue(PtpConstants.PROP_NIKON_LENS_APERTURE_MAX) ?: -999999
             runOnUiThread {
-                lensIdValue.text = if (lensId == -999999) "不支持" else "0x%04X".format(lensId)
                 lensSpecValue.text = lensSpec(focalMin, focalMax, apMin, apMax)
-                lensRawValue.text = "%s / %s".format(
-                    lensRange(focalMin, focalMax, isFocal = true),
-                    lensRange(apMin, apMax, isFocal = false)
-                )
-                lensRawValue.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 11f)
             }
 
             // 释放模式：确认 App 改完之后机身停在哪一挡（尤其是"有没有从 Mup 恢复回来"）
@@ -7609,7 +7773,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
                 -999999
             }
             runOnUiThread {
-                scValue.text = scMode.hexMode()
+                scValue.text = releaseModeLabel(scMode)
                 if (scMode == PtpConstants.STILL_CAPTURE_MIRROR_UP ||
                     scMode == PtpConstants.STILL_CAPTURE_SELF_TIMER
                 ) {
@@ -7655,30 +7819,6 @@ class MainActivity : AppCompatActivity(), SheetHost {
             else -> null
         }
         return listOfNotNull(focal, aperture).joinToString(" · ").ifBlank { "未读到" }
-    }
-
-    /**
-     * 镜头焦距 / 光圈范围的显示文本。
-     *
-     * 原始值是 mm×100 / f×100（尼康惯例）。折算结果落在合理区间才显示折算值，
-     * 否则原样显示 —— 单位猜错时让人看到 2400 这种原始数字，比看到"2.4 mm"更好判断。
-     */
-    private fun lensRange(min: Int, max: Int, isFocal: Boolean): String {
-        if (min == -999999 && max == -999999) return "不支持"
-        fun one(v: Int): String {
-            if (v == -999999 || v <= 0) return "?"
-            val scaled = v / 100f
-            val sane = if (isFocal) scaled in 1f..2000f else scaled in 0.5f..128f
-            if (!sane) return v.toString()
-            return if (isFocal) "%.0f".format(scaled) else "f/%.1f".format(scaled)
-        }
-        val a = one(min)
-        val b = one(max)
-        return when {
-            min == max -> if (isFocal) "$a mm" else a
-            isFocal -> "$a–$b mm"
-            else -> "$a–$b"
-        }
     }
 
     /**
@@ -8213,24 +8353,20 @@ class MainActivity : AppCompatActivity(), SheetHost {
         }
         eqList.addView(flashCompRow.view)
 
-        imageQualityRow = sheetValueRow("图像质量", "待读取") { _ ->
-            if (!isConnected) toast("请先连接相机") else showEnumPropSheet(
-                "图像质量", "0x5003 · 画质 / 尺寸档",
-                PtpConstants.PROP_IMAGE_SIZE, ::imageSizeLabel,
-                "机身不通过 PTP 暴露档位名称，这里只按它自述的合法值列档；改完看一眼机身顶部 LCD 上的画质显示即可确认。"
-            ) { label -> imageQualityRow.value.text = label }
+        imageQualityRow = sheetValueRow("影像尺寸", "待读取") { _ ->
+            if (!isConnected) toast("请先连接相机") else showImageSizeSheet()
         }
         eqList.addView(imageQualityRow.view)
 
-        // JPEG 压缩等级（0x5004）：和上一行不是一回事 ——
-        // 0x5003 管"多大 + 什么格式"，这一项管"JPEG 压得多狠"。
-        // 只对 JPEG 生效，RAW 的压缩方式在「拍摄菜单」里另有一项（0xD016）。
-        compressionRow = sheetValueRow("JPEG 压缩", "待读取") { _ ->
+        // 影像品质（0x5004）：和上一行不是一回事 ——
+        // 0x5003 是尺寸（大/中/小），这一项是画质模式（JPEG 三档 / TIFF / RAW / RAW+JPEG 三档）。
+        // 八挡全部照官方规格书 §5.5.1.3 的值表译成中文，不再露 0x0003 这种原始码。
+        compressionRow = sheetValueRow("影像品质", "待读取") { _ ->
             if (!isConnected) toast("请先连接相机") else showEnumPropSheet(
-                "JPEG 压缩", "0x5004 · 基本 / 标准 / 精细",
+                "影像品质", "0x5004 · JPEG / TIFF / RAW 及其组合",
                 PtpConstants.PROP_COMPRESSION_SETTING, ::compressionLabel,
-                "只管 JPEG 的压缩率，不影响尺寸（尺寸在上面的「图像质量」里）。" +
-                    "拍 RAW 时这一项不起作用。"
+                "机身上「影像品质」那一项：JPEG 三档压缩率、TIFF(RGB)、RAW，以及 RAW+JPEG 三种组合，" +
+                    "共八挡。拍 RAW 组合时卡里会同时落一个 NEF 和一个 JPEG。"
             ) { label -> compressionRow.value.text = label }
         }
         eqList.addView(compressionRow.view)

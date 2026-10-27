@@ -177,10 +177,13 @@ object PtpConstants {
      */
     const val PROP_NIKON_LIVE_VIEW = 0x5013
 
-    // 0x5013 StillCaptureMode 的取值（官方规格书 §2.4④⑤）
+    // 0x5013 StillCaptureMode 的取值（官方规格书 §5.5.1.15，完整六挡）
+    const val STILL_CAPTURE_SINGLE = 0x0001       // 单张（S）—— 出厂默认值
+    const val STILL_CAPTURE_CONT_HIGH = 0x0002    // 高速连拍（CH）
+    const val STILL_CAPTURE_CONT_LOW = 0x8010     // 低速连拍（CL）
     const val STILL_CAPTURE_SELF_TIMER = 0x8011   // 自拍
     const val STILL_CAPTURE_MIRROR_UP = 0x8012    // 反光板预升（Mup）
-    const val STILL_CAPTURE_LIVE_VIEW = 0x8013    // 取景中拍摄（0x90C0 的要求）
+    const val STILL_CAPTURE_LIVE_VIEW = 0x8013    // 取景中拍摄（LV）
 
     /** 自拍延时秒数（0xD063 SelfTimerDelay，个人设定 c3），普通可写属性 */
     const val PROP_NIKON_SELF_TIMER_DELAY = 0xD063

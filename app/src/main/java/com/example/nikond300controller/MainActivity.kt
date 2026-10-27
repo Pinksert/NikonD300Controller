@@ -7661,6 +7661,9 @@ class MainActivity : AppCompatActivity(), SheetHost {
         if (!isConnected) { toast("请先连接相机"); return }
         // 副标题原来写「型号 / 固件 / 序列号 / 快门数」，和下面四行逐字重复，删掉
         val page = buildSheetPage("机身信息")
+        // 一台机身的身份 + 当前状态全放在这一组里：型号 / 固件 / 序列号 / 快门数 /
+        // 镜头规格 / 释放模式 / 机身状态。以前拆成「机身 / 镜头 / 释放模式 / 机身状态」四张卡，
+        // 每一张都只有一两行，读起来像四份残缺清单。
         val card = sheetCard(page.content, "机身")
         val (modelRow, modelValue) = sheetInfoRow("型号", deviceInfoCache?.model ?: "读取中…")
         val (verRow, verValue) = sheetInfoRow("固件版本", deviceInfoCache?.versionOrDash() ?: "读取中…")
@@ -7684,41 +7687,32 @@ class MainActivity : AppCompatActivity(), SheetHost {
             true
         }
 
-        // ---- 镜头（0xD0E3–0xD0E6，焦距/光圈范围）----
-        // 规格书只给了码和名字，**没写单位**。按尼康惯例焦距是 mm×100、光圈是 f×100，
-        // 折算后如果明显不合常理（<1mm 或 >2000mm）就退回显示原始值 —— 宁可不折算，
-        // 也不把 2.4mm 那种数字当成事实证明给用户看。
-        //
-        // 界面上只留一行「规格」：镜头标识编号（0xD0E0）和 mm×100 的原始值对拍照没用，
-        // 只有排错时才需要，放在这里等于让人多读两行看不懂的数字。
-        val lensCard = sheetCard(page.content, "镜头")
-        val (lensSpecRow, lensSpecValue) = sheetInfoRow("规格", "读取中…")
-        lensCard.addView(lensSpecRow)
-        lensCard.addView(sheetHint(
-            "按机身报的焦距范围（0xD0E3/E4）+ 光圈范围（0xD0E5/E6）拼出来的规格，" +
-                "例如「24–70 mm · f/2.8」。\n\n" +
-                "PTP 协议里没有「镜头型号」这种字符串字段，所以这里给不出「AF-S 24-70mm f/2.8G ED」" +
-                "那种型号名 —— 那要靠内置一张「编号 → 型号」对照表，而那张表不在协议里。"
-        ))
+        // 镜头规格（0xD0E3–0xD0E6）：规格书只给了码和名字，**没写单位**。
+        // 按尼康惯例焦距是 mm×100、光圈是 f×100，折算后明显不合常理就退回原始值 ——
+        // 宁可不折算，也不把 2.4mm 那种数字当成事实证明给用户看。
+        val (lensSpecRow, lensSpecValue) = sheetInfoRow("当前镜头规格", "读取中…")
+        card.addView(lensSpecRow)
 
-        // 释放模式（0x5013）：自拍 / Mup / 取景 用 App 改完之后，这里能确认机身到底停在哪一挡。
-        // 反光板预升改走机内设定之后，这一行就是"有没有恢复成功"的照妖镜。
-        val modeCard = sheetCard(page.content, "释放模式")
+        // 释放模式（0x5013）：自拍 / Mup / 取景 用 App 改完之后，这一行能确认机身到底停在哪一挡。
+        // 反光板预升改走机内设定之后，它就是"有没有恢复成功"的照妖镜。
         val (scRow, scValue) = sheetInfoRow("当前释放模式", "读取中…")
-        modeCard.addView(scRow)
+        card.addView(scRow)
 
-        // ---- 机身状态：**单独一页** ----
-        //
-        // 十五行只读状态直接摊在机身信息里，会把固件 / 序列号 / 镜头这些常用项挤到很下面，
-        // 而且它们一次要问机身十几趟。所以这里只留一个入口，点进去才读。
-        val statCard = sheetCard(page.content, "机身状态")
+        // 机身状态：15 条只读状态量单独一页（一次要问机身十几趟，不该拖慢这一页）
         val statEntry = sheetValueRow(
             "机身状态（只读）",
             "闪光灯 / 方向 / 缓冲 · ${bodyStatusItems.size} 项"
         ) { _ ->
             if (!isConnected) toast("请先连接相机") else showBodyStatusSheet()
         }
-        statCard.addView(statEntry.view)
+        card.addView(statEntry.view)
+
+        // 一张卡里放三项说明，合并成一小段，别让提示比数据还长
+        card.addView(sheetHint(
+            "镜头规格是按机身报的焦距范围（0xD0E3/E4）+ 光圈范围（0xD0E5/E6）拼的，" +
+                "不是镜头型号名 —— PTP 里没有「镜头型号」这种字符串字段。\n" +
+                "快门数来自最近一张照片的 EXIF（机身没有这个属性），点一下才读。"
+        ))
 
         val card2 = sheetCard(page.content, "当前连接")
         val (makerRow, makerValue) = sheetInfoRow("厂商", deviceInfoCache?.manufacturer ?: "NIKON CORPORATION")

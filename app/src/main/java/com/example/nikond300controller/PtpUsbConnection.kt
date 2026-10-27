@@ -658,8 +658,8 @@ class PtpUsbConnection(
             return code
         } else {
             val codeHex = "0x${Integer.toHexString(code).uppercase()}"
-            if (code == PtpConstants.RESP_NIKON_HARDWARE_ERROR) {
-                logger("Capture $opName failed: Focus Not Locked ($codeHex)")
+            if (code == PtpConstants.RESP_OUT_OF_FOCUS) {
+                logger("Capture $opName failed: Out_of_Focus（未合焦）($codeHex)")
             } else {
                 logger("Capture $opName failed: $codeHex")
             }
@@ -1227,7 +1227,8 @@ class PtpUsbConnection(
             val hint = when (response?.responseCode) {
                 PtpConstants.RESP_INVALID_STATUS ->
                     "机身状态不允许：模式转盘转到 M/A/S/P，释放模式设为单张，装好存储卡与 CPU 镜头，电量充足"
-                PtpConstants.RESP_NIKON_HARDWARE_ERROR -> "机身拒绝（检查反光板 / 电量 / 镜头是否就位）"
+                PtpConstants.RESP_OUT_OF_FOCUS -> "未合焦：AF-S 下没对上，请重新对焦"
+                PtpConstants.RESP_NIKON_HARDWARE_ERROR -> "机身正忙（Device_Busy），稍后再试"
                 PtpConstants.RESP_DEVICE_BUSY -> "机身正忙，稍后再试"
                 null -> "机身无响应，检查 USB 连接"
                 else -> "当前拍摄条件不支持取景"
@@ -3294,8 +3295,11 @@ class PtpUsbConnection(
                     val codeHex =
                         if (response != null) "0x${Integer.toHexString(response.responseCode).uppercase()}"
                         else "TIMEOUT"
-                    val hint =
-                        if (response?.responseCode == PtpConstants.RESP_NIKON_HARDWARE_ERROR) "（未合焦）" else ""
+                    val hint = when (response?.responseCode) {
+                        PtpConstants.RESP_OUT_OF_FOCUS -> "（未合焦：Out_of_Focus）"
+                        PtpConstants.RESP_NIKON_HARDWARE_ERROR -> "（机身忙 Device_Busy）"
+                        else -> ""
+                    }
                     logger("AF 驱动失败: $codeHex$hint")
                     clearPipe()
                 }
@@ -3383,6 +3387,16 @@ class PtpUsbConnection(
                         logger("AF 结束，机身已空闲（0x2001，${elapsedMs}ms）")
                         break
                     }
+                    AfPollingPolicy.isOutOfFocus(code) -> {
+                        // 官方 §5.3.30：AF 结束但没对上焦。这是**唯一的"未合焦"信号**，
+                        // 必须立刻判失败 —— 以前把 0xA002 当"过渡态"继续等，
+                        // 等到机身闲下来（0x2001）就报"已合焦"，于是出现
+                        // "AF-S 没响提示音、界面却写已合焦"。
+                        logger("AF 结束但未合焦（0xA002 Out_of_Focus，${elapsedMs}ms）")
+                        // AF 已经自己收工，收尾不必再发 0x9206
+                        idleSeen = true
+                        break
+                    }
                     AfPollingPolicy.isStillFocusing(code) -> Unit   // 还在跑，继续等
                     code == -1 -> {
                         logger("DeviceReady 超时，停止等待")
@@ -3442,7 +3456,6 @@ class PtpUsbConnection(
      */
     fun waitAfFinish(maxMs: Long = 2500): Boolean {
         val startedNs = System.nanoTime()
-        var round = 0
         while (true) {
             val elapsedMs = (System.nanoTime() - startedNs) / 1_000_000
             if (elapsedMs > maxMs) return false
@@ -3455,9 +3468,10 @@ class PtpUsbConnection(
                     receiveResponse(2000)?.responseCode ?: -1
                 }
             }
+            // 机身回了 Out_of_Focus：AF 结束但没对上 → 立刻返回失败
+            if (AfPollingPolicy.isOutOfFocus(code)) return false
             if (AfPollingPolicy.isReady(code)) return true
             if (code == -1) return false
-            round++
             Thread.sleep(AfPollingPolicy.intervalMs(elapsedMs))
         }
     }

@@ -48,22 +48,30 @@ class AfPollingPolicyTest {
     }
 
     @Test
-    fun `0x2019 与 0x2002 算还在跑，0x2001 才算 AF 结束`() {
-        // 真机日志：整段对焦过程 0x90C8 都回 0x2019（Focus Not Locked）→ 必须继续等
+    fun `三星回码：忙=继续等，Out_of_Focus=未合焦，OK=已空闲`() {
+        // 官方 §5.3：0x2019 是 Device_Busy（不是"Focus Not Locked"）
         assertTrue(AfPollingPolicy.isStillFocusing(0x2019))
         assertTrue(AfPollingPolicy.isStillFocusing(0x2002))
         assertFalse(AfPollingPolicy.isStillFocusing(0x2001))
-        // 只有 0x2001（机身空闲）才算 AF 结束
+        // 0xA002 = Out_of_Focus：AF 结束但没对上，这是唯一的"未合焦"信号
+        assertTrue(AfPollingPolicy.isOutOfFocus(0xA002))
+        assertFalse(AfPollingPolicy.isOutOfFocus(0x2001))
+        assertFalse(AfPollingPolicy.isOutOfFocus(0x2019))
+        // 0x2001 = OK：机身空闲
         assertTrue(AfPollingPolicy.isReady(0x2001))
-        assertFalse(AfPollingPolicy.isReady(0x2019))
-        assertFalse(AfPollingPolicy.isReady(0x2002))
-        // 两个判定互斥且覆盖住"继续等 / 可以继续拍"这两种状态
-        for (code in listOf(0x2001, 0x2002, 0x2019)) {
-            assertFalse(
-                "回码 0x${Integer.toHexString(code)} 不能同时算两种状态",
-                AfPollingPolicy.isReady(code) && AfPollingPolicy.isStillFocusing(code)
-            )
+        assertFalse(AfPollingPolicy.isReady(0xA002))
+        // 三种判定必须互斥：任何回码最多落进一类
+        for (code in listOf(0x2001, 0x2002, 0x2019, 0xA002)) {
+            val hits = listOf(
+                AfPollingPolicy.isReady(code),
+                AfPollingPolicy.isOutOfFocus(code),
+                AfPollingPolicy.isStillFocusing(code)
+            ).count { it }
+            assertTrue("回码 0x${Integer.toHexString(code)} 落进了 $hits 类判定", hits <= 1)
         }
+        // 关键回归：当年就是这两条混淆，才有"没响提示音却显示已合焦"
+        assertFalse(AfPollingPolicy.isReady(0xA002))
+        assertTrue(AfPollingPolicy.isOutOfFocus(0xA002))
     }
 
     @Test

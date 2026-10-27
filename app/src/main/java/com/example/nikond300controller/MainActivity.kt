@@ -5873,9 +5873,9 @@ class MainActivity : AppCompatActivity(), SheetHost {
         runOnUiThread {
             if (success) {
                 log("拍摄成功")
-            } else if (responseCode == PtpConstants.RESP_NIKON_HARDWARE_ERROR) {
-                log("拍摄失败：未合焦（机身被占用）")
-                Toast.makeText(this@MainActivity, "拍摄失败：未合焦（机身被占用）", Toast.LENGTH_LONG).show()
+            } else if (responseCode == PtpConstants.RESP_OUT_OF_FOCUS) {
+                log("拍摄失败：未合焦（机身回 Out_of_Focus）")
+                Toast.makeText(this@MainActivity, "拍摄失败：未合焦（重按一次对焦再拍）", Toast.LENGTH_LONG).show()
             } else {
                 log("拍摄失败（检查机身忙/合焦）")
                 Toast.makeText(this@MainActivity, "拍摄被拒：机身忙或未合焦", Toast.LENGTH_SHORT).show()

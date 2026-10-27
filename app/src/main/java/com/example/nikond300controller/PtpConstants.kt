@@ -82,7 +82,18 @@ object PtpConstants {
     const val RESP_PARAMETER_NOT_SUPPORTED = 0x2006
     const val RESP_PARAMETER_READ_ONLY = 0x201C
     const val RESP_SESSION_ALREADY_OPEN = 0x201E
-    const val RESP_NIKON_HARDWARE_ERROR = 0x2019 // Focus Not Locked
+    /**
+     * ⚠️ 名字是历史误称：官方规格书 §5.3.20 明确 **0x2019 = Device_Busy（相机忙）**，
+     * 不是"未合焦"。早期把 0x90C8 的 0x2019 当成"Focus Not Locked"，导致过
+     * "机身已合焦、App 报未合焦"的误判。常量名保留是为少改调用点，语义以本注释为准。
+     */
+    const val RESP_NIKON_HARDWARE_ERROR = 0x2019 // 实为 Device_Busy（机身忙）
+
+    /** 官方 §5.3.30：AF 结束但**没对上焦**（AF-S / AF-C 非对焦状态）。这是唯一的"未合焦"信号 */
+    const val RESP_OUT_OF_FOCUS = 0xA002
+
+    /** 官方 §5.3.28：机身硬件错误 */
+    const val RESP_HARDWARE_ERROR = 0xA001
 
     // 属性类拒绝码（写 DeviceProp 失败时常见）
     const val RESP_DEVICE_PROP_NOT_SUPPORTED = 0x200A

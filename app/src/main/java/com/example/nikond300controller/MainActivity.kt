@@ -5712,10 +5712,12 @@ class MainActivity : AppCompatActivity(), SheetHost {
                     return false
                 }
                 if (ptpConnection?.deviceReady() == true) break
-                Thread.sleep(250)
-                readyMs += 250
+                // 120ms 一探（原来 250ms）：退出取景后机身多半在半秒内就绪，
+                // 粗步进只是让用户白等；真慢的时候轮数够，仍然等满 5 秒。
+                Thread.sleep(120)
+                readyMs += 120
             }
-            Thread.sleep(300) // 反光板最后一点余量
+            Thread.sleep(200) // 反光板最后一点余量（原来是 300ms，配合更密的探测收回 100ms）
 
             // ★★ 临时把对焦模式切成 MF（0x500A=1）。
             //
@@ -5798,31 +5800,33 @@ class MainActivity : AppCompatActivity(), SheetHost {
             }
             if (afReady) {
                 runOnUiThread { log("对焦完成，等待机身就绪…") }
-                for (i in 1..5) {
+                // 150ms 一探（原来 400ms）：对焦刚结束时机身通常只需一两百毫秒就绪，
+                // 400ms 的步进等于每次都白等小半秒才敢按快门。轮数按 2 秒预算配。
+                for (i in 1..13) {
                     if (stopAllRequested) {
                         runOnUiThread { log("拍摄已中止（用户停止）") }
                         return false
                     }
                     if (ptpConnection?.deviceReady() == true) break
                     runOnUiThread { log("机身忙，等待中…") }
-                    Thread.sleep(400)
+                    Thread.sleep(150)
                 }
-                Thread.sleep(200)
+                Thread.sleep(150)
             } else {
                 // ★ AF 失败后**不能立刻按快门**。
                 // 机身刚跑完一次没成功的 AF，此刻通常还在 0x2019（对不上焦）状态里，
                 // 紧接着发的快门会被同一个理由拒掉 —— 用户看到的就是
                 // "对焦失败，照片也拍不出来"。先等它回到就绪，再按。
                 runOnUiThread { log("AF 未合焦，等机身就绪后再释放快门") }
-                for (i in 1..4) {
+                for (i in 1..11) {
                     if (stopAllRequested) {
                         runOnUiThread { log("拍摄已中止（用户停止），不再释放快门") }
                         return false
                     }
                     if (ptpConnection?.deviceReady() == true) break
-                    Thread.sleep(400)
+                    Thread.sleep(150)
                 }
-                Thread.sleep(300)
+                Thread.sleep(200)
             }
         }
 

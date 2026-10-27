@@ -3304,7 +3304,7 @@ class PtpUsbConnection(
         }
         if (!driveOk) return false
 
-        // ---- 步骤 2：轮询 DeviceReady ----
+        // ---- 步骤 2：等合焦 ----
         //
         // ★ 这里**每轮单独持锁、睡眠放在锁外**，这是"对焦时取景画面要同步刷新"的关键。
         //
@@ -3312,74 +3312,107 @@ class PtpUsbConnection(
         // 全程独占 usbLock —— 取景循环（getLiveViewFrame 也要这把锁）被彻底挡住，
         // 用户看到的就是"一按对焦，取景画面就僵住，对完才跳一下"。
         //
-        // 拆开之后：每轮只占用锁做一次 0x90C8 往返（几十毫秒），
-        // 剩下的 300ms 睡眠在锁外，取景循环正好用这段时间把新帧读出来 → 画面持续刷新。
+        // 拆开之后：每轮只占用锁做一次往返（几毫秒到十几毫秒），
+        // 剩下的睡眠在锁外，取景循环正好用这段时间把新帧读出来 → 画面持续刷新。
         //
-        // 另外 D300 在对焦中回的是 0x2019（还没合焦）而不是 0x2002(DeviceBusy)，
-        // 这两种都当"继续等"。
+        // ---- 采样策略（2026-10-27 重做）----
+        //
+        // 旧版是"固定 100ms × 60 轮"，两个问题：
+        // ① 合焦那一刻最多要等 100ms 才被发现，界面上的"对焦耗时"和真实值差半拍，
+        //    而且多等这 100ms 才进快门；
+        // ② 没对上焦时也要干等到 6 秒上限才知道失败（DeviceReady 一 OK 就跳出，
+        //    但"OK 且没锁焦"这种情况旧版当成成功返回）。
+        //
+        // 现在改成双判据 + 变步长：
+        // - **每轮读 0xD104 AFLockStatus**（一次事务）：这是"对上了"的直接判据，
+        //   读得越密，合焦被发现得越早。
+        // - **每 3 轮读 0x90C8 DeviceReady**：区分"AF 还在跑"（0x2019）和
+        //   "AF 跑完了但没对上"（空闲 + 未锁焦）—— 后者当场收手，不再浪费 6 秒。
+        // - 步长 30ms → 45ms → 80ms 分三段：起步阶段最需要密采样，
+        //   1.2 秒后基本是慢速大光圈镜头在磨，放稀一点省机身 CPU。
         var ready = false
         var lockStatus = -1
-        // 60 轮 × 100ms = 6 秒上限。
-        // 总时长与老版（40×150ms）持平，但单轮间隔收紧到 100ms：
-        // 合焦判定（DeviceReady 翻转 / 0xD104=1）的采样更密，
-        // "对焦耗时 x.x 秒"的显示误差从 ±150ms 收到 ±100ms。
-        for (i in 0 until 60) {
+        var idleSeen = false
+        val startedNs = System.nanoTime()
+        var round = 0
+        while (true) {
             // 用户点了「停止」：立刻收手，别再占着 USB 通道问机身
             if (abortRequested) {
                 logger("对焦已中止（用户停止）")
                 cancelAfDrive("用户停止")
                 return false
             }
-            val code = synchronized(usbLock) {
-                val rp = createCommandPacket(PtpConstants.OP_NIKON_DEVICE_READY)
-                if (!sendPacket(rp)) {
-                    -1
-                } else {
-                    val rr = receiveResponse(2000)
-                    if (i % 3 == 0) pollEvents()   // 事件轮询也要走 USB，间隔收紧后不必每轮都清
-                    rr?.responseCode ?: -1
+            val elapsedMs = (System.nanoTime() - startedNs) / 1_000_000
+
+            // ① 锁焦判据：每轮都读，单次事务
+            lockStatus = try {
+                getDevicePropValue(PtpConstants.PROP_NIKON_AF_LOCK_STATUS)
+            } catch (_: Exception) {
+                -1
+            }
+            if (lockStatus == 1) {
+                ready = true
+                logger("AF 已锁焦（0xD104=1，第 ${round + 1} 轮 / ${elapsedMs}ms）")
+                break
+            }
+
+            // ② 空闲判据：按策略每 N 轮探一次（多一次事务，不必每轮）
+            if (AfPollingPolicy.shouldProbeDeviceReady(round)) {
+                val code = synchronized(usbLock) {
+                    val rp = createCommandPacket(PtpConstants.OP_NIKON_DEVICE_READY)
+                    if (!sendPacket(rp)) {
+                        -1
+                    } else {
+                        val rr = receiveResponse(2000)
+                        // 事件轮询也要走 USB，间隔收紧后不必每轮都清
+                        if (AfPollingPolicy.shouldPollEvents(round)) pollEvents()
+                        rr?.responseCode ?: -1
+                    }
+                }
+                when (code) {
+                    PtpConstants.RESP_OK -> {
+                        idleSeen = true
+                        if (AfPollingPolicy.isFinishedUnfocused(true, lockStatus, elapsedMs)) {
+                            logger("AF 结束但未锁焦（机身已空闲，${elapsedMs}ms）")
+                            break
+                        }
+                    }
+                    PtpConstants.RESP_DEVICE_BUSY,
+                    PtpConstants.RESP_NIKON_HARDWARE_ERROR -> Unit   // 还在忙 / 还在跑 AF
+                    else -> {
+                        if (code == -1) logger("DeviceReady 超时，停止等待")
+                        break
+                    }
                 }
             }
 
-            when (code) {
-                PtpConstants.RESP_OK -> ready = true
-                PtpConstants.RESP_DEVICE_BUSY,
-                PtpConstants.RESP_NIKON_HARDWARE_ERROR -> Unit   // 还在忙 / 还在跑 AF
-                else -> {
-                    if (code == -1) logger("DeviceReady 超时，停止等待")
-                    break
-                }
+            round++
+            if (elapsedMs > AfPollingPolicy.MAX_WAIT_MS) {
+                logger("AF 等待超时（${AfPollingPolicy.MAX_WAIT_MS}ms），未锁焦")
+                break
             }
-            // ★ 补一条更直接的判据：0xD104 AFLockStatus（1 = 已锁焦）。
-            // DeviceReady 说的是"机身空闲"，锁焦说的是"对上了"，两者不总同步；
-            // 机身在对比度 AF 里先锁焦、后空闲，只看前者就会误报"未合焦"。
-            if (!ready && i % 2 == 0) {
-                lockStatus = try {
-                    getDevicePropValue(PtpConstants.PROP_NIKON_AF_LOCK_STATUS)
-                } catch (_: Exception) {
-                    -1
-                }
-                if (lockStatus == 1) {
-                    ready = true
-                    logger("AF 已锁焦（0xD104=1），按合焦处理")
-                }
-            }
-
-            if (ready) break
-            // 锁外睡眠：这段时间取景循环可以自由取帧（100ms → 画面看起来是"在动"）
-            Thread.sleep(100)
+            // 锁外睡眠：这段时间取景循环可以自由取帧（画面看起来是"在动"）
+            Thread.sleep(AfPollingPolicy.intervalMs(elapsedMs))
         }
 
-        // ---- 步骤 3：只有"没走完"才收尾 ----
+        // 只有"一直空闲但没锁焦"才说明 AF 真的结束了却没对上；
+        // 超时退出时在下面的收尾里取消，避免机身继续跑 AF 占着通道。
+        if (!ready && idleSeen) {
+            logger("对焦判定：机身已结束 AF，未合焦（0xD104=$lockStatus）")
+        }
+
+        // ---- 步骤 3：收尾 ----
         //
         // 官方 0x9206 = AfDriveCancel（取消对焦驱动），**不是**"AF 之后的收尾命令"。
         // 所以正常合焦后绝对不能发：发了等于把刚对好的焦取消掉。
-        // 只在两种情况下发：用户按了停止、或者等不到 DeviceReady（机身还在跑 AF）。
-        if (!ready) cancelAfDrive("未在时限内就绪")
+        // 只在两种情况下发：用户按了停止、或者机身还在跑 AF 而我们已经不等了。
+        // 机身自己已经收工（idleSeen 且未锁焦）时不必再发 —— 那只会多一次报错日志。
+        if (!ready && !idleSeen) cancelAfDrive("未在时限内就绪")
 
         logger(
             if (ready) "AF 驱动完成，机身已就绪"
-            else "AF 驱动已发送，但机身未回到就绪态（0xD104 锁焦=$lockStatus）"
+            else "AF 驱动已发送，未合焦（0xD104 锁焦=$lockStatus，机身${if (idleSeen) "已结束 AF" else "仍在忙"}" +
+                "）"
         )
         return ready
     }

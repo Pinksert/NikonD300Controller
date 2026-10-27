@@ -188,14 +188,33 @@ class FocusBoxView(context: Context, attrs: AttributeSet?) : View(context, attrs
     }
 
     /** 整幅画面坐标 → 显示坐标；返回 null 表示这一项已经被放大推出可视区 */
-    private fun fullToDisplay(x: Float, y: Float): Pair<Float, Float>? {
-        if (zoomScale <= 1f) return Pair(x, y)
+    /**
+     * 整幅坐标 → 当前屏幕坐标。
+     *
+     * 用**成员变量**回写结果而不是返回 `Pair`：这个方法在每帧的 onDraw 里会被调用
+     * 最多 51 次（每个对焦点一次）。每帧 51 个临时 Pair 在 25fps 下就是每秒上千个
+     * 小对象，虽然不会崩，但会让 GC 在取景过程中反复插进来，帧时间出现尖峰。
+     *
+     * @return false = 该点被放大出可视区，调用方跳过即可
+     */
+    private fun fullToDisplay(x: Float, y: Float): Boolean {
+        if (zoomScale <= 1f) {
+            outX = x
+            outY = y
+            return true
+        }
         val dx = 0.5f + (x - zoomCx) * zoomScale
         val dy = 0.5f + (y - zoomCy) * zoomScale
         // 留一点余量：正好压在边上的点还是画出来（半个点露在外面比整点消失好认）
-        if (dx < -0.02f || dx > 1.02f || dy < -0.02f || dy > 1.02f) return null
-        return Pair(dx, dy)
+        if (dx < -0.02f || dx > 1.02f || dy < -0.02f || dy > 1.02f) return false
+        outX = dx
+        outY = dy
+        return true
     }
+
+    /** [fullToDisplay] 的回写结果（避免每帧分配） */
+    private var outX = 0f
+    private var outY = 0f
 
     private val boxPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.parseColor("#FF9F0A")
@@ -204,6 +223,9 @@ class FocusBoxView(context: Context, attrs: AttributeSet?) : View(context, attrs
         strokeJoin = Paint.Join.ROUND
         setShadowLayer(6f, 0f, 0f, Color.parseColor("#66000000"))
     }
+
+    /** 还没等到机身回帧时用的淡色版：预建一次，别在 onDraw 里 new（每帧一个对象纯属浪费） */
+    private val boxPendingPaint = Paint(boxPaint).apply { alpha = 140 }
 
     private val cornerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
@@ -576,28 +598,29 @@ class FocusBoxView(context: Context, attrs: AttributeSet?) : View(context, attrs
         val h = displayRect.height()
         if (w <= 1 || h <= 1) return
 
+        // 三分 / 四分的分位固定不变，别每帧都新建数组
         val fracs = when (gridStyle) {
-            GridStyle.THIRDS, GridStyle.THIRDS_CENTER -> floatArrayOf(1f / 3f, 2f / 3f)
-            GridStyle.DENSE -> floatArrayOf(0.25f, 0.5f, 0.75f)
+            GridStyle.THIRDS, GridStyle.THIRDS_CENTER -> FRACS_THIRDS
+            GridStyle.DENSE -> FRACS_DENSE
             else -> return
         }
-        // 竖线：整幅画面里 x = f 的那条。放大后若被推出可视区，fullToDisplay 返回 null，跳过。
+        // 竖线：整幅画面里 x = f 的那条。放大后若被推出可视区，fullToDisplay 返回 false，跳过。
         for (f in fracs) {
-            val p = fullToDisplay(f, 0.5f) ?: continue
-            val x = displayRect.left + p.first * w
+            if (!fullToDisplay(f, 0.5f)) continue
+            val x = displayRect.left + outX * w
             canvas.drawLine(x, displayRect.top, x, displayRect.bottom, composePaint)
         }
         // 横线：整幅画面里 y = f 的那条
         for (f in fracs) {
-            val p = fullToDisplay(0.5f, f) ?: continue
-            val y = displayRect.top + p.second * h
+            if (!fullToDisplay(0.5f, f)) continue
+            val y = displayRect.top + outY * h
             canvas.drawLine(displayRect.left, y, displayRect.right, y, composePaint)
         }
         if (gridStyle == GridStyle.THIRDS_CENTER) {
             // 中心十字：整幅画面的正中心，同样跟着放大走
-            val p = fullToDisplay(0.5f, 0.5f) ?: return
-            val cx = displayRect.left + p.first * w
-            val cy = displayRect.top + p.second * h
+            if (!fullToDisplay(0.5f, 0.5f)) return
+            val cx = displayRect.left + outX * w
+            val cy = displayRect.top + outY * h
             val arm = (w.coerceAtMost(h) * 0.03f).coerceAtLeast(resources.displayMetrics.density * 6f)
             canvas.drawLine(cx - arm, cy, cx + arm, cy, composeCenterPaint)
             canvas.drawLine(cx, cy - arm, cx, cy + arm, composeCenterPaint)
@@ -627,9 +650,9 @@ class FocusBoxView(context: Context, attrs: AttributeSet?) : View(context, attrs
         for (p in points) {
             // 放大时点阵要跟着画面一起放大：把整幅坐标换算成"当前屏幕上"的位置，
             // 被推出可视区的点直接不画（画在框外会让人以为机身还能选到那儿）
-            val d = fullToDisplay(p.nx, p.ny) ?: continue
-            val cx = displayRect.left + d.first * w
-            val cy = displayRect.top + d.second * h
+            if (!fullToDisplay(p.nx, p.ny)) continue
+            val cx = displayRect.left + outX * w
+            val cy = displayRect.top + outY * h
             val active = p.id == selectedId
             val candidate = dragging && p.id == dragCandidate?.id
             when {
@@ -654,16 +677,16 @@ class FocusBoxView(context: Context, attrs: AttributeSet?) : View(context, attrs
         val bh = (boxH * zs * h).coerceAtMost(h).coerceAtLeast(resources.displayMetrics.density * 16f)
         // ★ 放大时画面是绕着对焦点裁出来的，AF 框必然落在画面的正中间；
         //   帧头报回来的坐标在放大状态下参照系会变，直接用会画歪，所以这里按中心画。
-        val (nx, ny) = if (zoomScale > 1f) Pair(0.5f, 0.5f) else Pair(boxCx, boxCy)
+        // 放大时框统一画在画面中心（帧头坐标在放大状态下参照系会变）
+        val nx = if (zoomScale > 1f) 0.5f else boxCx
+        val ny = if (zoomScale > 1f) 0.5f else boxCy
         val cx = displayRect.left + nx * w
         val cy = displayRect.top + ny * h
         afRect.set(cx - bw / 2f, cy - bh / 2f, cx + bw / 2f, cy + bh / 2f)
         if (afRect.isEmpty) return
 
-        val paint = if (boxPending) {
-            // 未确认：淡一点，机身回帧后会自动变成实色
-            Paint(boxPaint).apply { alpha = 140 }
-        } else boxPaint
+        // 未确认时用预建的淡色画笔：以前每帧 new Paint(boxPaint) 一次，完全是白给的 GC
+        val paint = if (boxPending) boxPendingPaint else boxPaint
 
         val len = afRect.width().coerceAtMost(afRect.height()) * 0.35f
         drawCorner(canvas, afRect.left, afRect.top, len, 1, 1, paint)
@@ -675,5 +698,12 @@ class FocusBoxView(context: Context, attrs: AttributeSet?) : View(context, attrs
     private fun drawCorner(canvas: Canvas, x: Float, y: Float, len: Float, sx: Int, sy: Int, paint: Paint) {
         canvas.drawLine(x, y, x + sx * len, y, paint)
         canvas.drawLine(x, y, x, y + sy * len, paint)
+    }
+
+    private companion object {
+        /** 三分线 / 中心十字用的分位；固定值，别每帧新建 */
+        val FRACS_THIRDS = floatArrayOf(1f / 3f, 2f / 3f)
+        /** 密集网格的四分位 */
+        val FRACS_DENSE = floatArrayOf(0.25f, 0.5f, 0.75f)
     }
 }

@@ -454,14 +454,18 @@ fun Context.sheetTileGrid(
         val tile = TextView(this).apply {
             text = label
             gravity = Gravity.CENTER
-            textSize = 13f
+            textSize = 12.5f
+            // 固定两行高度：像「RAW + JPEG 精细」这种长档位会折成两行，
+            // 若让高度随内容走，同一页里就会出现高低不一的按钮。maxLines=2 + 统一高度后，
+            // 单行档位垂直居中、双行档位正好填满，全页按钮一样大。
+            maxLines = 2
             isAllCaps = false
             setTextColor(if (index == initialSelected) amber else primaryColor)
             isSelected = index == initialSelected
             setBackgroundResource(R.drawable.bg_tile)
             val lp = GridLayout.LayoutParams().apply {
                 width = 0
-                height = dp(46)
+                height = dp(52)
                 columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
                 setMargins(dp(4), dp(4), dp(4), dp(4))
             }
@@ -473,6 +477,25 @@ fun Context.sheetTileGrid(
         }
         tiles.add(tile)
         grid.addView(tile)
+    }
+
+    // 最后一行不满时补上占位格：GridLayout 的列宽是按"本行有几个单元格"分的，
+    // 8 个按钮塞 3 列时最后一行只有 2 个，它们就会各占半行 —— 比上面两行的按钮宽出一截。
+    // 补空 View（不可见、不接收触摸）把最后一行填满，所有按钮才是同样大小。
+    val remainder = labels.size % columns
+    if (labels.isNotEmpty() && remainder != 0) {
+        repeat(columns - remainder) {
+            grid.addView(View(this).apply {
+                visibility = View.INVISIBLE
+                isClickable = false
+                layoutParams = GridLayout.LayoutParams().apply {
+                    width = 0
+                    height = dp(52)
+                    columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
+                    setMargins(dp(4), dp(4), dp(4), dp(4))
+                }
+            })
+        }
     }
 
     val selectMany: (List<Int>) -> Unit = { targets ->

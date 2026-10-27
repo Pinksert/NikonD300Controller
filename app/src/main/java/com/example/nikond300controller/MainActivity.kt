@@ -297,21 +297,16 @@ class MainActivity : AppCompatActivity(), SheetHost {
     // ---- 参数页 · 曝光与画质（测光 / 闪光补偿 / 画质）----
     // 这三项都是"先问机身描述符，再按它自述的值域出菜单"，所以只在开会话和打开二级页时读，
     // 不塞进 2 秒轮询（轮询已经连读 9 条属性，再加会让取景启动更慢）。
-    /** 测光模式的值那一栏（参数页那行右侧；二级页里也用它标当前档） */
-    private lateinit var meteringValue: TextView
-    /** 参数页「曝光与画质」里那行只读的测光模式（整行，用来统一压暗） */
-    private lateinit var meteringRowView: View
     private lateinit var flashCompRow: SheetValueRow
     private lateinit var imageQualityRow: SheetValueRow
 
     /** 「JPEG 压缩」（0x5004）：基本 / 标准 / 精细，管压缩率不管尺寸 */
     private lateinit var compressionRow: SheetValueRow
     private lateinit var mediaRow: SheetValueRow
+    /** 测光模式当前档（供测光二级页标出高亮项；界面上的那行在「机身信息」里） */
     @Volatile private var currentMetering = -999999
     @Volatile private var currentFlashComp = -999999
 
-    // ---- 参数页 · 机身与存储 ----
-    private lateinit var storageRow: SheetValueRow
     // 机身信息不再是参数页的一行：连上相机后点左上角的机型名即可打开（见 statusText 的点击）
     @Volatile private var shutterCount = -1          // 快门释放次数，-1 = 还没读
     @Volatile private var shutterCountReading = false
@@ -4047,12 +4042,11 @@ class MainActivity : AppCompatActivity(), SheetHost {
             renderAfPointRow()
 
             // 参数页新增的行：未连接时压暗（点击仍会被各自的守卫拦住并提示）
-            if (::meteringRowView.isInitialized) {
+            if (::flashCompRow.isInitialized) {
                 val alpha = if (isConnected) 1f else 0.45f
-                meteringRowView.alpha = alpha
                 listOf(
                     flashCompRow, imageQualityRow, mediaRow,
-                    storageRow, intervalRow, autoDownloadRow
+                    intervalRow, autoDownloadRow
                 ).forEach { it.view.alpha = alpha }
                 if (::focusStackRow.isInitialized) focusStackRow.view.alpha = alpha
                 // 方框那两组没有统一的 Row 外壳，单独压暗
@@ -7099,8 +7093,10 @@ class MainActivity : AppCompatActivity(), SheetHost {
      * ⚠️ 这台 D300 把 0x500B 的 GetSet 报成**只读**，App 写不动它 ——
      * 所以这里不是"选档器"：点一档会真的发一次写命令（万一哪台机身允许就当场生效），
      * 被拒时明确告诉用户"请用机身上的测光选择转盘切换"，而不是闷声失败。
+     *
+     * @param onLabel 写入成功后的回调：把新档位回填到调用方那一行（现在那行在「机身信息」里）
      */
-    private fun showMeteringSheet() {
+    private fun showMeteringSheet(onLabel: (String) -> Unit = {}) {
         val entries = listOf(5 to "矩阵测光", 2 to "中央重点测光", 3 to "点测光")
         val current = currentMetering
         val page = buildSheetPage(
@@ -7124,7 +7120,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
                             if (ok) {
                                 status.text = "已设为 $label"
                                 log("测光模式已设为 $label（主机模式写入）")
-                                meteringValue.text = label
+                                onLabel(label)
                                 currentMetering = code
                                 page.dialog.dismiss()
                             } else {
@@ -7511,9 +7507,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
             currentMetering = meter
             currentFlashComp = if (flash == -999999L) -999999 else flash.toInt()
             runOnUiThread {
-                if (::meteringValue.isInitialized) {
-                    currentMetering = meter
-                    meteringValue.text = if (meter == -999999) "不支持" else meteringLabel(meter.toLong())
+                if (::flashCompRow.isInitialized) {
                     flashCompRow.value.text = if (flash == -999999L) "不支持" else flashCompLabel(flash)
                     imageQualityRow.value.text = imageSizeText(size)
                     if (::compressionRow.isInitialized) {
@@ -7541,19 +7535,8 @@ class MainActivity : AppCompatActivity(), SheetHost {
                 ptpConnection?.getStorageInfo(id)?.let { list.add(it) }
             }
             storages = list
-            runOnUiThread {
-                if (::storageRow.isInitialized) {
-                    storageRow.value.text = when {
-                        list.isEmpty() -> "未检测到存储卡"
-                        // 装机就一张卡，写"1 张卡"没有信息量；多卡才需要标序号
-                        // 剩余空间放在"约可拍"前面：张数只是估算，还得知道卡里剩多少 G
-                        list.size == 1 -> "%.1f GB · 约可拍 %d 张"
-                            .format(list[0].freeGb, list[0].freeImages)
-                        else -> "共 %.1f GB · 约可拍 %d 张"
-                            .format(list.sumOf { it.freeGb }, list.sumOf { it.freeImages })
-                    }
-                }
-            }
+            // 卡的信息只在「机身信息」里显示，那边打开时自己读一次；
+            // 这里只刷新缓存，供「存储卡」二级页和拍照后的剩余张数用。
         }
     }
 
@@ -7807,6 +7790,26 @@ class MainActivity : AppCompatActivity(), SheetHost {
         val (scRow, scValue) = sheetInfoRow("释放模式", "读取中…")
         card.addView(scRow)
 
+        // 测光模式与存储卡从参数页搬过来：这两项是机身当前状态 / 机身里的卡，
+        // 不是"这次拍摄要调的参数"。测光那一行点进去只有三档 + 一句"只能用转盘改"。
+        var meterRowRef: SheetValueRow? = null
+        val meterRow = sheetValueRow("测光模式", "读取中…") { _ ->
+            if (!isConnected) toast("请先连接相机") else showMeteringSheet { label ->
+                meterRowRef?.value?.text = label
+            }
+        }
+        meterRowRef = meterRow
+        card.addView(meterRow.view)
+
+        var storageRowRef: SheetValueRow? = null
+        val storageEntry = sheetValueRow("存储卡", "读取中…") { _ ->
+            if (!isConnected) toast("请先连接相机") else showStorageSheet { summary ->
+                storageRowRef?.value?.text = summary
+            }
+        }
+        storageRowRef = storageEntry
+        card.addView(storageEntry.view)
+
         // 机身状态：15 条只读状态量单独一页（一次要问机身十几趟，不该拖慢这一页）
         val statEntry = sheetValueRow(
             "机身状态（只读）",
@@ -7883,6 +7886,42 @@ class MainActivity : AppCompatActivity(), SheetHost {
                 ) {
                     // 停在 Mup / 自拍挡多半是上一次自动恢复没成功，标红提醒
                     scValue.setTextColor(ContextCompat.getColor(this, R.color.accent_red))
+                }
+            }
+
+            // 测光模式（0x500B）：机身报只读，这里只显示当前档
+            val meter = try {
+                ptpConnection?.getDevicePropValue(PtpConstants.PROP_METERING_MODE) ?: -999999
+            } catch (_: Exception) {
+                -999999
+            }
+            currentMetering = meter
+            runOnUiThread {
+                meterRowRef?.value?.text = if (meter == -999999) "不支持" else meteringLabel(meter.toLong())
+            }
+
+            // 存储卡：容量 + 约可拍张数（同一份缓存留给「存储卡」二级页）
+            val ids = try {
+                ptpConnection?.getStorageIds() ?: IntArray(0)
+            } catch (_: Exception) {
+                IntArray(0)
+            }
+            val storageList = ArrayList<StorageInfo>()
+            for (id in ids) {
+                try {
+                    ptpConnection?.getStorageInfo(id)?.let { storageList.add(it) }
+                } catch (_: Exception) {
+                    // 单张卡读失败不影响别的卡
+                }
+            }
+            storages = storageList
+            runOnUiThread {
+                storageRowRef?.value?.text = when {
+                    storageList.isEmpty() -> "未检测到存储卡"
+                    storageList.size == 1 -> "%.1f GB · 约可拍 %d 张"
+                        .format(storageList[0].freeGb, storageList[0].freeImages)
+                    else -> "共 %.1f GB · 约可拍 %d 张"
+                        .format(storageList.sumOf { it.freeGb }, storageList.sumOf { it.freeImages })
                 }
             }
         }
@@ -8105,7 +8144,10 @@ class MainActivity : AppCompatActivity(), SheetHost {
      * 双卡机上等于闭着眼睛按删除。放到卡的详情里，容量/剩余和删除动作摆在同一个卡片上，
      * 少一次猜。格式化完成后这里就地重读，不用退出去再进来。
      */
-    private fun showStorageSheet() {
+    /**
+     * @param onSummary 把"容量 · 约可拍"回填到调用方那一行（现在那行在「机身信息」里）
+     */
+    private fun showStorageSheet(onSummary: (String) -> Unit = {}) {
         if (!isConnected) { toast("请先连接相机"); return }
         val page = buildSheetPage("存储卡", "容量 / 剩余空间 / 格式化")
         val host = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -8113,11 +8155,11 @@ class MainActivity : AppCompatActivity(), SheetHost {
         val sheetStatus = sheetStatusText("正在读取存储卡…")
         page.content.addView(sheetStatus)
         page.show()
-        renderStorageCards(host, sheetStatus)
+        renderStorageCards(host, sheetStatus, onSummary)
     }
 
     /** 读卡并把每张卡的卡片铺进 [host]；格式化成功后就地回调自己重绘 */
-    private fun renderStorageCards(host: LinearLayout, sheetStatus: TextView) {
+    private fun renderStorageCards(host: LinearLayout, sheetStatus: TextView, onSummary: (String) -> Unit = {}) {
         thread {
             val ids = ptpConnection?.getStorageIds() ?: IntArray(0)
             val list = ArrayList<StorageInfo>()
@@ -8127,8 +8169,15 @@ class MainActivity : AppCompatActivity(), SheetHost {
                 host.removeAllViews()
                 if (list.isEmpty()) {
                     sheetStatus.text = "没读到存储卡（机身没插卡，或卡不可用）"
+                    onSummary("未检测到存储卡")
                     return@runOnUiThread
                 }
+                onSummary(
+                    if (list.size == 1) "%.1f GB · 约可拍 %d 张".format(list[0].freeGb, list[0].freeImages)
+                    else "共 %.1f GB · 约可拍 %d 张".format(
+                        list.sumOf { it.freeGb }, list.sumOf { it.freeImages }
+                    )
+                )
                 val single = list.size == 1
                 sheetStatus.text = if (single) "已读取存储卡" else "共 ${list.size} 张卡"
                 list.forEachIndexed { idx, s ->
@@ -8164,17 +8213,13 @@ class MainActivity : AppCompatActivity(), SheetHost {
                             ).apply { topMargin = (10 * resources.displayMetrics.density).toInt(); bottomMargin = (4 * resources.displayMetrics.density).toInt() }
                         })
                         val fmt = sheetValueRow("格式化这张卡", "不可撤销") { _ ->
-                            showFormatConfirmSheet(idx, s, single) { renderStorageCards(host, sheetStatus) }
+                            showFormatConfirmSheet(idx, s, single) {
+                                renderStorageCards(host, sheetStatus, onSummary)
+                            }
                         }
                         fmt.value.setTextColor(ContextCompat.getColor(this, R.color.accent_red))
                         card.addView(fmt.view)
                     }
-                }
-                if (::storageRow.isInitialized) {
-                    storageRow.value.text = if (list.size == 1)
-                        "%.1f GB · 约可拍 %d 张".format(list[0].freeGb, list[0].freeImages)
-                    else "共 %.1f GB · 约可拍 %d 张"
-                        .format(list.sumOf { it.freeGb }, list.sumOf { it.freeImages })
                 }
             }
         }
@@ -8438,15 +8483,8 @@ class MainActivity : AppCompatActivity(), SheetHost {
         }
         eqList.addView(wbRow.view)
 
-        // 测光模式：机身把 0x500B 报成只读，App 改不了档 ——
-        // 但整行做成死的又说不清"现在到底是哪一档"，所以仍然可以点进去看：
-        // 二级页列出三种测光方式、标出机身当前档，并写明只能靠机身上的转盘切换。
-        val meterRow = sheetValueRow("测光模式", "待读取") { _ ->
-            if (!isConnected) toast("请先连接相机") else showMeteringSheet()
-        }
-        meteringRowView = meterRow.view
-        meteringValue = meterRow.value
-        eqList.addView(meterRow.view)
+        // 测光模式 / 存储卡都搬到「机身信息」了：一个是机身当前状态，一个是机身里的卡，
+        // 都不属于"这次拍摄要调的参数"。
 
         flashCompRow = sheetValueRow("闪光补偿", "待读取") { _ ->
             if (!isConnected) toast("请先连接相机") else showEnumPropSheet(
@@ -8519,15 +8557,10 @@ class MainActivity : AppCompatActivity(), SheetHost {
         gridHost.addView(touchAfRow.view)
         renderAfPointRow()
 
-        // ---- 存储（机身信息已经挪到左上角机型名，不再占一行）----
-        val mgmtList = findViewById<LinearLayout>(R.id.deviceMgmtList)
-        storageRow = sheetValueRow("存储卡", "--") { _ ->
-            if (!isConnected) toast("请先连接相机") else showStorageSheet()
-        }
-        mgmtList.addView(storageRow.view)
-
-        // 格式化不再单独占一行：它属于"针对某张卡"的操作，
-        // 放进「存储卡」二级页的每张卡里（容量/剩余/格式化在同一张卡片上，不会按错卡）。
+        // ---- 存储 ----
+        // 「存储卡」那一行搬到「机身信息」了（卡是机身的部件，不是拍摄参数）；
+        // 格式化也一并在那边「存储卡」二级页里，针对某张卡操作，不会按错卡。
+        // 这一组现在只剩菜单入口，卡片标题也跟着改成「机身菜单」。
 
         // ---- 个人设定：a–f 共 50 项收进二级页，参数页只留这一行 ----
         val csmEntryHost = findViewById<LinearLayout>(R.id.csmEntryList)

@@ -937,16 +937,10 @@
                                 android:paddingStart="6dp"
                                 android:paddingEnd="6dp"
                                 android:paddingBottom="6dp"
-                                android:text="机身"
+                                android:text="机身菜单"
                                 android:textColor="@color/text_secondary"
                                 android:textSize="11sp"
                                 android:textStyle="bold" />
-
-                            <LinearLayout
-                                android:id="@+id/deviceMgmtList"
-                                android:layout_width="match_parent"
-                                android:layout_height="wrap_content"
-                                android:orientation="vertical" />
 
                             <LinearLayout
                                 android:id="@+id/csmEntryList"

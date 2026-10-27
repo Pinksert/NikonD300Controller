@@ -3458,31 +3458,25 @@ class MainActivity : AppCompatActivity(), SheetHost {
                     // 结果"机身已经合焦，按拍摄又用光学 AF 对了一遍"。
                     // 这里主动等它锁焦（最多 3 秒），锁上就把标记记下来、并把耗时显示出来。
                     thread {
-                        var locked = false
-                        // 0xD104 采样 100ms 一次（20 次 × 100ms = 2 秒上限）：
-                        // 耗时显示的分辨率跟着采样间隔走，200ms 太粗、合焦经常被多算一截
-                        for (i in 0 until 20) {
-                            val lock = try {
-                                ptpConnection?.getDevicePropValue(PtpConstants.PROP_NIKON_AF_LOCK_STATUS) ?: -1
-                            } catch (_: Exception) {
-                                -1
-                            }
-                            if (lock == 1) {
-                                locked = true
-                                lvAfLocked = true
-                                break
-                            }
-                            Thread.sleep(100)
+                        // ★ 判定用 0x90C8，不再用 0xD104。
+                        // 真机日志证明 0xD104（AFLockStatus）在 D300 上对焦全程都是 0，
+                        // 拿它等锁焦永远等不到 —— 于是机身已经合焦、还响了提示音，
+                        // 界面上却停在"未合焦"。0x90C8 回 0x2001 才是"AF 结束"。
+                        val finished = try {
+                            ptpConnection?.waitAfFinish(2500) ?: false
+                        } catch (_: Exception) {
+                            false
                         }
                         val cost = System.currentTimeMillis() - afStartMs
                         runOnUiThread {
-                            if (locked) {
+                            if (finished) {
+                                lvAfLocked = true
                                 setFocusStatus(true, cost)
-                                log("机身对焦完成（0x9205 触发，0xD104=1）耗时 ${formatDuration(cost)}")
+                                log("机身对焦完成（0x9205 触发，机身已空闲）耗时 ${formatDuration(cost)}")
                             } else {
-                                // 没读到锁焦不代表没对上：0xD104 在手动对焦/某些镜头下就是不给值。
+                                // 没等到空闲不代表没对上：可能机身还在慢慢磨。
                                 // 这里只记时间、不把提示改成"未合焦"，免得和机身提示音打架。
-                                log("2 秒内没读到锁焦（0xD104≠1），耗时 ${formatDuration(cost)} —— 以画面为准")
+                                log("2.5 秒内没等到机身空闲，耗时 ${formatDuration(cost)} —— 以画面为准")
                             }
                         }
                     }

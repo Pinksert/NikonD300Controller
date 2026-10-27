@@ -48,31 +48,22 @@ class AfPollingPolicyTest {
     }
 
     @Test
-    fun `空闲但没锁焦才算 AF 结束，且要过起步保护期`() {
-        // 典型成功：锁上了 —— 不进入"结束但未对焦"分支
-        assertFalse(AfPollingPolicy.isFinishedUnfocused(deviceReady = true, lockStatus = 1, elapsedMs = 800))
-        // 典型失败：机身空闲、没锁焦、已经过了 250ms 保护期
-        assertTrue(AfPollingPolicy.isFinishedUnfocused(deviceReady = true, lockStatus = 0, elapsedMs = 900))
-        // 还在跑 AF（机身忙）：不算结束
-        assertFalse(AfPollingPolicy.isFinishedUnfocused(deviceReady = false, lockStatus = 0, elapsedMs = 900))
-        // 刚发命令 100ms 时的"空闲"是假象，不能当结束
-        assertFalse(AfPollingPolicy.isFinishedUnfocused(deviceReady = true, lockStatus = -1, elapsedMs = 100))
-        // 边界：正好 250ms 仍算保护期内
-        assertFalse(AfPollingPolicy.isFinishedUnfocused(deviceReady = true, lockStatus = 0, elapsedMs = 250))
-        assertTrue(AfPollingPolicy.isFinishedUnfocused(deviceReady = true, lockStatus = 0, elapsedMs = 251))
-    }
-
-    @Test
-    fun `看到空闲后要多等观察窗口，窗口内锁上仍算成功`() {
-        // 还没看到过空闲：不能收手
-        assertFalse(AfPollingPolicy.shouldStopUnfocused(idleSinceMs = -1, elapsedMs = 5000))
-        // 刚看到空闲（0ms 前）：窗口没走满，继续观察 —— 这时候可能只是 AF 刚起步的假空闲
-        assertFalse(AfPollingPolicy.shouldStopUnfocused(idleSinceMs = 300, elapsedMs = 300))
-        assertFalse(AfPollingPolicy.shouldStopUnfocused(idleSinceMs = 300, elapsedMs = 499))
-        // 窗口正好走满：可以判定"结束但没对上"
-        assertTrue(AfPollingPolicy.shouldStopUnfocused(idleSinceMs = 300, elapsedMs = 500))
-        // 观察窗口必须显著短于总预算，否则等于没提速
-        assertTrue(AfPollingPolicy.IDLE_GRACE_MS < AfPollingPolicy.MAX_WAIT_MS / 10)
+    fun `0x2019 与 0x2002 算还在跑，0x2001 才算 AF 结束`() {
+        // 真机日志：整段对焦过程 0x90C8 都回 0x2019（Focus Not Locked）→ 必须继续等
+        assertTrue(AfPollingPolicy.isStillFocusing(0x2019))
+        assertTrue(AfPollingPolicy.isStillFocusing(0x2002))
+        assertFalse(AfPollingPolicy.isStillFocusing(0x2001))
+        // 只有 0x2001（机身空闲）才算 AF 结束
+        assertTrue(AfPollingPolicy.isReady(0x2001))
+        assertFalse(AfPollingPolicy.isReady(0x2019))
+        assertFalse(AfPollingPolicy.isReady(0x2002))
+        // 两个判定互斥且覆盖住"继续等 / 可以继续拍"这两种状态
+        for (code in listOf(0x2001, 0x2002, 0x2019)) {
+            assertFalse(
+                "回码 0x${Integer.toHexString(code)} 不能同时算两种状态",
+                AfPollingPolicy.isReady(code) && AfPollingPolicy.isStillFocusing(code)
+            )
+        }
     }
 
     @Test

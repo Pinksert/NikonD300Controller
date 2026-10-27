@@ -7664,7 +7664,8 @@ class MainActivity : AppCompatActivity(), SheetHost {
         // 一台机身的身份 + 当前状态全放在这一组里：型号 / 固件 / 序列号 / 快门数 /
         // 镜头规格 / 释放模式 / 机身状态。以前拆成「机身 / 镜头 / 释放模式 / 机身状态」四张卡，
         // 每一张都只有一两行，读起来像四份残缺清单。
-        val card = sheetCard(page.content, "机身")
+        // 卡片本身不再挂「机身」小标题：整页就叫「机身信息」，再标一次是重复。
+        val card = sheetCard(page.content)
         val (modelRow, modelValue) = sheetInfoRow("型号", deviceInfoCache?.model ?: "读取中…")
         val (verRow, verValue) = sheetInfoRow("固件版本", deviceInfoCache?.versionOrDash() ?: "读取中…")
         val (serialRow, serialValue) = sheetInfoRow("序列号", deviceInfoCache?.serialOrDash() ?: "读取中…")

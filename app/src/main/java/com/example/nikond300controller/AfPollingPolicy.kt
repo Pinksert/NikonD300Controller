@@ -27,6 +27,16 @@ object AfPollingPolicy {
      */
     const val IDLE_GUARD_MS = 250L
 
+    /**
+     * 一旦看到"空闲 + 未锁焦"，**不立刻收手**，再多观察这么久。
+     *
+     * 真机日志显示单次"空闲"有可能出现在 AF 刚刚起步的瞬间（0x90C1 是异步的），
+     * 立刻判失败会把本来能合上的对焦掐掉。多给一个窗口：这段时间里只要
+     * 0xD104 变 1 就按成功算；窗口走完仍然没锁焦，才认定"机身结束 AF 且没对上"。
+     * 代价是把失败判定推迟 200ms，相比旧版干等 6 秒仍然快一个数量级。
+     */
+    const val IDLE_GRACE_MS = 200L
+
     /** 0x90C8 的探测周期（每 N 轮一次） */
     const val DEVICE_READY_EVERY = 3
 
@@ -55,4 +65,13 @@ object AfPollingPolicy {
      */
     fun isFinishedUnfocused(deviceReady: Boolean, lockStatus: Int, elapsedMs: Long): Boolean =
         deviceReady && lockStatus != 1 && elapsedMs > IDLE_GUARD_MS
+
+    /**
+     * 空闲观察窗口是否已经走满（走满才允许收手）。
+     *
+     * @param idleSinceMs 第一次看到"空闲 + 未锁焦"的时刻；-1 表示还没看到过
+     * @param elapsedMs 从发 0x90C1 到现在过了多久
+     */
+    fun shouldStopUnfocused(idleSinceMs: Long, elapsedMs: Long): Boolean =
+        idleSinceMs >= 0 && elapsedMs - idleSinceMs >= IDLE_GRACE_MS
 }

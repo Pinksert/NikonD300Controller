@@ -63,6 +63,19 @@ class AfPollingPolicyTest {
     }
 
     @Test
+    fun `看到空闲后要多等观察窗口，窗口内锁上仍算成功`() {
+        // 还没看到过空闲：不能收手
+        assertFalse(AfPollingPolicy.shouldStopUnfocused(idleSinceMs = -1, elapsedMs = 5000))
+        // 刚看到空闲（0ms 前）：窗口没走满，继续观察 —— 这时候可能只是 AF 刚起步的假空闲
+        assertFalse(AfPollingPolicy.shouldStopUnfocused(idleSinceMs = 300, elapsedMs = 300))
+        assertFalse(AfPollingPolicy.shouldStopUnfocused(idleSinceMs = 300, elapsedMs = 499))
+        // 窗口正好走满：可以判定"结束但没对上"
+        assertTrue(AfPollingPolicy.shouldStopUnfocused(idleSinceMs = 300, elapsedMs = 500))
+        // 观察窗口必须显著短于总预算，否则等于没提速
+        assertTrue(AfPollingPolicy.IDLE_GRACE_MS < AfPollingPolicy.MAX_WAIT_MS / 10)
+    }
+
+    @Test
     fun `最坏情况采样次数与旧版对比`() {
         // 旧版：固定 100ms × 60 轮 = 6 秒，最多 60 次采样
         // 新版：按变步长累计到 6 秒，采样次数明显更多 —— 合焦判定更细

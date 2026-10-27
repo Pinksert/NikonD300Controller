@@ -3333,6 +3333,9 @@ class PtpUsbConnection(
         var ready = false
         var lockStatus = -1
         var idleSeen = false
+        // 第一次看到"空闲 + 未锁焦"的时刻（-1 = 还没看到）。看到后先观察 IDLE_GRACE_MS，
+        // 这期间锁上就算成功 —— 真机上确实出现过"AF 刚起步时 0x90C8 短暂回 OK"的情况。
+        var idleSinceMs = -1L
         val startedNs = System.nanoTime()
         var round = 0
         while (true) {
@@ -3372,9 +3375,10 @@ class PtpUsbConnection(
                 when (code) {
                     PtpConstants.RESP_OK -> {
                         idleSeen = true
-                        if (AfPollingPolicy.isFinishedUnfocused(true, lockStatus, elapsedMs)) {
-                            logger("AF 结束但未锁焦（机身已空闲，${elapsedMs}ms）")
-                            break
+                        if (AfPollingPolicy.isFinishedUnfocused(true, lockStatus, elapsedMs) &&
+                            idleSinceMs < 0
+                        ) {
+                            idleSinceMs = elapsedMs
                         }
                     }
                     PtpConstants.RESP_DEVICE_BUSY,
@@ -3384,6 +3388,12 @@ class PtpUsbConnection(
                         break
                     }
                 }
+            }
+
+            // ③ 观察窗口走满、仍没锁焦 → 认定"AF 结束但没对上"
+            if (AfPollingPolicy.shouldStopUnfocused(idleSinceMs, elapsedMs)) {
+                logger("AF 结束但未锁焦（机身已空闲 ${elapsedMs - idleSinceMs}ms，总 ${elapsedMs}ms）")
+                break
             }
 
             round++

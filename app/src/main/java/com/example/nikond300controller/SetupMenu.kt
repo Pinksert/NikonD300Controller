@@ -72,8 +72,27 @@ object SetupMenu {
                 options = mapOf(0L to "关闭", 1L to "开启")
             ),
             SetupItem(
-                PtpConstants.PROP_NIKON_MANUAL_LENS_NO, "非 CPU 镜头焦距",
-                hint = "手动镜头登记用的焦距档（配合「非 CPU 镜头数据」）"
+                PtpConstants.PROP_NIKON_MANUAL_LENS_NO, "非 CPU 镜头编号",
+                hint = "机身里「非 CPU 镜头数据」登记的是第几号镜头（0xD093 ManualSettingLensNo）"
+            )
+        ),
+
+        // 机身菜单里「非 CPU 镜头数据」是**一项进去填三样**：镜头编号、焦距、光圈。
+        // 官方属性表把焦距/光圈标成 menu=Custom（0xD02E/0xD02F），编号标成 Setup（0xD093）——
+        // 归属列不一致，但机身上确实是同一处设置，所以这里并成一组，别让用户在两个菜单里找。
+        "非 CPU 镜头" to listOf(
+            SetupItem(
+                PtpConstants.PROP_NIKON_MANUAL_LENS_NO, "登记镜头编号",
+                hint = "对应机身「非 CPU 镜头数据 → 镜头编号」"
+            ),
+            SetupItem(
+                PtpConstants.PROP_NIKON_FMM_MANUAL, "焦距（mm）",
+                hint = "对应「非 CPU 镜头数据 → 焦距」。单位是 mm，机身报的是不是 mm×100 未核对，" +
+                    "界面照原始值显示，别当成「这就是 XX mm」"
+            ),
+            SetupItem(
+                PtpConstants.PROP_NIKON_F0_MANUAL, "光圈（F 值）",
+                hint = "对应「非 CPU 镜头数据 → 光圈」。同样只显示机身报的原始值"
             )
         ),
 

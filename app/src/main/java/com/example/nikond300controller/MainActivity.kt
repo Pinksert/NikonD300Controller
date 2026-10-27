@@ -2371,6 +2371,34 @@ class MainActivity : AppCompatActivity(), SheetHost {
         }
         bankCard.addView(editBank.view)
 
+        // ---- 白平衡预设注释（0xD020–0xD024）：字符串属性，跟版权注释同一套编辑页 ----
+        val wbCard = sheetCard(page.content, "白平衡预设注释（文字）")
+        wbCard.addView(sheetHint(
+            "机身测完白平衡之后可以给 d-1…d-5 各起一个名字。这五个是字符串属性，" +
+                "数值写入会被机身拒绝，所以走文字编辑页。\n" +
+                "对应的「数据」（0xD025–0xD029）在上面那一组里，只能看不能手改。"
+        ))
+        val wbCodes = intArrayOf(
+            PtpConstants.PROP_NIKON_WB_PRESET_COMMENT0,
+            PtpConstants.PROP_NIKON_WB_PRESET_COMMENT1,
+            PtpConstants.PROP_NIKON_WB_PRESET_COMMENT2,
+            PtpConstants.PROP_NIKON_WB_PRESET_COMMENT3,
+            PtpConstants.PROP_NIKON_WB_PRESET_COMMENT4
+        )
+        wbCodes.forEachIndexed { idx, code ->
+            val row = sheetValueRow("预设 d-${idx + 1} 注释", "点击编辑") { _ ->
+                showTextPropSheet("预设 d-${idx + 1} 注释", code, "给这个白平衡预设起的名字", 20)
+            }
+            wbCard.addView(row.view)
+        }
+
+        // ---- 重设拍摄菜单（0xD015）：一次性动作，同样只给红色确认按钮 ----
+        val resetRow = sheetValueRow("重设拍摄菜单", "不可撤销") { _ ->
+            if (!isConnected) toast("请先连接相机") else showShootingResetSheet()
+        }
+        resetRow.value.setTextColor(getColor(R.color.accent_red))
+        page.content.addView(resetRow.view)
+
         val wasPaused = isPollingPaused
         isPollingPaused = true
         thread {
@@ -4426,6 +4454,32 @@ class MainActivity : AppCompatActivity(), SheetHost {
                         if (v == -999999) "$label：读取失败\n"
                         else "$label：0x${Integer.toHexString(v).uppercase()}（$v）\n"
                     )
+                }
+
+                // ---- 全厂商属性快照（0x90CA 清单 + 逐条描述符）----
+                //
+                // 官方属性表（197 项）里有一批**只给名字、不给值域**的码（闪光灯状态、
+                // 机身方向、缓冲张数…），它们到底在 D300 上应不应答、值域几档，
+                // 只能靠这份快照说话。一次 0x90CA 拿到机身自报的清单，再逐条读描述符 ——
+                // 比一条条盲试准，也比盲扫快。约十几秒，只在手动导出时跑。
+                lines.append("\n---- 全厂商属性快照（0x90CA）----\n")
+                val vendorCodes = try {
+                    ptpConnection?.getVendorPropCodes()
+                } catch (_: Exception) {
+                    null
+                }
+                if (vendorCodes == null || vendorCodes.isEmpty()) {
+                    lines.append("（机身没回 0x90CA 清单）\n")
+                } else {
+                    lines.append("机身自报 ${vendorCodes.size} 项\n")
+                    for (c in vendorCodes) {
+                        val desc = try {
+                            ptpConnection?.describeProp(c)
+                        } catch (_: Exception) {
+                            null
+                        }
+                        lines.append("0x%04X  %s\n".format(c, desc ?: "描述符读取失败"))
+                    }
                 }
             } else {
                 lines.append("（未连接）\n")
@@ -7420,6 +7474,81 @@ class MainActivity : AppCompatActivity(), SheetHost {
         val (scRow, scValue) = sheetInfoRow("当前释放模式", "读取中…")
         modeCard.addView(scRow)
 
+        // ---- 机身状态（只读）：官方属性表里「菜单归属」为空的那批 ----
+        //
+        // 这些码官方只给名字、不给值域，也可能这台机身根本不应答，所以**不自动读**：
+        // 十几条一次问下来机身要忙一会儿，等用户主动点再问，读不到就明写「不支持」。
+        val statCard = sheetCard(page.content, "机身状态（只读）")
+        statCard.addView(sheetHint(
+            "闪光灯是否接着、机身方向、连拍缓冲、曝光指示…这些是机身自己报的状态，改不了。\n" +
+                "读不到就写「不支持」—— 官方表给了名字，不代表这台机身一定应答。"
+        ))
+        val rawFmt: (Int) -> String = { v -> "值 $v" }
+        val stats = listOf<Triple<String, Int, (Int) -> String>>(
+            Triple("闪光模式", PtpConstants.PROP_FLASH_MODE, rawFmt),
+            Triple("外接闪光灯", PtpConstants.PROP_NIKON_EXT_SPEEDLIGHT_EXIST) { v ->
+                if (v == 0) "未接" else "已接（闪光灯）"
+            },
+            Triple("闪光灯状态", PtpConstants.PROP_NIKON_EXT_SPEEDLIGHT_STATUS, rawFmt),
+            Triple("闪光灯种类", PtpConstants.PROP_NIKON_EXT_SPEEDLIGHT_SORT, rawFmt),
+            Triple("闪光补偿（0xD124）", PtpConstants.PROP_NIKON_FLASH_COMPENSATION, rawFmt),
+            Triple("闪光灯工作模式", PtpConstants.PROP_NIKON_NEW_EXT_SPEEDLIGHT_MODE, rawFmt),
+            Triple("机身方向", PtpConstants.PROP_NIKON_ORIENTATION, rawFmt),
+            Triple("缓冲区可拍", PtpConstants.PROP_BURST_NUMBER) { v -> "$v 张" },
+            Triple("外接电源", PtpConstants.PROP_NIKON_EXTERNAL_DC_IN) { v ->
+                if (v == 0) "未接（用电池）" else "已接外接电源"
+            },
+            Triple("曝光显示状态", PtpConstants.PROP_NIKON_EXPOSURE_DISPLAY_STATUS, rawFmt),
+            Triple("曝光指示状态", PtpConstants.PROP_NIKON_EXPOSURE_INDICATE_STATUS, rawFmt),
+            Triple("信息屏错误", PtpConstants.PROP_NIKON_INFO_DISPLAY_ERROR, rawFmt),
+            Triple("USB 速度", PtpConstants.PROP_NIKON_USB_SPEED, rawFmt),
+            Triple("CCD 编号", PtpConstants.PROP_NIKON_CCD_NUMBER, rawFmt),
+            Triple("设备类型", PtpConstants.PROP_NIKON_PERCEIVED_DEVICE_TYPE, rawFmt)
+        )
+        val statList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        // 回调里要用这一行自己的值视图 —— 局部变量不能在自己的初始化式里引用自己，
+        // 所以走 rowRef 两步赋值（shooting/csm 菜单页也是这个写法）
+        var statRowRef: SheetValueRow? = null
+        val statRowView = sheetValueRow("读取机身状态", "${stats.size} 项 · 只读") { _ ->
+            if (!isConnected) { toast("请先连接相机"); return@sheetValueRow }
+            statRowRef?.value?.text = "读取中…"
+            thread {
+                val results = ArrayList<Pair<String, String>>()
+                for ((label, code, fmt) in stats) {
+                    if (!isConnected) break
+                    val text = try {
+                        // 0xD406 是版本信息，多半是字符串属性 —— 先按字符串读，读不到再按数值
+                        if (code == PtpConstants.PROP_NIKON_SESSION_INITIATOR_VERSION) {
+                            ptpConnection?.getDevicePropString(code)?.takeIf { it.isNotBlank() }
+                                ?: ptpConnection?.getDevicePropValue(code)?.let { fmt(it) }
+                                ?: "不支持"
+                        } else {
+                            val v = ptpConnection?.getDevicePropValue(code) ?: -999999
+                            if (v == -999999) "不支持" else fmt(v)
+                        }
+                    } catch (_: Exception) {
+                        "读取失败"
+                    }
+                    results.add(label to text)
+                }
+                runOnUiThread {
+                    statList.removeAllViews()
+                    for ((label, text) in results) {
+                        val (row, value) = sheetInfoRow(label, text)
+                        if (text == "不支持" || text == "读取失败") {
+                            value.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_disabled))
+                        }
+                        statList.addView(row)
+                    }
+                    val okCount = results.count { it.second != "不支持" && it.second != "读取失败" }
+                    statRowRef?.value?.text = "应答 $okCount/${stats.size} 项"
+                }
+            }
+        }
+        statRowRef = statRowView
+        statCard.addView(statRowView.view)
+        statCard.addView(statList)
+
         val card2 = sheetCard(page.content, "当前连接")
         val (makerRow, makerValue) = sheetInfoRow("厂商", deviceInfoCache?.manufacturer ?: "NIKON CORPORATION")
         // 值列很窄，长句会被裁掉（"机身需设为 MTP/P"），协议名只写短的，细节放下面的提示
@@ -7933,6 +8062,78 @@ class MainActivity : AppCompatActivity(), SheetHost {
                         log("重设个人设定失败：$hex")
                         btn.isEnabled = true
                         btn.text = "确认重设个人设定"
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 重设拍摄菜单（0xD015 ResetShootingMenu）—— 和「重设个人设定」同一套二次确认。
+     *
+     * 为什么不做成档位块：它是**一次性动作**（写 1 就把当前拍摄菜单库恢复出厂），
+     * 排成「否 / 是」两档等于把一颗"删除"按钮伪装成一个开关，误触没有挽回余地。
+     * 这里只留一颗红按钮，不点就什么都不发生。
+     */
+    private fun showShootingResetSheet() {
+        if (!isConnected) { toast("请先连接相机"); return }
+        val page = buildSheetPage("重设拍摄菜单", "当前拍摄菜单库恢复到出厂值")
+        val card = sheetCard(page.content, "会重设什么")
+
+        val bankRow = sheetInfoRow("当前拍摄菜单库", "读取中…")
+        card.addView(bankRow.first)
+        card.addView(sheetHint(
+            "影像品质 / 尺寸、白平衡、优化校准、降噪、动态 D-Lighting、多重曝光、" +
+                "间隔定时这些拍摄设置全部回到出厂默认值，\n" +
+                "你调过的一整库设置都会丢，机身不给撤销。\n" +
+                "照片、储存卡、个人设定菜单（那是另一条「重设个人设定」）都不受影响。"
+        ))
+
+        val sheetStatus = sheetStatusText("点下方红色按钮才会真正执行")
+        page.content.addView(sheetStatus)
+
+        val btn = sheetDangerButton("确认重设拍摄菜单")
+        page.content.addView(btn)
+        page.show()
+
+        thread {
+            val desc = ptpConnection?.readPropDesc(PtpConstants.PROP_NIKON_SHOOTING_BANK)
+            runOnUiThread {
+                val names = mapOf(0 to "A", 1 to "B", 2 to "C", 3 to "D")
+                val cur = desc?.currentValue?.toInt()
+                bankRow.second.text = if (cur != null) "${names[cur] ?: cur} 库" else "读取失败"
+            }
+        }
+
+        btn.setOnClickListener {
+            btn.isEnabled = false
+            btn.text = "正在重设…"
+            sheetStatus.text = "正在重设，请不要拔线…"
+            thread {
+                val type = ptpConnection?.readPropDesc(PtpConstants.PROP_NIKON_RESET_SHOOTING_MENU)?.dataType ?: 0
+                val sizes = if (type == 3 || type == 4) listOf(2, 1) else listOf(1, 2)
+                var ok = false
+                for (s in sizes) {
+                    ok = ptpConnection?.setDevicePropValue(
+                        PtpConstants.PROP_NIKON_RESET_SHOOTING_MENU, 1, size = s, logDesc = "", maxRetries = 1
+                    ) ?: false
+                    if (ok) break
+                }
+                val err = ptpConnection?.lastSetPropError ?: 0
+                runOnUiThread {
+                    if (ok) {
+                        sheetStatus.text = "已重设：当前拍摄菜单库恢复出厂值"
+                        toast("已重设拍摄菜单")
+                        log("重设拍摄菜单：已恢复到出厂值")
+                        // 菜单值全变了，重开一次让每一行重新读一遍
+                        page.dialog.dismiss()
+                        if (isConnected) showShootingMenuSheet()
+                    } else {
+                        val hex = if (err == 0) "机身没应答" else "0x${Integer.toHexString(err).uppercase()}"
+                        sheetStatus.text = "重设失败（$hex）"
+                        log("重设拍摄菜单失败：$hex")
+                        btn.isEnabled = true
+                        btn.text = "确认重设拍摄菜单"
                     }
                 }
             }

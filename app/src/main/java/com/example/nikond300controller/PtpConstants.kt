@@ -662,6 +662,117 @@ object PtpConstants {
      */
     const val OP_NIKON_CHANGE_AF_AREA = 0x9205
 
+    // =====================================================================
+    // 官方属性表里最后那批：菜单栏没有归属的「状态类」，和各组漏掉的子项
+    // =====================================================================
+    //
+    // 来源：`_sdk/d300_ptp_official.json`（197 项属性，带"菜单归属"列）。
+    // 这批码官方**只给名字，不给值域**，所以界面上只做两件事：读出来、按机身自述的
+    // 值域出档。档位名一律不硬编 —— 编错名字等于让用户照着错的名字改机身设置，
+    // 比老老实实显示「值 3」糟得多。
+
+    /** 标准 PTP 闪光灯模式（官方表 menu 列空：机身上没有独立菜单项，跟着闪光灯走） */
+    const val PROP_FLASH_MODE = 0x500C
+    /** BufferNumber —— 连拍缓冲里还能塞几张（只读状态） */
+    const val PROP_BURST_NUMBER = 0x5018
+
+    /** AE 包围的「模式」（只 AE / 只闪光 / AE+闪光）；张数与步长是 0xD0C3 / 0xD0C1 */
+    const val PROP_NIKON_AE_BRACKET_PATTERN = 0xD0C2
+    /** 白平衡包围的「模式」 */
+    const val PROP_NIKON_WB_BRACKET_PATTERN = 0xD0C5
+
+    /** 是否接着外接电源（EH-5 一类）—— 拍长曝光/间隔定时前值得看一眼 */
+    const val PROP_NIKON_EXTERNAL_DC_IN = 0xD101
+    /** USB 连接速度（机身自述，只读） */
+    const val PROP_NIKON_USB_SPEED = 0xD10C
+    /** 传感器（CCD）编号，只读，排错时能区分机身 */
+    const val PROP_NIKON_CCD_NUMBER = 0xD10D
+    /** 机身方向（横拍 / 竖拍），只读 */
+    const val PROP_NIKON_ORIENTATION = 0xD10E
+    /** 有没有插外接闪光灯（SB-800/900 一类） */
+    const val PROP_NIKON_EXT_SPEEDLIGHT_EXIST = 0xD120
+    /** 外接闪光灯当前状态（充电中 / 就绪 …，编码未公开） */
+    const val PROP_NIKON_EXT_SPEEDLIGHT_STATUS = 0xD121
+    /** 外接闪光灯种类（机身只给编号，型号名不在协议里） */
+    const val PROP_NIKON_EXT_SPEEDLIGHT_SORT = 0xD122
+    /** 闪光补偿（与曝光补偿 0x5010 分开的一条） */
+    const val PROP_NIKON_FLASH_COMPENSATION = 0xD124
+    /** 新式外接闪光灯的工作模式 */
+    const val PROP_NIKON_NEW_EXT_SPEEDLIGHT_MODE = 0xD125
+    /** 曝光显示状态（只读） */
+    const val PROP_NIKON_EXPOSURE_DISPLAY_STATUS = 0xD1B0
+    /** 曝光指示状态（只读；和 0xD1B3「曝光指示点亮」是两条不同属性，别混） */
+    const val PROP_NIKON_EXPOSURE_INDICATE_STATUS = 0xD1B1
+    /** 信息显示屏的错误状态（只读）—— 机身上报错时这里能看出是哪类 */
+    const val PROP_NIKON_INFO_DISPLAY_ERROR = 0xD1B2
+    /** 会话发起方版本信息（多半是字符串属性，读不到就当不支持） */
+    const val PROP_NIKON_SESSION_INITIATOR_VERSION = 0xD406
+    /** 机身自述的设备类型（PTP 扩展，只读） */
+    const val PROP_NIKON_PERCEIVED_DEVICE_TYPE = 0xD407
+
+    // ---- e3 内置闪光灯「指令模式 / 重复闪光」的子项（官方 menu=e3，13 项）----
+    // 这 13 项只有把 e3 切到「重复闪光」或「指令模式」之后才有意义，
+    // 值域全靠机身描述符，这里不编档位名。
+    const val CSM_E3_RPT_INTENSE = 0xD1D0      // 重复闪光 · 闪光量
+    const val CSM_E3_RPT_COUNT = 0xD1D1        // 重复闪光 · 次数
+    const val CSM_E3_RPT_INTERVAL = 0xD1D2     // 重复闪光 · 频率（Hz）
+    const val CSM_E3_CMD_CHANNEL = 0xD1D3      // 指令模式 · 通道
+    const val CSM_E3_CMD_SELF_MODE = 0xD1D4    // 指令模式 · 内置灯 · 模式
+    const val CSM_E3_CMD_SELF_COMP = 0xD1D5    // 指令模式 · 内置灯 · 补偿
+    const val CSM_E3_CMD_SELF_INTENSE = 0xD1D6 // 指令模式 · 内置灯 · 闪光量
+    const val CSM_E3_CMD_GROUP_A_MODE = 0xD1D7    // 指令模式 · A 组 · 模式
+    const val CSM_E3_CMD_GROUP_A_COMP = 0xD1D8    // 指令模式 · A 组 · 补偿
+    const val CSM_E3_CMD_GROUP_A_INTENSE = 0xD1D9 // 指令模式 · A 组 · 闪光量
+    const val CSM_E3_CMD_GROUP_B_MODE = 0xD1DA    // 指令模式 · B 组 · 模式
+    const val CSM_E3_CMD_GROUP_B_COMP = 0xD1DB    // 指令模式 · B 组 · 补偿
+    const val CSM_E3_CMD_GROUP_B_INTENSE = 0xD1DC // 指令模式 · B 组 · 闪光量
+
+    // ---- f 组里之前漏掉的子项 ----
+    /** f1 的第二个键位：**播放模式**下中央按钮干什么（0xD080 是拍摄模式下的） */
+    const val CSM_F1_CENTER_BUTTON_PB = 0xD081
+    /** f1 播放变焦倍率（官方名 AfZoomRatio，实际是播放时按中央按钮的放大档） */
+    const val CSM_F1_AF_ZOOM_RATIO = 0xD08B
+    /** f4「指定 FUNC. 按钮」的第二个键位（FUNC. + 拨盘） */
+    const val CSM_F4_ASSIGN_FUNC_BUTTON2 = 0xD08C
+    /**
+     * f6「设定 AE-L/AF-L 按钮」的第二个键位。
+     * ⚠️ 官方给的名字是 `CropModeButton`（裁切模式按钮），和 f6 的语义对不上 ——
+     * 名字照抄在界面上，档位不翻译，让用户自己看着机身值判断。
+     */
+    const val CSM_F6_AELAFL_BUTTON2 = 0xD18B
+    /** f7 自定义指令拨盘 · 反转方向 */
+    const val CSM_F7_DIAL_REVERSE = 0xD086
+    /** f7 自定义指令拨盘 · 更改主/副拨盘 */
+    const val CSM_F7_DIAL_F_SETTING = 0xD087
+    /** f7 自定义指令拨盘 · 在播放/菜单中激活拨盘 */
+    const val CSM_F7_DIAL_ON_PLAYBACK = 0xD088
+
+    // ---- 非 CPU 镜头：焦距与光圈的手动登记（官方 menu=Custom）----
+    //
+    // 注意和 0xD093 [PROP_NIKON_MANUAL_LENS_NO] 分清：0xD093 是"当前登记的镜头编号"，
+    // 这两个是**登记进去的具体数值**（焦距 mm、光圈 F 值）。
+    const val PROP_NIKON_FMM_MANUAL = 0xD02E
+    const val PROP_NIKON_F0_MANUAL = 0xD02F
+
+    // ---- 白平衡预设 d-1…d-5：注释（文字）与数据（数值）----
+    const val PROP_NIKON_WB_PRESET_COMMENT0 = 0xD020
+    const val PROP_NIKON_WB_PRESET_COMMENT1 = 0xD021
+    const val PROP_NIKON_WB_PRESET_COMMENT2 = 0xD022
+    const val PROP_NIKON_WB_PRESET_COMMENT3 = 0xD023
+    const val PROP_NIKON_WB_PRESET_COMMENT4 = 0xD024
+    const val PROP_NIKON_WB_PRESET_DATA0 = 0xD025
+    const val PROP_NIKON_WB_PRESET_DATA1 = 0xD026
+    const val PROP_NIKON_WB_PRESET_DATA2 = 0xD027
+    const val PROP_NIKON_WB_PRESET_DATA3 = 0xD028
+    const val PROP_NIKON_WB_PRESET_DATA4 = 0xD029
+
+    /**
+     * 重设拍摄菜单（官方 Shooting 页 ResetShootingMenu）。
+     * **一次性动作**：写 1 = 当前拍摄菜单库立刻恢复出厂，机身不再确认、没有撤销。
+     * 界面上必须走二次确认页（和「重设个人设定」同一套），不能排成「否/是」档位。
+     */
+    const val PROP_NIKON_RESET_SHOOTING_MENU = 0xD015
+
     // PTP 对象格式码（ObjectFormatCode，用于判断能不能直接解码显示）
     const val OBJ_FORMAT_JPEG = 0x3801      // EXIF/JPEG，Android 可直接解码
     const val OBJ_FORMAT_TIFF_EP = 0x3802   // TIFF/EP —— D300 的 NEF 会报这个

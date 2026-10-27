@@ -173,6 +173,22 @@ object CsmMenu {
             // e3 切到「手动」后调的就是这一项（官方 0xD16D），档位写法交给机身值域
             CsmItem(PtpConstants.CSM_E3_FLASH_MANUAL, "e3·手动", "手动闪光量",
                 emptyMap()),
+            // ---- e3 的深层子项（官方 menu 列全标 e3，13 项）----
+            // 只有把 e3 切到「重复闪光」或「指令模式」之后这些才有意义；
+            // 官方只给了名字没给值域，档位名一个都不编，全靠机身描述符。
+            CsmItem(PtpConstants.CSM_E3_RPT_INTENSE, "e3r1", "重复闪光 · 闪光量"),
+            CsmItem(PtpConstants.CSM_E3_RPT_COUNT, "e3r2", "重复闪光 · 次数"),
+            CsmItem(PtpConstants.CSM_E3_RPT_INTERVAL, "e3r3", "重复闪光 · 频率（Hz）"),
+            CsmItem(PtpConstants.CSM_E3_CMD_CHANNEL, "e3c1", "指令模式 · 通道"),
+            CsmItem(PtpConstants.CSM_E3_CMD_SELF_MODE, "e3c2", "指令模式 · 内置灯 · 模式"),
+            CsmItem(PtpConstants.CSM_E3_CMD_SELF_COMP, "e3c3", "指令模式 · 内置灯 · 补偿"),
+            CsmItem(PtpConstants.CSM_E3_CMD_SELF_INTENSE, "e3c4", "指令模式 · 内置灯 · 闪光量"),
+            CsmItem(PtpConstants.CSM_E3_CMD_GROUP_A_MODE, "e3c5", "指令模式 · A 组 · 模式"),
+            CsmItem(PtpConstants.CSM_E3_CMD_GROUP_A_COMP, "e3c6", "指令模式 · A 组 · 补偿"),
+            CsmItem(PtpConstants.CSM_E3_CMD_GROUP_A_INTENSE, "e3c7", "指令模式 · A 组 · 闪光量"),
+            CsmItem(PtpConstants.CSM_E3_CMD_GROUP_B_MODE, "e3c8", "指令模式 · B 组 · 模式"),
+            CsmItem(PtpConstants.CSM_E3_CMD_GROUP_B_COMP, "e3c9", "指令模式 · B 组 · 补偿"),
+            CsmItem(PtpConstants.CSM_E3_CMD_GROUP_B_INTENSE, "e3c10", "指令模式 · B 组 · 闪光量"),
             CsmItem(PtpConstants.CSM_E4_MODELING_FLASH, "e4", "模拟闪光",
                 mapOf(0 to "开启", 1 to "关闭")),
             CsmItem(PtpConstants.CSM_E5_BRACKET_SET, "e5", "自动包围曝光设定",
@@ -193,13 +209,26 @@ object CsmMenu {
             CsmItem(0xD0C3, "e5c", "曝光包围张数",
                 mapOf(0 to "2 张", 1 to "3 张", 2 to "5 张", 3 to "7 张", 4 to "9 张")),
             CsmItem(0xD0C4, "e5d", "白平衡包围步长",
-                mapOf(0 to "1 档", 1 to "2 档", 2 to "3 档"))
+                mapOf(0 to "1 档", 1 to "2 档", 2 to "3 档")),
+            // 两个「模式」属性（官方 menu 列为空，但归属就是 BKT 按钮那套）：
+            // AE 包围是「只曝光 / 只闪光 / 曝光+闪光」，WB 包围是拍几张不同色温。
+            // 编码顺序未核，不翻译。
+            CsmItem(PtpConstants.PROP_NIKON_AE_BRACKET_PATTERN, "e5e", "AE 包围模式",
+                emptyMap(), expectedCount = 3),
+            CsmItem(PtpConstants.PROP_NIKON_WB_BRACKET_PATTERN, "e5f", "白平衡包围模式",
+                emptyMap(), expectedCount = 3)
         )),
 
         // ---------------------------------------------------------------- f 控制
         CsmGroup("f · 控制", listOf(
             CsmItem(PtpConstants.CSM_F1_CENTER_BUTTON, "f1", "多重选择器中央按钮",
                 mapOf(0 to "选择中央对焦点", 1 to "高亮显示当前对焦点", 2 to "不使用")),
+            // f1 在机身上是两个键位：拍摄模式 / 播放模式。0xD080 只管拍摄模式，
+            // 播放模式那一条是 0xD081，早先漏掉了（官方 menu 列明确标 f1）。
+            CsmItem(PtpConstants.CSM_F1_CENTER_BUTTON_PB, "f1·播放", "中央按钮（播放模式）",
+                emptyMap()),
+            CsmItem(PtpConstants.CSM_F1_AF_ZOOM_RATIO, "f1·缩放", "播放变焦倍率",
+                emptyMap()),
             CsmItem(PtpConstants.CSM_F2_MULTI_SELECTOR, "f2", "多重选择器",
                 mapOf(0 to "重设测光关闭延迟", 1 to "不回应")),
             CsmItem(PtpConstants.CSM_F3_PHOTO_INFO, "f3", "照片信息 / 播放",
@@ -209,16 +238,32 @@ object CsmMenu {
                     4 to "AE 锁定（释放时重设）", 5 to "AE 锁定（保持）", 6 to "仅锁定自动对焦",
                     7 to "闪光灯关闭", 8 to "曝光包围连续拍摄", 9 to "矩阵测光",
                     10 to "中央重点测光", 11 to "点测光", 12 to "无")),
-            // f5 官方 menu=f5 → 0xD189 PreviewButton（可选第二键位 0xD18A）
+            // f4 的第二个键位（FUNC. + 拨盘），官方名 FunctionButton2，menu 列 = f4
+            CsmItem(PtpConstants.CSM_F4_ASSIGN_FUNC_BUTTON2, "f4·2", "指定 FUNC. 按钮 + 拨盘",
+                emptyMap()),
             CsmItem(PtpConstants.CSM_F5_PREVIEW_BUTTON, "f5", "指定预览按钮",
                 mapOf(0 to "预览", 1 to "FV 锁定", 2 to "AE/AF 锁定", 3 to "仅锁定自动曝光",
                     4 to "AE 锁定（释放时重设）", 5 to "AE 锁定（保持）", 6 to "仅锁定自动对焦",
                     7 to "闪光灯关闭", 8 to "曝光包围连续拍摄", 9 to "矩阵测光",
-                    10 to "中央重点测光", 11 to "点测光", 12 to "无")),            CsmItem(PtpConstants.CSM_F6_AEL_AFL_BUTTON, "f6", "设定 AE-L/AF-L 按钮",
+                    10 to "中央重点测光", 11 to "点测光", 12 to "无")),
+            CsmItem(PtpConstants.CSM_F5_PREVIEW_BUTTON2, "f5·2", "指定预览按钮 + 拨盘",
+                emptyMap()),
+            CsmItem(PtpConstants.CSM_F6_AEL_AFL_BUTTON, "f6", "设定 AE-L/AF-L 按钮",
                 mapOf(0 to "AE/AF 锁定", 1 to "仅锁定自动曝光", 2 to "AE 锁定（释放时重设）",
                     3 to "AE 锁定（保持）", 4 to "仅锁定自动对焦", 5 to "AF-ON")),
+            // f6 的第二个键位。官方名是 CropModeButton（裁切模式按钮），跟 f6 的语义对不上，
+            // 名字照抄在界面上、档位不翻译 —— 免得把"可能错的中文名"当事实。
+            CsmItem(PtpConstants.CSM_F6_AELAFL_BUTTON2, "f6·2", "AE-L/AF-L 按钮 + 拨盘（官方名 CropModeButton）",
+                emptyMap()),
             CsmItem(PtpConstants.CSM_F7_CUSTOM_DIALS, "f7", "自定义指令拨盘",
                 mapOf(0 to "反转方向 · 否", 1 to "反转方向 · 是")),
+            // f7 的三个子项（官方 menu 列全标 f7）：反转方向 / 更改主副拨盘 / 播放菜单中激活
+            CsmItem(PtpConstants.CSM_F7_DIAL_REVERSE, "f7·1", "反转方向",
+                emptyMap()),
+            CsmItem(PtpConstants.CSM_F7_DIAL_F_SETTING, "f7·2", "更改主/副拨盘",
+                emptyMap()),
+            CsmItem(PtpConstants.CSM_F7_DIAL_ON_PLAYBACK, "f7·3", "在播放/菜单中激活拨盘",
+                emptyMap()),
             // f8 官方 menu=f8 → 0xD089 UniversalMode
             CsmItem(PtpConstants.CSM_F8_DIAL_RELEASE, "f8", "释放按钮以使用拨盘",
                 mapOf(0 to "否", 1 to "是")),

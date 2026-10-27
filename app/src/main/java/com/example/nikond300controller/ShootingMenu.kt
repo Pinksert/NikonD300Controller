@@ -102,6 +102,21 @@ object ShootingMenu {
             Item(PtpConstants.PROP_NIKON_WB_TUNE_PRESET4, "预设 d-5")
         ),
 
+        // ---- 白平衡预设 d-1…d-5 的「数据」----
+        //
+        // 机身上预设白平衡的流程是：先「测量」得到一组值（0xD025–0xD029，数值），
+        // 再给它起个名字（0xD020–0xD024，字符串，见页面下方「预设注释」入口）。
+        // 数值本身是机身内部的色温/增益打包，官方没公开编码 —— 只显示、不翻译，
+        // 也别指望在这里"手输一个色温"能生效。
+        "白平衡预设数据" to listOf(
+            Item(PtpConstants.PROP_NIKON_WB_PRESET_DATA0, "预设 d-1 数据",
+                hint = "机身测量出来的白平衡值，编码未公开；显示原始值"),
+            Item(PtpConstants.PROP_NIKON_WB_PRESET_DATA1, "预设 d-2 数据"),
+            Item(PtpConstants.PROP_NIKON_WB_PRESET_DATA2, "预设 d-3 数据"),
+            Item(PtpConstants.PROP_NIKON_WB_PRESET_DATA3, "预设 d-4 数据"),
+            Item(PtpConstants.PROP_NIKON_WB_PRESET_DATA4, "预设 d-5 数据")
+        ),
+
         "自动对焦" to listOf(
             // AF 区域模式：官方码是标准 PTP 的 0x501C（不是那个已证伪的 0xD08E）。
             // 它默认报只读，写入要先切主机模式 —— hostMode = true 就是让 App 自己切。

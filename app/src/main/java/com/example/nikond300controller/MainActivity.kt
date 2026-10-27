@@ -4455,6 +4455,17 @@ class MainActivity : AppCompatActivity(), SheetHost {
                     )
                 }
 
+                // 会话发起者版本（0xD406）：界面「机身状态」里不列这一行（对拍照没用），
+                // 但排错时要看是谁占了会话，所以留在诊断包里。
+                lines.append(
+                    "0xD406 会话发起者：" +
+                        (try {
+                            ptpConnection?.getDevicePropString(PtpConstants.PROP_NIKON_SESSION_INITIATOR_VERSION)
+                        } catch (_: Exception) {
+                            null
+                        } ?: "读取失败") + "\n"
+                )
+
                 // ---- 全厂商属性快照（0x90CA 清单 + 逐条描述符）----
                 //
                 // 官方属性表（197 项）里有一批**只给名字、不给值域**的码（闪光灯状态、
@@ -7589,8 +7600,8 @@ class MainActivity : AppCompatActivity(), SheetHost {
             },
             BodyStatusItem("外接闪光灯", PtpConstants.PROP_NIKON_EXT_SPEEDLIGHT_EXIST) { v ->
                 when (v) {
-                    0 -> "未接"
-                    1 -> "已接（闪光灯）"
+                    0 -> "未连接"
+                    1 -> "已连接"
                     else -> "值 $v"
                 }
             },
@@ -7637,8 +7648,8 @@ class MainActivity : AppCompatActivity(), SheetHost {
             BodyStatusItem("缓冲区可拍", PtpConstants.PROP_BURST_NUMBER) { v -> "$v 张" },
             BodyStatusItem("外接电源", PtpConstants.PROP_NIKON_EXTERNAL_DC_IN) { v ->
                 when (v) {
-                    0 -> "未接（用电池）"
-                    1 -> "已接外接电源"
+                    0 -> "未连接（用电池）"
+                    1 -> "已连接"
                     else -> "值 $v"
                 }
             },
@@ -7676,23 +7687,29 @@ class MainActivity : AppCompatActivity(), SheetHost {
                     1 -> "数码相机"
                     else -> "值 $v"
                 }
-            },
-            BodyStatusItem("会话发起者", PtpConstants.PROP_NIKON_SESSION_INITIATOR_VERSION, stringProp = true)
+            }
         )
     }
 
     /**
-     * 机身状态（只读）二级页：进页面就把 15 条状态读一遍，一条一条填。
+     * 机身状态（只读）二级页：进页面就把全部状态读一遍，一条一条填。
      *
-     * 这些码官方只给名字、不给值域，也可能这台机身根本不应答 —— 读不到就写「不支持」，
-     * 不猜、不隐藏。行先全部铺出来再逐条填值，避免读的过程中页面一路往下长。
+     * 读不到就写「不支持」，不猜、不隐藏。行先全部铺出来再逐条填值，避免读的过程中页面一路往下长；
+     * 「应答 N/M 项」放在大标题正下方（页面副标题位），不塞进卡片里。
      */
     private fun showBodyStatusSheet() {
         if (!isConnected) { toast("请先连接相机"); return }
-        val page = buildSheetPage("机身状态", "${bodyStatusItems.size} 项 · 全部只读")
+        val page = buildSheetPage("机身状态")
+        // 大标题下面那行：读取时显示进度，读完换成应答统计
+        val headline = TextView(this).apply {
+            text = "正在读取…"
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_secondary))
+            textSize = 12f
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, dpx(10))
+        }
+        page.content.addView(headline)
         val card = sheetCard(page.content, "机身自报状态")
-        val statusText = sheetStatusText("正在读取…")
-        card.addView(statusText)
         val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val valueViews = ArrayList<TextView>()
         for (item in bodyStatusItems) {
@@ -7704,7 +7721,9 @@ class MainActivity : AppCompatActivity(), SheetHost {
         card.addView(sheetHint(
             "这些是机身自己报的状态，改不了。每个数值的中文含义都取自官方规格书的值表，" +
                 "表外的值才显示原始码。\n" +
-                "读不到写「不支持」，说明这台机身不应答那个码。"
+                "CCD 编号 = 传感器（CCD）的序列号，12 位批号 + 8 位序号，空格补齐，售后登记时用来认机身。\n" +
+                "信息屏报错 = 机身 INFO 屏上有没有错误提示，触发原因有：释放序列错误、校验和错误、" +
+                "卡硬件错误、主控启动异常 —— 原因消除后会自动消失。"
         ))
         page.show()
 
@@ -7717,7 +7736,7 @@ class MainActivity : AppCompatActivity(), SheetHost {
                     if (!isConnected) break
                     val text = try {
                         if (item.stringProp) {
-                            // 字符串属性（CCD 编号 / 会话发起者版本）：按数值读永远拿不到值
+                            // 字符串属性（CCD 编号）：按数值读永远拿不到值
                             ptpConnection?.getDevicePropString(item.code)?.trim()?.takeIf { it.isNotEmpty() }
                                 ?: "不支持"
                         } else {
@@ -7734,13 +7753,13 @@ class MainActivity : AppCompatActivity(), SheetHost {
                         if (text == "不支持" || text == "读取失败") {
                             value.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_disabled))
                         }
-                        statusText.text = "已读 ${idx + 1}/${bodyStatusItems.size} 项…"
+                        headline.text = "正在读取 ${idx + 1}/${bodyStatusItems.size} 项…"
                     }
                 }
             } finally {
                 isPollingPaused = wasPaused
                 runOnUiThread {
-                    statusText.text = "应答 $answered/${bodyStatusItems.size} 项"
+                    headline.text = "全部只读 · 应答 $answered/${bodyStatusItems.size} 项"
                 }
             }
         }
@@ -7780,12 +7799,12 @@ class MainActivity : AppCompatActivity(), SheetHost {
         // 镜头规格（0xD0E3–0xD0E6）：规格书只给了码和名字，**没写单位**。
         // 按尼康惯例焦距是 mm×100、光圈是 f×100，折算后明显不合常理就退回原始值 ——
         // 宁可不折算，也不把 2.4mm 那种数字当成事实证明给用户看。
-        val (lensSpecRow, lensSpecValue) = sheetInfoRow("当前镜头规格", "读取中…")
+        val (lensSpecRow, lensSpecValue) = sheetInfoRow("镜头规格", "读取中…")
         card.addView(lensSpecRow)
 
         // 释放模式（0x5013）：自拍 / Mup / 取景 用 App 改完之后，这一行能确认机身到底停在哪一挡。
         // 反光板预升改走机内设定之后，它就是"有没有恢复成功"的照妖镜。
-        val (scRow, scValue) = sheetInfoRow("当前释放模式", "读取中…")
+        val (scRow, scValue) = sheetInfoRow("释放模式", "读取中…")
         card.addView(scRow)
 
         // 机身状态：15 条只读状态量单独一页（一次要问机身十几趟，不该拖慢这一页）
